@@ -1,0 +1,19 @@
+[package]
+name = "kimios"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "kimios"
+path = "src/main.rs"
+
+[dependencies]
+spin = { version = "0.12.3", default-features = false, features = ["mutex", "spin_mutex"] }
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+opt-level = 2
+lto = true

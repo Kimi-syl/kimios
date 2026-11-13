@@ -1,0 +1,10 @@
+[build]
+target = "aarch64-unknown-none"
+
+[target.aarch64-unknown-none]
+rustflags = [
+    "-C", "linker=rust-lld",
+    "-C", "linker-flavor=ld.lld",
+    "-C", "link-arg=-Tlinker.ld",
+    "-C", "relocation-model=static",
+]
