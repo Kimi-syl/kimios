@@ -8,6 +8,7 @@ name = "kimios"
 path = "src/main.rs"
 
 [dependencies]
+hermit-dtb = "0.1.1"
 spin = { version = "0.12.3", default-features = false, features = ["mutex", "spin_mutex"] }
 
 [profile.dev]

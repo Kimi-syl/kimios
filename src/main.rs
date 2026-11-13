@@ -2,8 +2,10 @@
 #![no_main]
 
 mod allocator;
+mod dtb;
 mod exceptions;
 mod mmu;
+mod pfa;
 mod uart;
 
 use core::alloc::Layout;
@@ -63,8 +65,60 @@ pub extern "C" fn kmain(dtb: usize) -> ! {
         allocator::capacity()
     );
 
+    // Phase 5: device tree + physical frame allocator.
     println!();
-    println!("Phases 1-4 complete. Halting.");
+    println!("Phase 5: device tree and physical memory");
+
+    let boot = dtb::probe(dtb);
+    if boot.memory_from_dtb {
+        println!(
+            "DTB         : {:#018x} ({} bytes, source: {})",
+            boot.dtb_addr,
+            boot.dtb_size,
+            if boot.from_x0 { "x0" } else { "RAM scan" }
+        );
+    } else {
+        println!("DTB         : not found (using fallback memory map)");
+    }
+    println!(
+        "/memory     : {:#018x}..{:#018x} ({} MiB)",
+        boot.memory.base,
+        boot.memory.base + boot.memory.size,
+        boot.memory.size / (1024 * 1024)
+    );
+
+    let dtb_range = if boot.dtb_addr != 0 {
+        Some((boot.dtb_addr, boot.dtb_size as u64))
+    } else {
+        None
+    };
+    pfa::init(boot.memory, dtb_range);
+
+    let (free_before, total) = pfa::stats();
+    println!(
+        "PFA         : {} frames ({} MiB), {} free",
+        total,
+        total * pfa::PAGE_SIZE / (1024 * 1024),
+        free_before
+    );
+
+    let f1 = pfa::alloc_frame().expect("no free frames");
+    let f2 = pfa::alloc_frame().expect("no free frames");
+    let f3 = pfa::alloc_frame().expect("no free frames");
+    println!("allocated   : {:#x}, {:#x}, {:#x}", f1, f2, f3);
+
+    assert!(pfa::free_frame(f2));
+    let reused = pfa::alloc_frame().expect("no free frames");
+    println!(
+        "freed       : {:#x}; reallocated {:#x} (reused = {})",
+        f2,
+        reused,
+        reused == f2
+    );
+    println!("PFA free    : {} frames", pfa::stats().0);
+
+    println!();
+    println!("Phases 1-5 complete. Halting.");
 
     // No UART input loop yet; exit QEMU cleanly via semihosting.
     semihosting_exit(0x20026, 0);
