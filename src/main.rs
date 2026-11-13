@@ -8,15 +8,18 @@ mod gic;
 mod irq;
 mod mmu;
 mod pfa;
+mod sched;
 mod timer;
 mod uart;
 
 use core::alloc::Layout;
 use core::arch::{asm, global_asm};
 use core::panic::PanicInfo;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 global_asm!(include_str!("boot.s"));
 global_asm!(include_str!("vectors.s"));
+global_asm!(include_str!("switch.s"));
 
 /// Entry point called from `_start` in boot.s.
 ///
@@ -143,10 +146,65 @@ pub extern "C" fn kmain(dtb: usize) -> ! {
 
     println!();
     println!("Received {} timer interrupts.", irq::ticks());
-    println!("Phases 1-6 complete. Halting.");
+
+    // Phases 7-8: kernel threads + round-robin scheduling.
+    println!();
+    println!("Phases 7-8: kernel threads and round-robin scheduler");
+
+    sched::init();
+    sched::spawn(thread_a, 0).expect("no free thread slot");
+    sched::spawn(thread_b, 0).expect("no free thread slot");
+    sched::spawn(thread_once, 0).expect("no free thread slot");
+    println!("Spawned A, B and one-shot C (64 KiB stacks)");
+    println!("Quantum: 100 ms; running for 30 ticks...");
+
+    let target = irq::ticks() + 30;
+    timer::start_periodic(timer::frequency() / 10);
+    gic::enable_irqs();
+
+    while irq::ticks() < target {
+        unsafe { asm!("wfe") };
+    }
+
+    gic::disable_irqs();
+    timer::stop();
+
+    println!();
+    println!(
+        "Scheduler stats: A={} B={} ticks={}",
+        A_RUNS.load(Ordering::Acquire),
+        B_RUNS.load(Ordering::Acquire),
+        irq::ticks()
+    );
+    println!("Phases 1-8 complete. Halting.");
 
     // No UART input loop yet; exit QEMU cleanly via semihosting.
     semihosting_exit(0x20026, 0);
+}
+
+static A_RUNS: AtomicU64 = AtomicU64::new(0);
+static B_RUNS: AtomicU64 = AtomicU64::new(0);
+
+extern "C" fn thread_a(_argument: u64) {
+    loop {
+        A_RUNS.fetch_add(1, Ordering::Relaxed);
+        print!("A");
+        // Sleep until the timer IRQ; the scheduler decides who runs next.
+        unsafe { asm!("wfe") };
+    }
+}
+
+extern "C" fn thread_b(_argument: u64) {
+    loop {
+        B_RUNS.fetch_add(1, Ordering::Relaxed);
+        print!("B");
+        unsafe { asm!("wfe") };
+    }
+}
+
+extern "C" fn thread_once(_argument: u64) {
+    println!();
+    println!("[C] one-shot thread ran; returning to scheduler");
 }
 
 /// SYS_EXIT_EXTENDED (0x20): x0 = op, x1 = pointer to [reason, status].

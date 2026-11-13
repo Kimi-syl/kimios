@@ -24,6 +24,10 @@ No bootloader is used: QEMU loads the ELF directly with `-kernel`.
   CPU interface (`ICC_SRE_EL1`, `ICC_PMR_EL1`, `ICC_IGRPEN1_EL1`), EL1
   physical timer on PPI 30, separate synchronous/IRQ vector paths, IRQ-safe
   console output.
+- **Phases 7-8 - Threads + scheduler:** callee-saved context switch
+  (`x19-x30`, SP, DAIF), 64 KiB kernel thread stacks from the bump heap,
+  thread trampoline, `thread_exit`, and a preemptive round-robin scheduler
+  driven by the timer IRQ.
 
 ## Layout
 
@@ -43,6 +47,8 @@ src/pfa.rs           bitmap physical frame allocator
 src/gic.rs           GICv3 distributor/redistributor + ICC_* CPU interface
 src/timer.rs         ARM generic timer (CNTP) periodic ticks
 src/irq.rs           IRQ acknowledge/EOI + timer tick handler
+src/sched.rs         thread struct, spawn, context switch, round-robin
+src/switch.s         context_switch + thread_entry trampoline
 virt.dtb             trimmed QEMU virt DTB (regenerate if -m/-smp changes)
 ```
 
@@ -94,7 +100,15 @@ Tick! (1)
 Tick! (5)
 
 Received 5 timer interrupts.
-Phases 1-6 complete. Halting.
+
+Phases 7-8: kernel threads and round-robin scheduler
+Spawned A, B and one-shot C (64 KiB stacks)
+Quantum: 100 ms; running for 30 ticks...
+AB
+[C] one-shot thread ran; returning to scheduler
+ABABABABABABABABAB
+Scheduler stats: A=10 B=10 ticks=35
+Phases 1-8 complete. Halting.
 ```
 
 The kernel exits QEMU cleanly (`status 0`) through ARM semihosting
