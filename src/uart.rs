@@ -104,8 +104,22 @@ pub fn init() {
 
 #[doc(hidden)]
 pub fn _print(args: fmt::Arguments) {
+    use core::arch::asm;
     use fmt::Write;
+
+    // IRQ-safe console: a timer IRQ must not deadlock on the UART mutex
+    // while the interrupted context holds it.
+    let daif: u64;
+    unsafe {
+        asm!("mrs {}, daif", out(reg) daif, options(nomem, nostack));
+        asm!("msr daifset, #2", options(nomem, nostack));
+    }
+
     UART0.lock().write_fmt(args).unwrap();
+
+    unsafe {
+        asm!("msr daif, {}", in(reg) daif, options(nomem, nostack));
+    }
 }
 
 /// Write formatted text to the serial console.

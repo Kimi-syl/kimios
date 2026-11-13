@@ -20,6 +20,10 @@ No bootloader is used: QEMU loads the ELF directly with `-kernel`.
 - **Phase 5 - DTB + PFA:** captures `x0`, validates/scans for the
   `0xd00dfeed` DTB, parses `/memory` with `hermit-dtb`, and manages 4 KiB
   physical frames with a bitmap allocator (alloc/free/stats).
+- **Phase 6 - Interrupts:** GICv3 distributor/redistributor, system-register
+  CPU interface (`ICC_SRE_EL1`, `ICC_PMR_EL1`, `ICC_IGRPEN1_EL1`), EL1
+  physical timer on PPI 30, separate synchronous/IRQ vector paths, IRQ-safe
+  console output.
 
 ## Layout
 
@@ -36,6 +40,9 @@ src/mmu.rs           page tables, MAIR/TCR/TTBR/SCTLR setup
 src/allocator.rs     bump allocator
 src/dtb.rs           DTB discovery + /memory parsing
 src/pfa.rs           bitmap physical frame allocator
+src/gic.rs           GICv3 distributor/redistributor + ICC_* CPU interface
+src/timer.rs         ARM generic timer (CNTP) periodic ticks
+src/irq.rs           IRQ acknowledge/EOI + timer tick handler
 virt.dtb             trimmed QEMU virt DTB (regenerate if -m/-smp changes)
 ```
 
@@ -53,11 +60,12 @@ sudo apt install qemu-system-arm
 cargo build
 
 qemu-system-aarch64 \
-  -machine virt \
+  -machine virt,gic-version=3 \
   -cpu cortex-a53 \
   -m 128M \
   -nographic \
   -semihosting-config enable=on,target=native \
+  -machine virt,gic-version=3 \
   -dtb virt.dtb \
   -kernel target/aarch64-unknown-none/debug/kimios
 ```
@@ -77,7 +85,16 @@ allocated   : 0x401ad000, 0x401ae000, 0x401af000
 freed       : 0x401ae000; reallocated 0x401ae000 (reused = true)
 PFA free    : 32336 frames
 
-Phases 1-5 complete. Halting.
+Phase 6: GICv3 and timer interrupts
+CNTFRQ_EL0  : 62500000 Hz
+Timer       : PPI 30, 31250000 ticks per tick (500 ms)
+Unmasking IRQs...
+Tick! (1)
+...
+Tick! (5)
+
+Received 5 timer interrupts.
+Phases 1-6 complete. Halting.
 ```
 
 The kernel exits QEMU cleanly (`status 0`) through ARM semihosting
@@ -102,5 +119,10 @@ proper shutdown driver exists.
   (the dump is padded to 1 MiB; only the first 8 KiB are needed).
 - The PFA reserves every frame below `__kernel_end`, covering the DTB, boot
   area, kernel image, bump heap, boot stack and the PFA bitmap itself.
+- QEMU virt's generic timer runs at 62.5 MHz (`CNTFRQ_EL0`); the timer PPI is
+  INTID 30. GICv3 needs `-machine virt,gic-version=3`.
+- `ICC_IAR1_EL1` acknowledges a Group 1 interrupt, `ICC_EOIR1_EL1` signals
+  end-of-interrupt; the timer must be re-armed before EOI because PPI 30 is
+  level-sensitive.
 - `MAIR_EL1` Attr0 = Normal write-back, Attr1 = Device-nGnRnE; the low 1 GiB
   (UART, GIC, ...) is mapped Device, the next 1 GiB (RAM) is mapped Normal.

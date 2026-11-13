@@ -14,42 +14,47 @@
 //   offset 0x400: Lower EL, AArch64 - Synchronous
 //   ... etc.
 //
-// We route everything through one common save/restore path for now.
+// Synchronous exceptions call `exception_handler`; IRQs call `irq_handler`.
+// FIQ/SError are routed to the synchronous handler, which reports and halts.
 
 .section .text.vectors, "ax"
 .balign 2048
 .global __vector_table
 __vector_table:
 
-.macro vector_entry
+.macro sync_entry
     .balign 0x80
-    b       exc_common
+    b       exc_sync
 .endm
 
-    vector_entry    // 0x000
-    vector_entry    // 0x080
-    vector_entry    // 0x100
-    vector_entry    // 0x180
-    vector_entry    // 0x200  Current EL SPx, Synchronous
-    vector_entry    // 0x280
-    vector_entry    // 0x300
-    vector_entry    // 0x380
-    vector_entry    // 0x400  Lower EL AArch64, Synchronous
-    vector_entry    // 0x480
-    vector_entry    // 0x500
-    vector_entry    // 0x580
-    vector_entry    // 0x600  Lower EL AArch32, Synchronous
-    vector_entry    // 0x680
-    vector_entry    // 0x700
-    vector_entry    // 0x780
+.macro irq_entry
+    .balign 0x80
+    b       exc_irq
+.endm
+
+    sync_entry      // 0x000 Current EL SP0, Synchronous
+    irq_entry       // 0x080 Current EL SP0, IRQ
+    sync_entry      // 0x100 Current EL SP0, FIQ
+    sync_entry      // 0x180 Current EL SP0, SError
+    sync_entry      // 0x200 Current EL SPx, Synchronous
+    irq_entry       // 0x280 Current EL SPx, IRQ
+    sync_entry      // 0x300 Current EL SPx, FIQ
+    sync_entry      // 0x380 Current EL SPx, SError
+    sync_entry      // 0x400 Lower EL AArch64, Synchronous
+    irq_entry       // 0x480 Lower EL AArch64, IRQ
+    sync_entry      // 0x500 Lower EL AArch64, FIQ
+    sync_entry      // 0x580 Lower EL AArch64, SError
+    sync_entry      // 0x600 Lower EL AArch32, Synchronous
+    sync_entry      // 0x680 Lower EL AArch32, IRQ
+    sync_entry      // 0x700 Lower EL AArch32, FIQ
+    sync_entry      // 0x780 Lower EL AArch32, SError
 
 // ExceptionFrame layout (must match src/exceptions.rs):
 //   [  0..248)  x0..x30
 //   [248]       ELR_EL1
 //   [256]       SPSR_EL1
 //   total 272 bytes
-.align 4
-exc_common:
+.macro save_frame
     sub     sp, sp, #272
 
     stp     x0,  x1,  [sp, #0]
@@ -72,11 +77,10 @@ exc_common:
     mrs     x1, spsr_el1
     stp     x30, x0,  [sp, #240]   // x30 @240, ELR @248
     str     x1,       [sp, #256]   // SPSR
+.endm
 
-    mov     x0, sp                 // &mut ExceptionFrame
-    bl      exception_handler
-
-    // Allow the handler to resume at a different PC (e.g. past a BRK).
+.macro restore_frame
+    // Write ELR/SPSR back so the handler can redirect execution.
     ldr     x1, [sp, #248]
     msr     elr_el1, x1
     ldr     x1, [sp, #256]
@@ -100,4 +104,20 @@ exc_common:
     ldp     x30, xzr, [sp, #240]
 
     add     sp, sp, #272
+.endm
+
+.align 4
+exc_sync:
+    save_frame
+    mov     x0, sp
+    bl      exception_handler
+    restore_frame
+    eret
+
+.align 4
+exc_irq:
+    save_frame
+    mov     x0, sp
+    bl      irq_handler
+    restore_frame
     eret

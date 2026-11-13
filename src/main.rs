@@ -4,8 +4,11 @@
 mod allocator;
 mod dtb;
 mod exceptions;
+mod gic;
+mod irq;
 mod mmu;
 mod pfa;
+mod timer;
 mod uart;
 
 use core::alloc::Layout;
@@ -117,8 +120,30 @@ pub extern "C" fn kmain(dtb: usize) -> ! {
     );
     println!("PFA free    : {} frames", pfa::stats().0);
 
+    // Phase 6: GICv3 + ARM generic timer.
     println!();
-    println!("Phases 1-5 complete. Halting.");
+    println!("Phase 6: GICv3 and timer interrupts");
+
+    gic::init();
+    let frequency = timer::frequency();
+    let interval = frequency / 2; // 500 ms
+    timer::start_periodic(interval);
+
+    println!("CNTFRQ_EL0  : {} Hz", frequency);
+    println!("Timer       : PPI 30, {} ticks per tick (500 ms)", interval);
+    println!("Unmasking IRQs...");
+    gic::enable_irqs();
+
+    while irq::ticks() < 5 {
+        unsafe { asm!("wfe") };
+    }
+
+    gic::disable_irqs();
+    timer::stop();
+
+    println!();
+    println!("Received {} timer interrupts.", irq::ticks());
+    println!("Phases 1-6 complete. Halting.");
 
     // No UART input loop yet; exit QEMU cleanly via semihosting.
     semihosting_exit(0x20026, 0);
