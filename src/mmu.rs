@@ -30,8 +30,10 @@ use core::ptr::addr_of_mut;
 // Descriptor bits (ARM ARM, VMSAv8-64).
 const PTE_VALID: u64 = 1 << 0;
 const PTE_TABLE: u64 = 1 << 1;
+const PTE_PAGE: u64 = 1 << 1;
 const PTE_ATTR_NORMAL: u64 = 0 << 2;
 const PTE_ATTR_DEVICE: u64 = 1 << 2;
+const PTE_AP_EL0_RW: u64 = 1 << 6; // AP[1] = 1: EL0 and EL1 read/write
 const PTE_SH_INNER: u64 = 3 << 8;
 const PTE_AF: u64 = 1 << 10;
 const PTE_PXN: u64 = 1 << 53;
@@ -60,6 +62,7 @@ struct PageTable {
 static mut L0_TABLE: PageTable = PageTable { entries: [0; 512] };
 static mut L1_TABLE: PageTable = PageTable { entries: [0; 512] };
 static mut L2_TABLE: PageTable = PageTable { entries: [0; 512] };
+static mut L3_USER_TABLE: PageTable = PageTable { entries: [0; 512] };
 
 fn l1_device_block(base: u64) -> u64 {
     base | PTE_VALID | PTE_ATTR_DEVICE | PTE_AF | PTE_PXN | PTE_UXN
@@ -117,6 +120,48 @@ pub fn init() {
         );
 
         let _ = sctlr;
+    }
+}
+
+/// Map one user code page and one user stack page at 4 KiB granularity.
+///
+/// The virtual addresses must share a 2 MiB block; that block's existing L2
+/// identity block descriptor is replaced with a table descriptor pointing at
+/// `L3_USER_TABLE`. Only the two requested pages become user-accessible.
+#[allow(static_mut_refs)]
+pub fn map_user_pages(code_va: u64, code_pa: u64, stack_va: u64, stack_pa: u64) {
+    let l2_index = ((code_va >> 21) & 0x1ff) as usize;
+    let code_index = ((code_va >> 12) & 0x1ff) as usize;
+    let stack_index = ((stack_va >> 12) & 0x1ff) as usize;
+
+    unsafe {
+        L2_TABLE.entries[l2_index] =
+            (addr_of_mut!(L3_USER_TABLE) as u64) | PTE_VALID | PTE_TABLE;
+
+        let l3 = &mut *addr_of_mut!(L3_USER_TABLE);
+
+        // User code: EL0-executable, EL1 never executes it.
+        l3.entries[code_index] = code_pa
+            | PTE_VALID
+            | PTE_PAGE
+            | PTE_ATTR_NORMAL
+            | PTE_AP_EL0_RW
+            | PTE_SH_INNER
+            | PTE_AF
+            | PTE_PXN;
+
+        // User stack: data only.
+        l3.entries[stack_index] = stack_pa
+            | PTE_VALID
+            | PTE_PAGE
+            | PTE_ATTR_NORMAL
+            | PTE_AP_EL0_RW
+            | PTE_SH_INNER
+            | PTE_AF
+            | PTE_PXN
+            | PTE_UXN;
+
+        asm!("dsb sy", "tlbi vmalle1", "dsb sy", "isb");
     }
 }
 

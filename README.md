@@ -28,6 +28,9 @@ No bootloader is used: QEMU loads the ELF directly with `-kernel`.
   (`x19-x30`, SP, DAIF), 64 KiB kernel thread stacks from the bump heap,
   thread trampoline, `thread_exit`, and a preemptive round-robin scheduler
   driven by the timer IRQ.
+- **Phase 9 - EL0 + syscalls:** L3 4 KiB pages for a user code/stack region
+  at `0x5000_0000` (AP=EL0 RW, UXN=0 for code, PXN=1), `eret` into EL0, SVC
+  decoding from `ESR_EL1.EC`, and `write`/`exit` syscalls.
 
 ## Layout
 
@@ -49,6 +52,8 @@ src/timer.rs         ARM generic timer (CNTP) periodic ticks
 src/irq.rs           IRQ acknowledge/EOI + timer tick handler
 src/sched.rs         thread struct, spawn, context switch, round-robin
 src/switch.s         context_switch + thread_entry trampoline
+src/usermode.rs      EL0 user pages, syscall implementations
+src/user.s           position-independent EL0 demo blob
 virt.dtb             trimmed QEMU virt DTB (regenerate if -m/-smp changes)
 ```
 
@@ -108,7 +113,14 @@ AB
 [C] one-shot thread ran; returning to scheduler
 ABABABABABABABABAB
 Scheduler stats: A=10 B=10 ticks=35
-Phases 1-8 complete. Halting.
+Phases 1-8 complete.
+
+Phase 9: user mode (EL0) and syscalls
+User image : 52 bytes
+Dropping to EL0: entry=0x50000000 sp_el0=0x50002000
+Hello from EL0!
+
+[kernel] EL0 exit(0)
 ```
 
 The kernel exits QEMU cleanly (`status 0`) through ARM semihosting
@@ -138,5 +150,11 @@ proper shutdown driver exists.
 - `ICC_IAR1_EL1` acknowledges a Group 1 interrupt, `ICC_EOIR1_EL1` signals
   end-of-interrupt; the timer must be re-armed before EOI because PPI 30 is
   level-sensitive.
+- EL0 isolation uses 4 KiB L3 pages: the user region at `0x5000_0000` has
+  AP=EL0/EL1 RW, code is EL0-executable (UXN=0, PXN=1), the stack is
+  UXN=1. Kernel RAM stays EL1-only, and the UART/device MMIO is EL1-only.
+- SVC syscall ABI: `x8` = number (1 = write, 2 = exit), `x0..x2` = args,
+  result in `x0`. For SVC, `ELR_EL1` already points to the next instruction;
+  BRK is the exception that must advance ELR manually.
 - `MAIR_EL1` Attr0 = Normal write-back, Attr1 = Device-nGnRnE; the low 1 GiB
   (UART, GIC, ...) is mapped Device, the next 1 GiB (RAM) is mapped Normal.

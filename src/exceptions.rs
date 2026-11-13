@@ -3,6 +3,7 @@
 use core::arch::asm;
 
 use crate::println;
+use crate::usermode;
 
 /// Register snapshot pushed by `exc_common` in vectors.s.
 /// Field order and size MUST match the assembly layout exactly.
@@ -43,6 +44,22 @@ pub extern "C" fn exception_handler(frame: &mut ExceptionFrame) {
 
     let ec = (esr >> 26) & 0x3f;
     let iss = esr & 0x01ff_ffff;
+
+    if ec == EC_SVC64 {
+        // SVC is complete: ELR already points at the next instruction.
+        let number = frame.x[8];
+        frame.x[0] = match number {
+            usermode::SYS_WRITE => {
+                usermode::sys_write(frame.x[0], frame.x[1], frame.x[2])
+            }
+            usermode::SYS_EXIT => usermode::sys_exit(frame.x[0]),
+            _ => {
+                println!("Unknown syscall {} (x0={:#x})", number, frame.x[0]);
+                u64::MAX
+            }
+        };
+        return;
+    }
 
     println!();
     println!("=== EXCEPTION ===");

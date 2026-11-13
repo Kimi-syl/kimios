@@ -10,6 +10,7 @@ mod mmu;
 mod pfa;
 mod sched;
 mod timer;
+mod usermode;
 mod uart;
 
 use core::alloc::Layout;
@@ -20,6 +21,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 global_asm!(include_str!("boot.s"));
 global_asm!(include_str!("vectors.s"));
 global_asm!(include_str!("switch.s"));
+global_asm!(include_str!("user.s"));
 
 /// Entry point called from `_start` in boot.s.
 ///
@@ -176,10 +178,10 @@ pub extern "C" fn kmain(dtb: usize) -> ! {
         B_RUNS.load(Ordering::Acquire),
         irq::ticks()
     );
-    println!("Phases 1-8 complete. Halting.");
+    println!("Phases 1-8 complete.");
 
-    // No UART input loop yet; exit QEMU cleanly via semihosting.
-    semihosting_exit(0x20026, 0);
+    // Phase 9: drop to EL0 and service SVCs (write/exit).
+    usermode::run();
 }
 
 static A_RUNS: AtomicU64 = AtomicU64::new(0);

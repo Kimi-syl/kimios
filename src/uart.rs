@@ -96,6 +96,29 @@ impl fmt::Write for Uart {
     }
 }
 
+/// Write raw bytes (used by the write syscall). Newlines become CRLF.
+pub fn write_bytes(bytes: &[u8]) {
+    use core::arch::asm;
+
+    let daif: u64;
+    unsafe {
+        asm!("mrs {}, daif", out(reg) daif, options(nomem, nostack));
+        asm!("msr daifset, #2", options(nomem, nostack));
+    }
+
+    let uart = UART0.lock();
+    for &byte in bytes {
+        if byte == b'\n' {
+            uart.send_byte(b'\r');
+        }
+        uart.send_byte(byte);
+    }
+
+    unsafe {
+        asm!("msr daif, {}", in(reg) daif, options(nomem, nostack));
+    }
+}
+
 pub static UART0: Mutex<Uart> = Mutex::new(Uart::new(UART0_BASE));
 
 pub fn init() {
