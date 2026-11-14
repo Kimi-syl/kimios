@@ -14,8 +14,6 @@ use draw::Screen;
 use libkimi as k;
 
 const BLACK: u32 = 0x0000_0000;
-const WALL_TOP: u32 = 0x0000_0000;
-const WALL_BOTTOM: u32 = 0x0009_0911;
 const SURFACE: u32 = 0x0014_1419;
 const SURFACE_HI: u32 = 0x001e_1e25;
 const SURFACE_MAX: u32 = 0x0027_272f;
@@ -195,6 +193,7 @@ struct Ui {
     calc: Calculator,
     settings: Settings,
     shade: bool,
+    paint_bg: bool,
 }
 
 impl Ui {
@@ -206,6 +205,7 @@ impl Ui {
             calc: Calculator::new(),
             settings: Settings::new(),
             shade: false,
+            paint_bg: true,
         }
     }
 }
@@ -242,7 +242,7 @@ pub extern "C" fn _start() -> ! {
         }
 
         if dirty {
-            render(&screen, &ui, clock);
+            render(&screen, &mut ui, clock);
             dirty = false;
         }
 
@@ -377,39 +377,20 @@ fn shade_tap(screen: &Screen, ui: &mut Ui, point: (i64, i64), clock: [u64; 7]) {
 }
 
 fn toggle_shade(screen: &Screen, ui: &mut Ui, clock: [u64; 7], open: bool) {
-    let sheet = 610;
-    if open == ui.shade {
-        return;
-    }
-    if open {
-        for step in 0..=8 {
-            let y = -sheet + sheet * ease(step, 8) / 100;
-            draw_scene(screen, ui, clock);
-            draw_shade(screen, ui, clock, y);
-            k::sleep_ms(14);
-        }
-        ui.shade = true;
-    } else {
-        for step in 0..=8 {
-            let y = -sheet * ease(step, 8) / 100;
-            draw_scene(screen, ui, clock);
-            draw_shade(screen, ui, clock, y);
-            k::sleep_ms(14);
-        }
-        ui.shade = false;
-    }
+    ui.shade = open;
+    ui.paint_bg = true;
     render(screen, ui, clock);
 }
 
 fn unlock(screen: &Screen, ui: &mut Ui, clock: [u64; 7]) {
     let height = screen.height();
-    for step in 0..=14 {
-        let offset = height * (100 - ease(step, 14)) / 100;
+    for step in 0..=6 {
+        let offset = height * (100 - ease(step, 6)) / 100;
         draw_wallpaper(screen, 0, true);
         draw_lock(screen, clock, 0);
-        draw_home(screen, clock, ui, None, offset);
+        draw_home(screen, clock, ui, None, offset, true);
         draw_status_bar(screen, clock, ui);
-        k::sleep_ms(14);
+        k::sleep_ms(12);
     }
     ui.scene = Scene::Home;
     render(screen, ui, clock);
@@ -417,13 +398,13 @@ fn unlock(screen: &Screen, ui: &mut Ui, clock: [u64; 7]) {
 
 fn open_app(screen: &Screen, ui: &mut Ui, app: AppKind, clock: [u64; 7]) {
     let width = screen.width();
-    for step in 0..=14 {
-        let offset = width * (100 - ease(step, 14)) / 100;
+    for step in 0..=6 {
+        let offset = width * (100 - ease(step, 6)) / 100;
         draw_wallpaper(screen, 0, true);
-        draw_home(screen, clock, ui, None, 0);
-        draw_app(screen, ui, app, clock, offset);
+        draw_home(screen, clock, ui, None, 0, true);
+        draw_app(screen, ui, app, clock, offset, true);
         draw_status_bar(screen, clock, ui);
-        k::sleep_ms(14);
+        k::sleep_ms(12);
     }
     ui.scene = Scene::App(app);
     render(screen, ui, clock);
@@ -432,21 +413,22 @@ fn open_app(screen: &Screen, ui: &mut Ui, app: AppKind, clock: [u64; 7]) {
 fn close_app(screen: &Screen, ui: &mut Ui, clock: [u64; 7]) {
     let width = screen.width();
     if let Scene::App(app) = ui.scene {
-        for step in 0..=14 {
-            let offset = width * ease(step, 14) / 100;
+        for step in 0..=6 {
+            let offset = width * ease(step, 6) / 100;
             draw_wallpaper(screen, 0, true);
-            draw_home(screen, clock, ui, None, 0);
-            draw_app(screen, ui, app, clock, offset);
+            draw_home(screen, clock, ui, None, 0, true);
+            draw_app(screen, ui, app, clock, offset, true);
             draw_status_bar(screen, clock, ui);
-            k::sleep_ms(14);
+            k::sleep_ms(12);
         }
     }
     ui.scene = Scene::Home;
     render(screen, ui, clock);
 }
 
-fn render(screen: &Screen, ui: &Ui, clock: [u64; 7]) {
-    draw_scene(screen, ui, clock);
+fn render(screen: &Screen, ui: &mut Ui, clock: [u64; 7]) {
+    let paint = ui.paint_bg;
+    draw_scene(screen, ui, clock, paint);
     if ui.shade {
         draw_shade(screen, ui, clock, 0);
     } else {
@@ -456,37 +438,28 @@ fn render(screen: &Screen, ui: &Ui, clock: [u64; 7]) {
         screen.ring(point.0, point.1, 18, 3, 0x00a0_a8b8);
         screen.circle(point.0, point.1, 3, TEXT);
     }
+    ui.paint_bg = false;
 }
 
-fn draw_scene(screen: &Screen, ui: &Ui, clock: [u64; 7]) {
+fn draw_scene(screen: &Screen, ui: &Ui, clock: [u64; 7], paint_bg: bool) {
     match ui.scene {
         Scene::Lock => {
             draw_wallpaper(screen, 0, true);
             draw_lock(screen, clock, 0);
         }
         Scene::Home => {
-            draw_wallpaper(screen, 0, ui.settings.dark);
             let pressed = ui.press.and_then(|point| home_hit(screen, point));
-            draw_home(screen, clock, ui, pressed, 0);
+            draw_home(screen, clock, ui, pressed, 0, paint_bg);
         }
         Scene::App(app) => {
-            draw_app(screen, ui, app, clock, 0);
+            draw_app(screen, ui, app, clock, 0, paint_bg);
         }
     }
 }
 
 fn draw_wallpaper(screen: &Screen, y_offset: i64, dark: bool) {
-    let (top, bottom) = if dark {
-        (WALL_TOP, WALL_BOTTOM)
-    } else {
-        (0x00ee_ee_f2, 0x00c9_c9d4)
-    };
-    let height = screen.height() - y_offset;
-    for row in 0..height {
-        let absolute = (row + y_offset).clamp(0, screen.height());
-        let color = lerp_color(top, bottom, (absolute * 255 / screen.height().max(1)) as u32);
-        screen.fill(0, y_offset + row, screen.width(), 1, color);
-    }
+    let color = if dark { 0x0004_0406 } else { 0x00dc_dce6 };
+    screen.fill(0, y_offset, screen.width(), screen.height() - y_offset, color);
     if dark {
         // Nothing-style dot grid.
         let mut y = 40 + y_offset;
@@ -510,7 +483,7 @@ fn draw_status_bar(screen: &Screen, clock: [u64; 7], ui: &Ui) {
     screen.text(16, 7, str_of(&time), 2, TEXT);
 
     // Notification dot.
-    screen.circle(98, 14, 3, RED);
+    screen.circle(120, 14, 3, RED);
 
     // Signal bars.
     for index in 0..4 {
@@ -609,11 +582,16 @@ fn draw_home(
     ui: &Ui,
     pressed: Option<AppKind>,
     y_offset: i64,
+    paint_bg: bool,
 ) {
     let (width, height) = (screen.width(), screen.height());
 
+    if paint_bg {
+        draw_wallpaper(screen, y_offset, ui.settings.dark);
+    }
+
     // At-a-glance / clock widget.
-    screen.round_rect_blend(24, 44 + y_offset, width - 48, 82, 26, SURFACE, 235);
+    screen.round_rect(24, 44 + y_offset, width - 48, 82, 26, SURFACE);
     let mut time = [0u8; 5];
     format_time(clock[4], clock[5], &mut time);
     screen.text(48, 56 + y_offset, str_of(&time), 3, TEXT);
@@ -658,7 +636,7 @@ fn draw_home(
 
     // Dock.
     let dock_y = height - 120 + y_offset;
-    screen.round_rect_blend(20, dock_y, width - 40, 92, 34, SURFACE, 225);
+    screen.round_rect(20, dock_y, width - 40, 92, 34, SURFACE);
     for (index, app) in DOCK.iter().enumerate() {
         let cx = 76 + index as i64 * 109;
         draw_app_icon(screen, *app, cx, dock_y + 46, 56, pressed == Some(*app));
@@ -668,8 +646,6 @@ fn draw_home(
 }
 
 fn draw_app_icon(screen: &Screen, app: AppKind, cx: i64, cy: i64, size: i64, pressed: bool) {
-    let shrink = if pressed { 5 } else { 0 };
-    let size = size - shrink;
     let tile = if pressed { SURFACE_MAX } else { SURFACE_HI };
     screen.round_rect(cx - size / 2, cy - size / 2, size, size, size / 4, tile);
     screen.round_rect(
@@ -831,6 +807,7 @@ fn draw_glyph(screen: &Screen, app: AppKind, cx: i64, cy: i64, size: i64, color:
 }
 
 fn draw_play(screen: &Screen, cx: i64, cy: i64, playing: bool) {
+    screen.circle(cx, cy, 21, SURFACE);
     screen.ring(cx, cy, 20, 2, OUTLINE);
     if playing {
         screen.fill(cx - 6, cy - 8, 4, 16, TEXT);
@@ -872,11 +849,20 @@ fn draw_home_indicator(screen: &Screen) {
     screen.round_rect(width / 2 - 62, screen.height() - 20, 124, 5, 2, TEXT);
 }
 
-fn draw_app(screen: &Screen, ui: &Ui, app: AppKind, clock: [u64; 7], x_offset: i64) {
+fn draw_app(
+    screen: &Screen,
+    ui: &Ui,
+    app: AppKind,
+    clock: [u64; 7],
+    x_offset: i64,
+    paint_bg: bool,
+) {
     let x = x_offset;
     let width = screen.width();
     let height = screen.height();
-    screen.fill(x, 0, width - x, height, BLACK);
+    if paint_bg {
+        screen.fill(x, 0, width - x, height, BLACK);
+    }
 
     // Large Material 3 top app bar.
     draw_back(screen, x + 40, 64);
@@ -1119,8 +1105,11 @@ fn draw_shade(screen: &Screen, ui: &Ui, clock: [u64; 7], y_offset: i64) {
     let height = screen.height();
     let sheet = 610;
 
-    // Scrim over the underlying scene.
-    screen.fill_blend(0, 0, width, height, BLACK, 160);
+    // Scrim only over the part the sheet does not cover.
+    let scrim_top = (610 + y_offset).clamp(0, height);
+    if scrim_top < height {
+        screen.fill_blend(0, scrim_top, width, height - scrim_top, BLACK, 160);
+    }
 
     // Sheet with rounded bottom corners.
     screen.round_rect(0, y_offset - 40, width, sheet + 40, 40, 0x000a_0a0f);
@@ -1404,15 +1393,6 @@ fn format_i64(value: i64, buffer: &mut [u8; 20]) -> &str {
 
 fn str_of(bytes: &[u8]) -> &str {
     core::str::from_utf8(bytes).unwrap_or("")
-}
-
-fn lerp_color(top: u32, bottom: u32, t: u32) -> u32 {
-    let mix = |shift: u32| {
-        let a = (top >> shift) & 0xff;
-        let b = (bottom >> shift) & 0xff;
-        ((a * (255 - t) + b * t) / 255) & 0xff
-    };
-    (mix(16) << 16) | (mix(8) << 8) | mix(0)
 }
 
 #[panic_handler]

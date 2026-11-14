@@ -81,11 +81,11 @@ Run it with `-display none -device ramfb -device virtio-tablet-device` and
   console IRQ wakes the reader so background processes keep running while the
   shell waits at the prompt.
 - **Phase 17 - Framebuffer:** a minimal fw_cfg driver (MMIO selector/data plus
-  the DMA interface) programs QEMU's `ramfb` file with a 480x800 XRGB8888
+  the DMA interface) programs QEMU's `ramfb` file with a 1080x1920 XRGB8888
   linear buffer in kernel RAM. Drawing is a plain store to the identity-mapped
   buffer; no GPU or 3D is involved. Verified by QEMU `screendump`.
 - **Phase 18 - Text console:** an embedded public-domain 8x8 bitmap font
-  renders all console output (60x100 cells) on the framebuffer, mirroring both
+  renders all console output (45x80 cells at 3x3 glyphs) on the framebuffer, mirroring both
   kernel `println!` and user `write` syscalls. Lines wrap and scroll; typed
   input and backspace are echoed. Verified by exact pixel comparison against
   the font tables and a 60-line scroll test.
@@ -474,7 +474,7 @@ big-endian `RAMFBCfg` (address, fourcc, flags, width, height, stride) is
 written into RAM together with an aligned DMA descriptor, and QEMU copies it
 synchronously when the kernel kicks the DMA register.
 
-The pixel buffer is a 4 KiB-aligned `[u32; 480*800]` static in `.bss`. It is
+The pixel buffer is a 4 KiB-aligned `[u32; 1080*1920]` static in `.bss`. It is
 inside the identity-mapped RAM window, so QEMU can read it directly; drawing
 is ordinary memory stores and the display refreshes without extra calls.
 
@@ -482,7 +482,7 @@ is ordinary memory stores and the display refreshes without extra calls.
 $ qemu-system-aarch64 ... -display none -device ramfb
 ...
 Phase 17: framebuffer display
-ramfb       : 480x800 XRGB8888 at 0x40100000 (1500 KiB)
+ramfb       : 1080x1920 XRGB8888 at 0x40100000 (8100 KiB)
 ```
 
 The initial bring-up drew a colour ramp, an eight-bar SMPTE-style strip and
@@ -493,7 +493,7 @@ decoding the PPM. Phase 18 replaces that pattern with a text console. Without
 ### Phase 18 - framebuffer text console
 
 `src/font.rs` embeds the public-domain `font8x8_basic` table for ASCII
-`0x20..=0x7e`. The framebuffer is divided into 60x100 cells of 8x8 pixels;
+`0x20..=0x7e`. The framebuffer is divided into 45x80 cells of 24x24 pixels;
 `fb::putc` handles `\n`, `\r` and backspace, wraps at column 80, and scrolls
 by copying the pixel buffer up one text row.
 
@@ -506,7 +506,7 @@ glyph.
 ```text
 $ qemu-system-aarch64 ... -display none -device ramfb
 Phases 17-18: framebuffer display and text console
-ramfb       : 480x800 XRGB8888 at 0x400f8000 (1500 KiB, 60x100 text)
+ramfb       : 1080x1920 XRGB8888 at 0x400f8000 (8100 KiB, 45x80 text)
 ...
 $ help
   ls             list RamFS files
@@ -535,7 +535,7 @@ background elsewhere, both while the process was blocked and after it exited:
 
 ```text
 $ run /fbtest
-fbtest: 480x800 stride 1920 format 875713112
+fbtest: 1080x1920 stride 4320 format 875713112
 fbtest: drew pattern; press enter to exit
 ```
 
@@ -895,11 +895,11 @@ restored when the mapping process exits or `exec`s another image.
 
 ```text
 $ run /gfxtest
-gfxtest: 480x800 stride 1920 format 875713112
+gfxtest: 1080x1920 stride 4320 format 875713112
 gfxtest: 8 frames in 40 ms, pattern drawn; press enter
 ```
 
-The program writes a 480x800 animated gradient eight times (3.07 million
+The program writes a 1080x1920 animated gradient eight times (16.6 million
 pixels) under TCG, then paints known rectangles. A monitor
 `screendump` confirms exact colours: background `0x102040`, red/green/blue/
 yellow rectangles and one-pixel white rules, with corners still background.
@@ -1065,6 +1065,29 @@ set, shade-to-Settings, calculator (`7 * 8 = 56`), live Clock and back
 navigation. The renderer's alpha blending makes the shade, dock and cards sit
 over the wallpaper without a compositor.
 
+### Phase 38 - native 1080p
+
+The panel is now 1080x1920 (8.1 MiB XRGB8888). All layout stays in the
+original 480x800 coordinate space: `Screen` maps rectangles, circles, lines
+and text to physical pixels with integer math, so the UI code did not need to
+be rewritten. Two changes made this practical under TCG:
+
+- **Anti-aliased text.** Glyphs are sampled with 4x supersampling at larger
+  scales and rendered as nearest blocks at scale 1, which matches the
+  dot-matrix look while cutting cost.
+- **Dirty backgrounds.** Taps redraw only content; the 8.3 MB wallpaper fill
+  happens on scene changes and animations. A full home repaint is ~35 ms on
+  this emulated CPU; partial repaints are around half that. Animations use
+  six eased steps and the Quick Settings sheet opens instantly.
+
+Circles use a uniform radius (not the 9:16 vertical scale) so icons and
+notification dots stay perfectly round, and the console glyph scale was
+raised to 3x3 (45x80 cells).
+
+| Native lock screen (1080x1920) |
+|:---:|
+| ![Lock 1080p](docs/screenshot-lock.png) |
+
 Running `/stress` twice returns exactly 31675 free frames after each exit:
 ten spawn/wait cycles, twenty create/stat/unlink/rmdir cycles and a hundred
 allocator rounds no longer leak physical frames or kernel heap.
@@ -1175,7 +1198,7 @@ callers even though `stat` does not print them.
 - fw_cfg lives at `0x0902_0000` (`qemu,fw-cfg-mmio`) with big-endian selector
   and DMA registers. `write_file` stores every descriptor field big-endian and
   passes the guest physical address of `etc/ramfb`; QEMU performs the transfer
-  during the register write. ramfb accepts 480x800 (min 16, max 2560x1600) and
+  during the register write. ramfb accepts 1080x1920 (min 16, max 2560x1600) and
   requires `stride == width * 4` for XRGB8888.
 - font8x8 rows are bitmaps with bit 0 as the leftmost pixel. The RGB channels
   are `0x00RRGGBB`; XRGB8888 stores bytes as B, G, R, X in little-endian

@@ -15,12 +15,15 @@ use core::ptr::addr_of;
 use core::sync::atomic::{AtomicBool, Ordering};
 use spin::Mutex;
 
-pub const WIDTH: usize = 480;
-pub const HEIGHT: usize = 800;
+pub const WIDTH: usize = 1080;
+pub const HEIGHT: usize = 1920;
 pub const STRIDE: usize = WIDTH * 4;
 
-const COLS: usize = WIDTH / 8;
-const ROWS: usize = HEIGHT / 8;
+/// Console glyphs are drawn at 3x3 so text stays readable at 1080p.
+const GLYPH_SCALE: usize = 3;
+const CELL: usize = 8 * GLYPH_SCALE;
+const COLS: usize = WIDTH / CELL;
+const ROWS: usize = HEIGHT / CELL;
 
 const COLOR_BG: u32 = 0x0010_141c;
 const COLOR_FG: u32 = 0x00d0_e4f0;
@@ -101,23 +104,28 @@ fn draw_glyph(fb: &mut [u32], column: usize, row: usize, byte: u8) {
         &FONT8X8[0]
     };
 
-    let x = column * 8;
-    let y = row * 8;
+    let x = column * CELL;
+    let y = row * CELL;
     for (dy, bits) in glyph.iter().enumerate() {
-        let line = (y + dy) * WIDTH + x;
         for dx in 0..8 {
-            fb[line + dx] = if bits & (1 << dx) != 0 {
+            let color = if bits & (1 << dx) != 0 {
                 COLOR_FG
             } else {
                 COLOR_BG
             };
+            for sy in 0..GLYPH_SCALE {
+                let line = (y + dy * GLYPH_SCALE + sy) * WIDTH + x + dx * GLYPH_SCALE;
+                for sx in 0..GLYPH_SCALE {
+                    fb[line + sx] = color;
+                }
+            }
         }
     }
 }
 
 fn scroll(fb: &mut [u32]) {
-    fb.copy_within(8 * WIDTH.., 0);
-    let last = (ROWS - 1) * 8 * WIDTH;
+    fb.copy_within(CELL * WIDTH.., 0);
+    let last = (ROWS - 1) * CELL * WIDTH;
     fb[last..].fill(COLOR_BG);
 }
 

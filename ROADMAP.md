@@ -117,6 +117,9 @@ Target-independent, implemented before display/device work:
 27. ~~Material 3 / Nothing redesign.~~ Done: monochrome/red palette, dot-grid
     wallpaper, dot-matrix clocks, tonal cards, alpha-blended dock and shade,
     Quick Settings with brightness and toggles, 12-app launcher.
+28. ~~1080p rendering.~~ Done: 1080x1920 ramfb, logical 480x800 layout mapped
+    to native pixels, anti-aliased text, uniform circles, dirty-background
+    repaints and a 3x3 kernel console font.
 
 EL0 processes are preempted by the timer (50 ms quantum, round-robin among
 `Ready` processes), and a process blocked in `read` yields the CPU. Syscalls
