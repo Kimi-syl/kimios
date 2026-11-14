@@ -7,9 +7,13 @@ No bootloader is used: QEMU loads the ELF directly with `-kernel`.
 
 ## The phone shell
 
-| Lock screen | Home | Calculator | Clock |
-|:---:|:---:|:---:|:---:|
-| ![Lock](docs/screenshot-lock.png) | ![Home](docs/screenshot-home.png) | ![Calculator](docs/screenshot-calculator.png) | ![Clock](docs/screenshot-clock.png) |
+| Lock screen | Home | Quick settings |
+|:---:|:---:|:---:|
+| ![Lock](docs/screenshot-lock.png) | ![Home](docs/screenshot-home.png) | ![Shade](docs/screenshot-shade.png) |
+
+| Calculator | Clock | Settings |
+|:---:|:---:|:---:|
+| ![Calculator](docs/screenshot-calculator.png) | ![Clock](docs/screenshot-clock.png) | ![Settings](docs/screenshot-settings.png) |
 
 Run it with `-display none -device ramfb -device virtio-tablet-device` and
 `run /gui`; ESC returns to the text console.
@@ -1029,9 +1033,37 @@ $ run /gui
   slides up. Taps are distinguished from drags by a 24 px threshold.
 
 Everything is drawn by a small user-space renderer (`draw.rs`): clipped fills,
-rounded rectangles, circles, rings, Bresenham lines, vertical gradients and
-8x8 text. The status bar and Clock redraw on the minute/second boundary; no
-cursor is drawn because the UI is touch-first.
+rounded rectangles, circles, rings, Bresenham lines, vertical gradients,
+alpha-blended surfaces, dot-matrix glyphs and 8x8 text. The status bar and
+Clock redraw on the minute/second boundary; no cursor is drawn because the UI
+is touch-first.
+
+### Phase 37 - Nothing OS x Material 3
+
+The shell was restyled around a Nothing OS / Material 3 language:
+
+- **Type and colour:** near-black surfaces, a dot grid wallpaper, white type
+  and a single red accent. The lock screen clock, clock-app time and dot
+  indicators use a circular dot-matrix renderer.
+- **Surfaces:** tonal cards with 26-30 px radii, alpha-blended dock and
+  scrim, Material 3 switches and a pill brightness slider.
+- **Lock screen:** date and preview label, dot clock, two notification cards
+  (Messages, System), a fingerprint target drawn from three broken red ridges,
+  touch/swipe unlock.
+- **Home:** At-a-Glance card with live time/date and weather, search pill,
+  interactive music widget (play/pause), 12 monochrome app icons in three
+  rows, active-pill page indicator, translucent dock and gesture bar.
+- **Quick Settings:** tap the status bar to slide down a shade with Wi-Fi,
+  Bluetooth, Do Not Disturb and Torch tiles (red when active), a working
+  brightness slider, notification cards and a Settings shortcut. Tap outside
+  to close.
+- **Motion:** quadratic ease-out for the lock/home and app slides; icons
+  shrink on press; shade slides with the scrim.
+
+All interactions were exercised over QMP: unlock, Wi-Fi toggle, brightness
+set, shade-to-Settings, calculator (`7 * 8 = 56`), live Clock and back
+navigation. The renderer's alpha blending makes the shade, dock and cards sit
+over the wallpaper without a compositor.
 
 Running `/stress` twice returns exactly 31675 free frames after each exit:
 ten spawn/wait cycles, twenty create/stat/unlink/rmdir cycles and a hundred

@@ -90,6 +90,67 @@ impl Screen {
         }
     }
 
+    /// Blend a solid rectangle over the existing pixels.
+    pub fn fill_blend(&self, x: i64, y: i64, width: i64, height: i64, color: u32, alpha: u32) {
+        let x1 = (x + width).min(self.width);
+        let y1 = (y + height).min(self.height);
+        let x = x.max(0);
+        let y = y.max(0);
+        let inverse = 255 - alpha.min(255);
+        for row in y..y1 {
+            for column in x..x1 {
+                if column >= 0 && row >= 0 && column < self.width && row < self.height {
+                    let index = (row * self.stride + column) as usize;
+                    let destination = unsafe { self.pixels.add(index).read_volatile() };
+                    let mix = |shift: u32| {
+                        let front = (color >> shift) & 0xff;
+                        let back = (destination >> shift) & 0xff;
+                        ((front * alpha + back * inverse) / 255) & 0xff
+                    };
+                    let blended = (mix(16) << 16) | (mix(8) << 8) | mix(0);
+                    unsafe {
+                        self.pixels.add(index).write_volatile(blended);
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn round_rect_blend(
+        &self,
+        x: i64,
+        y: i64,
+        width: i64,
+        height: i64,
+        radius: i64,
+        color: u32,
+        alpha: u32,
+    ) {
+        let radius = radius.min(width / 2).min(height / 2).max(0);
+        for row in 0..height {
+            let dy = if row < radius {
+                radius - row
+            } else if row >= height - radius {
+                row - (height - radius - 1)
+            } else {
+                0
+            };
+            let inset = if dy > 0 {
+                radius - isqrt((radius * radius - dy * dy).max(0) as u64) as i64
+            } else {
+                0
+            };
+            self.fill_blend(
+                x + inset,
+                y + row,
+                (width - inset * 2).max(0),
+                1,
+                color,
+                alpha,
+            );
+        }
+    }
+
     pub fn circle(&self, cx: i64, cy: i64, radius: i64, color: u32) {
         if radius <= 0 {
             return;
@@ -174,6 +235,37 @@ impl Screen {
             cursor += 9 * scale;
         }
         cursor
+    }
+
+    /// Dot-matrix text: each glyph pixel becomes a round dot of `radius` on a
+    /// `cell`-pixel grid, the Nothing OS look for large clocks.
+    pub fn text_dots(&self, x: i64, y: i64, text: &str, cell: i64, radius: i64, color: u32) -> i64 {
+        let mut cursor = x;
+        for byte in text.bytes() {
+            if byte < 0x20 || byte > 0x7e {
+                cursor += 8 * cell;
+                continue;
+            }
+            let glyph = &FONT8X8[(byte - 0x20) as usize];
+            for (row, bits) in glyph.iter().enumerate() {
+                for column in 0..8 {
+                    if bits & (1 << column) != 0 {
+                        self.circle(
+                            cursor + column as i64 * cell + cell / 2,
+                            y + row as i64 * cell + cell / 2,
+                            radius,
+                            color,
+                        );
+                    }
+                }
+            }
+            cursor += 9 * cell;
+        }
+        cursor
+    }
+
+    pub fn dots_text_width(text: &str, cell: i64) -> i64 {
+        text.len() as i64 * 9 * cell - cell
     }
 
     pub fn text_width(text: &str, scale: i64) -> i64 {

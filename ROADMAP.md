@@ -114,6 +114,9 @@ Target-independent, implemented before display/device work:
 26. ~~Phone UI.~~ Done: 480x800 portrait display, lock screen, status bar,
     home grid/dock, Calculator, live Clock and Settings apps with working
     toggles and slide transitions; user-space 8x8 text renderer.
+27. ~~Material 3 / Nothing redesign.~~ Done: monochrome/red palette, dot-grid
+    wallpaper, dot-matrix clocks, tonal cards, alpha-blended dock and shade,
+    Quick Settings with brightness and toggles, 12-app launcher.
 
 EL0 processes are preempted by the timer (50 ms quantum, round-robin among
 `Ready` processes), and a process blocked in `read` yields the CPU. Syscalls
