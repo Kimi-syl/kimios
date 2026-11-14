@@ -80,38 +80,44 @@ pub fn sys_write(fd: u64, pointer: u64, length: u64) -> u64 {
     length
 }
 
-/// read(fd, buf, len) -> bytes read. Blocks until newline (stdin only).
-pub fn sys_read(fd: u64, pointer: u64, length: u64) -> u64 {
+pub enum ReadOutcome {
+    Done(u64),
+    Switched,
+}
+
+/// read(fd, buf, len) -> bytes read. Consumes a complete line produced by the
+/// console IRQ, blocking (and yielding the CPU) until one is available.
+pub fn sys_read(
+    frame: &mut ExceptionFrame,
+    fd: u64,
+    pointer: u64,
+    length: u64,
+) -> ReadOutcome {
     if fd != 0 {
-        return ERROR;
+        return ReadOutcome::Done(ERROR);
     }
     let Some(buffer) = user_buffer(pointer, length) else {
-        return ERROR;
+        return ReadOutcome::Done(ERROR);
     };
 
-    let mut count = 0;
-    loop {
-        let byte = crate::uart::read_byte();
-        match byte {
-            b'\r' | b'\n' => {
-                crate::uart::write_bytes(b"\n");
-                return count as u64;
-            }
-            0x7f | 0x08 => {
-                if count > 0 {
-                    count -= 1;
-                    crate::uart::write_bytes(b"\x08 \x08");
-                }
-            }
-            _ => {
-                if count < buffer.len() {
-                    buffer[count] = byte;
-                    count += 1;
-                    crate::uart::write_bytes(&[byte]);
-                }
-            }
-        }
+    if let Some(count) = crate::uart::take_line(buffer) {
+        return ReadOutcome::Done(count as u64);
     }
+
+    // Only one console reader can be blocked at a time.
+    if process::reader_busy() {
+        return ReadOutcome::Done(ERROR);
+    }
+
+    // Yield to another process; on wake the SVC re-executes and retries.
+    if process::block_on_read(frame) {
+        return ReadOutcome::Switched;
+    }
+
+    // Nothing else is runnable: idle in the kernel until a line arrives.
+    crate::uart::wait_for_line();
+    let count = crate::uart::take_line(buffer).unwrap_or(0);
+    ReadOutcome::Done(count as u64)
 }
 
 /// open(path, len) -> per-process descriptor or u64::MAX.

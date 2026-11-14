@@ -79,6 +79,13 @@ pub extern "C" fn exception_handler(frame: &mut ExceptionFrame) {
                 }
                 return;
             }
+            usermode::SYS_READ => {
+                match usermode::sys_read(frame, arg0, arg1, arg2) {
+                    usermode::ReadOutcome::Done(result) => frame.x[0] = result,
+                    usermode::ReadOutcome::Switched => {}
+                }
+                return;
+            }
             crate::pe::SYS_PE_EXIT_PROCESS => {
                 usermode::pe_exit_process(frame, arg0);
                 return;
@@ -88,7 +95,6 @@ pub extern "C" fn exception_handler(frame: &mut ExceptionFrame) {
 
         let result = match number {
             usermode::SYS_WRITE => usermode::sys_write(arg0, arg1, arg2),
-            usermode::SYS_READ => usermode::sys_read(arg0, arg1, arg2),
             usermode::SYS_OPEN => usermode::sys_open(arg0, arg1),
             usermode::SYS_READ_FILE => {
                 usermode::sys_read_file(arg0, arg1, arg2, arg3)

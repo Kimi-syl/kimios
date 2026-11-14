@@ -62,6 +62,11 @@ No bootloader is used: QEMU loads the ELF directly with `-kernel`.
   runnable user processes with a 50 ms quantum, saving/restoring the EL0
   `ExceptionFrame` and switching `TTBR0_EL1` from the IRQ path. `spawn /spin`
   twice demonstrates interleaved execution.
+- **Phase 16 - Blocking console input:** the PL011 receive interrupt (SPI 33)
+  drains the RX FIFO, echoes/edits characters and queues completed lines. When
+  `read` has no line it marks the process `Blocked` and rewinds its `SVC`; the
+  console IRQ wakes the reader so background processes keep running while the
+  shell waits at the prompt.
 
 ## Layout
 
@@ -341,10 +346,40 @@ $ wait 0
 child exited with status 0
 ```
 
-Kernel syscalls still run with IRQs masked by the exception entry, so a
-process inside a syscall (notably the busy-waiting UART `read`) is not
-preempted. Making `read` a blocking process state with a UART wakeup is the
-next scheduling step.
+Kernel syscalls still run with IRQs masked by the exception entry. The console
+`read` was the one syscall that used to busy-wait holding the CPU; Phase 16
+replaces that with a blocking process state.
+
+### Phase 16 - blocking console input
+
+The PL011 receive interrupt is routed through the GIC as SPI 33. The IRQ
+handler drains the FIFO, echoes characters, handles backspace and assembles a
+line; every newline is appended to a four-line queue so fast or pasted input
+is not lost.
+
+When `read` finds no completed line it marks the process `Blocked`, rewinds
+`ELR_EL1` by one instruction and switches to another runnable process. On
+console input the IRQ handler moves that reader back to `Ready`, and the timer
+IRQ's round-robin (or an immediate switch from the console IRQ) resumes it.
+Because `ELR_EL1` points back at the `svc`, EL0 re-executes the syscall, which
+now finds the queued line. If nothing else is runnable, the kernel idles with
+`wfi` until input instead of spinning.
+
+```text
+$ spawn /spin
+[kernel] created pid 2 (parent 1) at 0x60000000
+spawned pid 2
+$ 222222222222222help
+mem
+  ls             list RamFS files
+  ...
+$ free frames: 32211
+$ 222222222222222222222222
+[kernel] pid 2 exited with status 0
+```
+
+The echoed `help`/`mem` lines show input arriving while the shell was parked;
+the interleaved `2`s show the child kept running on the CPU in the meantime.
 
 The kernel exits QEMU cleanly (`status 0`) through ARM semihosting
 (`SYS_EXIT_EXTENDED`, `HLT #0xF000`). This is temporary scaffolding until a

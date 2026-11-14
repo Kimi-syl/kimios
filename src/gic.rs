@@ -22,6 +22,13 @@ const GICD_CTLR_ENABLE_G1A: u32 = 1 << 1;
 const GICD_CTLR_ENABLE_G1: u32 = 1 << 0;
 const GICD_CTLR_RWP: u32 = 1 << 31;
 
+// Distributor register blocks for shared peripheral interrupts (SPI).
+const GICD_IGROUPR: usize = 0x0080;
+const GICD_ISENABLER: usize = 0x0100;
+const GICD_IPRIORITYR: usize = 0x0400;
+const GICD_ICFGR: usize = 0x0c00;
+const GICD_IROUTER: usize = 0x6000;
+
 const GICR_CTLR: usize = 0x0000;
 const GICR_WAKER: usize = 0x0014;
 const GICR_WAKER_PROCESSOR_SLEEP: u32 = 1 << 1;
@@ -33,6 +40,8 @@ const GICR_IPRIORITYR: usize = GICR_SGI_OFFSET + 0x0400;
 const GICR_ICFGR1: usize = GICR_SGI_OFFSET + 0x0c04;
 
 pub const TIMER_INTID: u32 = 30;
+/// PL011 UART0 on QEMU's `virt` is SPI 1 (INTID 32 + 1).
+pub const UART_INTID: u32 = 33;
 const SPURIOUS_INTID: u32 = 1023;
 
 unsafe fn read32(address: usize) -> u32 {
@@ -45,6 +54,10 @@ unsafe fn write32(address: usize, value: u32) {
 
 unsafe fn write8(address: usize, value: u8) {
     core::ptr::write_volatile(address as *mut u8, value);
+}
+
+unsafe fn write64(address: usize, value: u64) {
+    core::ptr::write_volatile(address as *mut u64, value);
 }
 
 fn dsb() {
@@ -109,6 +122,35 @@ pub fn init() {
         write32(GICR_BASE + GICR_ICFGR1, config);
 
         write32(GICR_BASE + GICR_ISENABLER0, 1 << TIMER_INTID);
+        dsb();
+    }
+}
+
+/// Enable a shared peripheral interrupt (INTID >= 32) as a level-sensitive
+/// Group 1 interrupt routed to CPU 0.
+pub fn enable_spi(intid: u32, priority: u8) {
+    if intid < 32 {
+        return;
+    }
+    unsafe {
+        let word = (intid / 32) as usize;
+        let bit = intid % 32;
+
+        let group = GICD_BASE + GICD_IGROUPR + word * 4;
+        write32(group, read32(group) | (1 << bit));
+
+        write8(GICD_BASE + GICD_IPRIORITYR + intid as usize, priority);
+
+        // Two configuration bits per interrupt; 0b00 = level-sensitive.
+        let config = GICD_BASE + GICD_ICFGR + (intid as usize / 16) * 4;
+        let shift = (intid as usize % 16) * 2;
+        write32(config, read32(config) & !(0b11 << shift));
+
+        // Route to the CPU 0 affinity (affinity 0, no 1-of-N).
+        write64(GICD_BASE + GICD_IROUTER + intid as usize * 8, 0);
+
+        let enable = GICD_BASE + GICD_ISENABLER + word * 4;
+        write32(enable, 1 << bit);
         dsb();
     }
 }

@@ -51,16 +51,19 @@ Target-independent, implemented before display/device work:
    block-device trait. `virtio-blk` is the first QEMU driver.~~ Done: legacy
    and modern virtio-mmio transports, KimiFS, and `/disk/` through the same
    descriptor table; persistence verified across QEMU reboots.
+6. ~~Blocking console `read`.~~ Done: the PL011 RX interrupt (SPI 33) queues
+   completed lines; `read` parks in a `Blocked` state with a rewound `SVC` and
+   the console IRQ wakes it, so background processes run at the prompt.
 
-EL0 processes are now preempted by the timer (50 ms quantum, round-robin
-among `Ready` processes). Syscalls still execute with interrupts masked, so
-blocking a process inside a syscall (e.g. UART `read`) is the next step.
+EL0 processes are preempted by the timer (50 ms quantum, round-robin among
+`Ready` processes), and a process blocked in `read` yields the CPU. Syscalls
+still execute with interrupts masked, which is acceptable until blocking I/O
+beyond the console appears.
 
 ## Next
 
-1. Blocking `read`: a process state woken by UART input, so background
-   processes keep running while the shell waits at the prompt.
-2. Display output: ramfb on QEMU, panel/DSI investigation on spes.
-3. Block storage beyond QEMU: UFS and the spes partition table (blocked on
+1. Display output: ramfb on QEMU, panel/DSI investigation on spes.
+2. Block storage beyond QEMU: UFS and the spes partition table (blocked on
    bootloader unlock for bare-metal testing).
-4. More filesystem surface: unlink, directories, reuse of freed runs.
+3. More filesystem surface: unlink, directories, reuse of freed runs.
+4. Bring up secondary CPUs (PSCI on QEMU; needs khaje firmware on spes).

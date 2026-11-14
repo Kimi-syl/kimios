@@ -21,6 +21,8 @@ pub const SYS_ERROR: u64 = u64::MAX;
 const INIT_PID: u64 = 1;
 static NEXT_PID: AtomicU64 = AtomicU64::new(INIT_PID);
 static USER_ACTIVE: AtomicBool = AtomicBool::new(false);
+/// PID currently blocked in `read`, or 0. The console IRQ wakes it.
+static READER_PID: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum State {
@@ -53,6 +55,8 @@ pub struct Process {
     pub parent: u64,
     pub exit_status: u64,
     wait_target: u64,
+    /// True when blocked in `read` rather than in `wait`.
+    read_wait: bool,
     space: Option<mmu::AddressSpace>,
     frame: ExceptionFrame,
     sp_el0: u64,
@@ -65,6 +69,7 @@ const EMPTY_PROCESS: Process = Process {
     parent: 0,
     exit_status: 0,
     wait_target: 0,
+    read_wait: false,
     space: None,
     frame: ExceptionFrame::EMPTY,
     sp_el0: 0,
@@ -200,6 +205,7 @@ fn create(parent: u64, path: &str) -> Result<usize, &'static str> {
             parent,
             exit_status: 0,
             wait_target: 0,
+            read_wait: false,
             space: Some(space),
             frame: ExceptionFrame {
                 x: [0; 31],
@@ -228,6 +234,14 @@ pub fn start_init() -> ! {
     USER_ACTIVE.store(true, Ordering::Release);
     crate::timer::start_periodic(crate::timer::frequency() / 20);
     println!("[kernel] EL0 timer preemption enabled (50 ms quantum)");
+
+    // Console input: route the PL011 RX interrupt and set its FIFO trigger.
+    crate::gic::enable_spi(crate::gic::UART_INTID, 0x20);
+    crate::uart::enable_rx_interrupt();
+    println!(
+        "[kernel] console input: UART RX IRQ (INTID {})",
+        crate::gic::UART_INTID
+    );
 
     unsafe {
         PROCESSES[slot].state = State::Running;
@@ -308,6 +322,58 @@ fn switch_to(frame: &mut ExceptionFrame, next: usize) {
     }
 }
 
+/// Whether some process is already blocked waiting for console input.
+pub fn reader_busy() -> bool {
+    READER_PID.load(Ordering::Acquire) != 0
+}
+
+/// Block the current process until console input arrives.
+///
+/// The calling SVC is rewound by one instruction, so when the console IRQ
+/// marks this process ready the resumed EL0 context re-executes the `svc` and
+/// retries the read. Returns `false` when it could not switch (no other
+/// runnable process); the caller then waits in the kernel.
+#[allow(static_mut_refs)]
+pub fn block_on_read(frame: &mut ExceptionFrame) -> bool {
+    if !user_active() {
+        return false;
+    }
+    let Some(slot) = current_slot() else {
+        return false;
+    };
+    let Some(next) = pick_ready() else {
+        return false;
+    };
+
+    let pid = unsafe { PROCESSES[slot].pid };
+    READER_PID.store(pid, Ordering::Release);
+    unsafe {
+        PROCESSES[slot].state = State::Blocked;
+        PROCESSES[slot].read_wait = true;
+    }
+    frame.elr = frame.elr.wrapping_sub(4);
+    switch_to(frame, next);
+    true
+}
+
+/// Console-IRQ hook: move the process blocked in `read` back to the ready
+/// queue. Runs with interrupts masked.
+#[allow(static_mut_refs)]
+pub fn wake_reader() {
+    let pid = READER_PID.swap(0, Ordering::AcqRel);
+    if pid == 0 {
+        return;
+    }
+    if let Some(slot) = slot_of_pid(pid) {
+        unsafe {
+            if PROCESSES[slot].state == State::Blocked {
+                PROCESSES[slot].state = State::Ready;
+                PROCESSES[slot].read_wait = false;
+            }
+        }
+    }
+}
+
 /// Block the current process until `target` (0 = any child) exits.
 #[allow(static_mut_refs)]
 pub fn sys_wait(frame: &mut ExceptionFrame, target: u64) -> WaitOutcome {
@@ -329,6 +395,7 @@ pub fn sys_wait(frame: &mut ExceptionFrame, target: u64) -> WaitOutcome {
     unsafe {
         PROCESSES[slot].state = State::Blocked;
         PROCESSES[slot].wait_target = target;
+        PROCESSES[slot].read_wait = false;
     }
 
     match pick_ready() {
@@ -357,6 +424,10 @@ pub fn sys_exit(frame: &mut ExceptionFrame, status: u64) {
     let me = unsafe { PROCESSES[slot].pid };
     let parent = unsafe { PROCESSES[slot].parent };
 
+    if READER_PID.load(Ordering::Acquire) == me {
+        READER_PID.store(0, Ordering::Release);
+    }
+
     unsafe {
         PROCESSES[slot].state = State::Zombie;
         PROCESSES[slot].exit_status = status;
@@ -379,31 +450,57 @@ pub fn sys_exit(frame: &mut ExceptionFrame, status: u64) {
     let mut eager_reap = false;
     if let Some(parent_slot) = slot_of_pid(parent) {
         unsafe {
-            let waiting = PROCESSES[parent_slot].wait_target;
-            if PROCESSES[parent_slot].state == State::Blocked
-                && (waiting == 0 || waiting == me)
+            // A parent blocked in `read` is not waiting for this child.
+            let process = &mut PROCESSES[parent_slot];
+            if process.state == State::Blocked
+                && !process.read_wait
+                && (process.wait_target == 0 || process.wait_target == me)
             {
-                PROCESSES[parent_slot].frame.x[0] = status;
-                PROCESSES[parent_slot].state = State::Ready;
-                PROCESSES[parent_slot].wait_target = 0;
+                process.frame.x[0] = status;
+                process.state = State::Ready;
+                process.wait_target = 0;
                 eager_reap = true;
             }
         }
     }
 
-    let next = pick_ready();
-    match next {
-        Some(next) => {
-            switch_to(frame, next);
-            if eager_reap {
-                release_dead(slot);
-            }
-        }
-        None => {
+    // Resume a ready process. If none is ready but other processes are still
+    // blocked (e.g. the shell waiting for console input), idle until one is
+    // woken by an interrupt instead of shutting down.
+    let mut next = pick_ready();
+    if next.is_none() {
+        if !has_live_process_except(slot) {
             println!("[kernel] no runnable process; shutting down");
             crate::semihosting_exit(0x20026, 0);
         }
+        crate::gic::enable_irqs();
+        loop {
+            if let Some(ready) = pick_ready() {
+                next = Some(ready);
+                break;
+            }
+            unsafe { asm!("wfi") };
+        }
+        crate::gic::disable_irqs();
     }
+
+    if let Some(next) = next {
+        switch_to(frame, next);
+        if eager_reap {
+            release_dead(slot);
+        }
+    }
+}
+
+/// Whether any process besides `except` is still alive (not Free or Zombie).
+#[allow(static_mut_refs)]
+fn has_live_process_except(except: usize) -> bool {
+    (0..MAX_PROCESSES).any(|slot| {
+        slot != except && {
+            let state = unsafe { PROCESSES[slot].state };
+            state != State::Free && state != State::Zombie
+        }
+    })
 }
 
 /// Replace the current image, keeping PID and file descriptors.
