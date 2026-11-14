@@ -9,7 +9,7 @@
 //! from an ELF or PE image and `wait(pid)` returns its exit status.
 
 use core::arch::asm;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use crate::exceptions::ExceptionFrame;
 use crate::{elf, mmu, pe, println, ramfs};
@@ -20,6 +20,7 @@ pub const SYS_ERROR: u64 = u64::MAX;
 
 const INIT_PID: u64 = 1;
 static NEXT_PID: AtomicU64 = AtomicU64::new(INIT_PID);
+static USER_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum State {
@@ -136,6 +137,18 @@ fn pick_ready() -> Option<usize> {
 }
 
 #[allow(static_mut_refs)]
+fn pick_ready_after(current: usize) -> Option<usize> {
+    (1..MAX_PROCESSES).find_map(|offset| {
+        let slot = (current + offset) % MAX_PROCESSES;
+        (unsafe { PROCESSES[slot].state } == State::Ready).then_some(slot)
+    })
+}
+
+pub fn user_active() -> bool {
+    USER_ACTIVE.load(Ordering::Acquire)
+}
+
+#[allow(static_mut_refs)]
 fn reap(slot: usize) {
     unsafe {
         if let Some(space) = PROCESSES[slot].space.take() {
@@ -191,7 +204,7 @@ fn create(parent: u64, path: &str) -> Result<usize, &'static str> {
             frame: ExceptionFrame {
                 x: [0; 31],
                 elr: entry,
-                spsr: 0x80, // EL0t, IRQs masked
+                spsr: 0, // EL0t, IRQs enabled (timer preemption)
             },
             sp_el0: stack_top,
             fds: [EMPTY_DESCRIPTOR; MAX_FDS],
@@ -211,6 +224,10 @@ pub fn start_init() -> ! {
     println!();
     println!("Phase 13: per-process address spaces, spawn/exec/wait");
     let slot = create(0, "/init").expect("failed to start /init");
+
+    USER_ACTIVE.store(true, Ordering::Release);
+    crate::timer::start_periodic(crate::timer::frequency() / 20);
+    println!("[kernel] EL0 timer preemption enabled (50 ms quantum)");
 
     unsafe {
         PROCESSES[slot].state = State::Running;
@@ -234,6 +251,26 @@ pub fn start_init() -> ! {
             options(noreturn),
         );
     }
+}
+
+/// Timer-IRQ hook: rotate to another runnable process when one exists.
+///
+/// Called with interrupts masked from the IRQ vector. The frame on the kernel
+/// stack is the interrupted EL0 context; `switch_to` saves it and rewrites the
+/// frame with the next process's state.
+pub fn preempt(frame: &mut ExceptionFrame) {
+    if !user_active() {
+        return;
+    }
+
+    let Some(current) = current_slot() else {
+        return;
+    };
+    let Some(next) = pick_ready_after(current) else {
+        return;
+    };
+
+    switch_to(frame, next);
 }
 
 /// Save the current process and resume `next`, rewriting the exception frame.

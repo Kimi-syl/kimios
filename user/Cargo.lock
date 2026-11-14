@@ -24,5 +24,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "kimi-spin"
+version = "0.1.0"
+dependencies = [
+ "libkimi",
+]
+
+[[package]]
 name = "libkimi"
 version = "0.1.0"

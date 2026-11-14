@@ -22,6 +22,7 @@ fn main() {
     println!("cargo:rerun-if-changed=user/kimi-init");
     println!("cargo:rerun-if-changed=user/kimi-hello");
     println!("cargo:rerun-if-changed=user/kimi-fstest");
+    println!("cargo:rerun-if-changed=user/kimi-spin");
 
     let target_dir = manifest_dir.join("target/user-build");
     let linker = user_dir.join("linker.ld");
@@ -50,6 +51,7 @@ fn main() {
         ("kimi-init", "init.elf"),
         ("kimi-hello", "hello.elf"),
         ("kimi-fstest", "fstest.elf"),
+        ("kimi-spin", "spin.elf"),
     ] {
         let built = target_dir
             .join("aarch64-unknown-none/release")

@@ -56,7 +56,12 @@ No bootloader is used: QEMU loads the ELF directly with `-kernel`.
   driver (legacy v1 and modern v2 transports, polling request queue) and
   KimiFS, a small on-disk filesystem with a superblock, fixed inode table and
   contiguous file data. Files under `/disk/` survive reboots; `/init`,
-  `/hello`, `/hello.exe`, `/fstest` and `/motd` remain embedded in RamFS.
+  `/hello`, `/hello.exe`, `/fstest`, `/spin` and `/motd` remain embedded in
+  RamFS.
+- **Phase 15 - Preemptive EL0 scheduling:** the timer IRQ now round-robins
+  runnable user processes with a 50 ms quantum, saving/restoring the EL0
+  `ExceptionFrame` and switching `TTBR0_EL1` from the IRQ path. `spawn /spin`
+  twice demonstrates interleaved execution.
 
 ## Layout
 
@@ -65,7 +70,8 @@ No bootloader is used: QEMU loads the ELF directly with `-kernel`.
 Cargo.toml           dependencies, panic=abort
 build.rs             builds user/, copies init.elf + hello.elf, generates hello.exe
 linker.ld            0x4008_0000, .text.boot first, vector table kept, 64 KiB stack
-user/                EL0 workspace: libkimi (syscalls), kimi-init (shell), kimi-hello
+user/                EL0 workspace: libkimi (syscalls), kimi-init (shell), kimi-hello,
+                     kimi-fstest, kimi-spin
 src/boot.s           _start: EL1 entry, FP/SIMD enable, stack, .bss, kmain
 src/vectors.s        16-entry exception vector table + save/restore
 src/main.rs          kmain, panic handler, semihosting exit
@@ -307,6 +313,39 @@ formatting it, and `cat /disk/hello` returns the saved text. The free-frame
 count and file contents confirm that process teardown and disk updates both
 work.
 
+### Phase 15 - preemptive EL0 scheduling
+
+The EL1 physical timer is restarted before dropping to `/init`, and init's
+`SPSR_EL1` now has IRQs unmasked, so timer interrupts arrive from EL0. The
+lower-EL IRQ vector saves the same 272-byte `ExceptionFrame`; `irq_handler`
+receives that frame, re-arms the timer, EOI's the GIC, and calls
+`process::preempt`. It scans forward from the current slot for a `Ready`
+process, saves the interrupted frame and `SP_EL0`, installs the next
+process's frame and `TTBR0_EL1`, and `eret`s into it. A tick with no other
+runnable process keeps the current one running.
+
+```text
+$ spawn /spin
+[kernel] created pid 2 (parent 1) at 0x60000000
+spawned pid 2
+$ spawn /spin
+[kernel] created pid 3 (parent 1) at 0x60000000
+spawned pid 3
+$ wait 0
+22223322233332222333322223333222233322
+[kernel] pid 2 exited with status 0
+child exited with status 0
+$ wait 0
+3333333
+[kernel] pid 3 exited with status 0
+child exited with status 0
+```
+
+Kernel syscalls still run with IRQs masked by the exception entry, so a
+process inside a syscall (notably the busy-waiting UART `read`) is not
+preempted. Making `read` a blocking process state with a UART wakeup is the
+next scheduling step.
+
 The kernel exits QEMU cleanly (`status 0`) through ARM semihosting
 (`SYS_EXIT_EXTENDED`, `HLT #0xF000`). This is temporary scaffolding until a
 proper shutdown driver exists.
@@ -349,8 +388,9 @@ proper shutdown driver exists.
 - Process switching is synchronous: `spawn`/`wait`/`exit` save the current
   `ExceptionFrame`, set `TTBR0_EL1` to the next process's table, `TLBI
   VMALLE1`, and return the next process's frame to the exception return path.
-  No timer-driven EL0 preemption yet; the process model is deliberately
-  `spawn`-based rather than `fork`-based.
+  EL0 processes are preempted by the timer; kernel syscalls still run with
+  interrupts masked, so syscalls themselves are not preempted. The process
+  model is deliberately `spawn`-based rather than `fork`-based.
 - virtio-mmio legacy publishes a queue by page frame number and requires the
   descriptor table and available ring to be contiguous; using a 256-entry
   queue makes both rings land on separate 4 KiB pages, which also works for
@@ -360,6 +400,13 @@ proper shutdown driver exists.
 - The request queue lives in a 16 KiB page-aligned static region. Requests
   are synchronous: publish the chain, `DSB`, notify queue 0, then poll
   `used.idx`; no virtio interrupts are used.
+- An IRQ from EL0 uses the "Lower EL, AArch64" vector at offset `0x480`, but
+  it runs on the same kernel `SP_EL1` stack and saves the same frame layout as
+  an EL1 exception. `SPSR_EL1 & 0xf == 0` identifies the interrupted context
+  as EL0, which is how `irq_handler` decides between user preemption and the
+  old kernel-thread scheduler.
+- The user preemption quantum is `CNTFRQ_EL0 / 20` (50 ms here). The timer
+  must be re-armed before `ICC_EOIR1_EL1` because PPI 30 is level-sensitive.
 - PE images use the Windows ARM64 calling convention (`x0-x7` arguments,
   result in `x0`). Each imported function is pointed at a 16-byte EL0 thunk
   (`mov x8, #id; svc #0; ret; nop`), so no user-visible DLL is needed.

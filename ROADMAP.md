@@ -52,13 +52,14 @@ Target-independent, implemented before display/device work:
    and modern virtio-mmio transports, KimiFS, and `/disk/` through the same
    descriptor table; persistence verified across QEMU reboots.
 
-Preemption of EL0 processes is not yet enabled; user processes yield through
-`spawn`/`wait`/`exit`. Enabling EL0 IRQs and switching processes from the
-timer path is a later step.
+EL0 processes are now preempted by the timer (50 ms quantum, round-robin
+among `Ready` processes). Syscalls still execute with interrupts masked, so
+blocking a process inside a syscall (e.g. UART `read`) is the next step.
 
 ## Next
 
-1. EL0 timer preemption and a scheduler for runnable user processes.
+1. Blocking `read`: a process state woken by UART input, so background
+   processes keep running while the shell waits at the prompt.
 2. Display output: ramfb on QEMU, panel/DSI investigation on spes.
 3. Block storage beyond QEMU: UFS and the spes partition table (blocked on
    bootloader unlock for bare-metal testing).

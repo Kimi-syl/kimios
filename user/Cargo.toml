@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["libkimi", "kimi-init", "kimi-hello", "kimi-fstest"]
+members = ["libkimi", "kimi-init", "kimi-hello", "kimi-fstest", "kimi-spin"]
 
 [profile.release]
 panic = "abort"
