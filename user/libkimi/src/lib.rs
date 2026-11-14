@@ -35,6 +35,47 @@ pub const SYS_KILL: u64 = 24;
 pub const SYS_RENAME: u64 = 25;
 pub const SYS_RTC: u64 = 26;
 pub const SYS_STAT: u64 = 27;
+pub const SYS_LISTDIR: u64 = 28;
+pub const SYS_MKDIR: u64 = 29;
+pub const SYS_RMDIR: u64 = 30;
+pub const SYS_FB_MAP: u64 = 31;
+pub const SYS_INPUT_POLL: u64 = 32;
+pub const SYS_INPUT_WAIT: u64 = 33;
+
+pub const EV_KEY: u16 = 1;
+pub const EV_REL: u16 = 2;
+pub const EV_ABS: u16 = 3;
+pub const ABS_X: u16 = 0;
+pub const ABS_Y: u16 = 1;
+pub const BTN_LEFT: u16 = 0x110;
+pub const BTN_TOUCH: u16 = 0x14a;
+
+#[derive(Clone, Copy)]
+pub struct InputEvent {
+    pub kind: u16,
+    pub code: u16,
+    pub value: u32,
+}
+
+fn unpack(raw: u64) -> InputEvent {
+    InputEvent {
+        kind: (raw >> 48) as u16,
+        code: ((raw >> 32) & 0xffff) as u16,
+        value: raw as u32,
+    }
+}
+
+/// Non-blocking event fetch; `None` when the queue is empty.
+pub fn input_poll() -> Option<InputEvent> {
+    let raw = syscall3(SYS_INPUT_POLL, 0, 0, 0);
+    (raw != ERROR).then(|| unpack(raw))
+}
+
+/// Block until an input event is available.
+pub fn input_wait() -> Option<InputEvent> {
+    let raw = syscall3(SYS_INPUT_WAIT, 0, 0, 0);
+    (raw != ERROR).then(|| unpack(raw))
+}
 
 pub const STDIN: u64 = 0;
 pub const STDOUT: u64 = 1;
@@ -292,6 +333,33 @@ pub fn rename(old: &str, new: &str) -> bool {
     ) == 0
 }
 
+/// List a `/disk/...` directory into `buffer` (NUL-separated, dirs end in
+/// `/`). Returns the number of bytes written.
+pub fn listdir(path: &str, buffer: &mut [u8]) -> Option<usize> {
+    let result = syscall4(
+        SYS_LISTDIR,
+        path.as_ptr() as u64,
+        path.len() as u64,
+        buffer.as_mut_ptr() as u64,
+        buffer.len() as u64,
+    );
+    if result == ERROR {
+        None
+    } else {
+        Some(result as usize)
+    }
+}
+
+/// Create a `/disk/...` directory.
+pub fn mkdir(path: &str) -> bool {
+    syscall3(SYS_MKDIR, path.as_ptr() as u64, path.len() as u64, 0) == 0
+}
+
+/// Remove an empty `/disk/...` directory.
+pub fn rmdir(path: &str) -> bool {
+    syscall3(SYS_RMDIR, path.as_ptr() as u64, path.len() as u64, 0) == 0
+}
+
 /// File metadata: `(kind, size)` where kind 0 is RamFS and 1 is a disk file.
 pub fn stat(path: &str) -> Option<(u64, u64)> {
     let mut fields = [0u64; 3];
@@ -316,6 +384,17 @@ pub fn rtc() -> Option<[u64; 7]> {
         None
     } else {
         Some(fields)
+    }
+}
+
+/// Map the framebuffer read/write at a fixed address and return it. The text
+/// console stops drawing once a process takes over the display.
+pub fn fb_map() -> Option<u64> {
+    let result = syscall3(SYS_FB_MAP, 0, 0, 0);
+    if result == ERROR {
+        None
+    } else {
+        Some(result)
     }
 }
 

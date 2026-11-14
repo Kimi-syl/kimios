@@ -11,6 +11,7 @@ mod fb;
 mod font;
 mod fwcfg;
 mod gic;
+mod input;
 mod irq;
 mod mmu;
 mod pe;
@@ -223,12 +224,8 @@ pub extern "C" fn kmain(dtb: usize) -> ! {
     // Phase 30: virtio-input keyboard (shares the UART line editor).
     println!();
     println!("Phase 30: virtio keyboard");
-    match virtio_input::init() {
-        Ok((irq, version)) => println!(
-            "virtio-input: keyboard irq {} mmio v{}",
-            irq, version
-        ),
-        Err(reason) => println!("virtio-input: {}", reason),
+    if virtio_input::init() == 0 {
+        println!("virtio-input: no devices");
     }
 
     // Phase 13: create the init process and enter EL0.

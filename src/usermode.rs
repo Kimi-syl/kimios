@@ -35,16 +35,35 @@ pub const SYS_KILL: u64 = 24;
 pub const SYS_RENAME: u64 = 25;
 pub const SYS_RTC: u64 = 26;
 pub const SYS_STAT: u64 = 27;
+pub const SYS_LISTDIR: u64 = 28;
+pub const SYS_MKDIR: u64 = 29;
+pub const SYS_RMDIR: u64 = 30;
+pub const SYS_FB_MAP: u64 = 31;
+pub const SYS_INPUT_POLL: u64 = 32;
+pub const SYS_INPUT_WAIT: u64 = 33;
 
 /// Coarse user-accessible window: ELF, stack, PE image/thunks/stack.
 const USER_SPACE_START: u64 = 0x6000_0000;
-const USER_SPACE_END: u64 = 0x6500_0000;
+const USER_SPACE_END: u64 = 0x6800_0000;
 
 const ERROR: u64 = u64::MAX;
 const MAX_USER_TRANSFER: u64 = 8192;
 
+fn user_range(pointer: u64, length: u64) -> bool {
+    let Some(end) = pointer.checked_add(length) else {
+        return false;
+    };
+    pointer >= USER_SPACE_START
+        && end <= USER_SPACE_END
+        && process::user_range_ok(pointer, length)
+}
+
 fn user_bytes(pointer: u64, length: u64) -> Option<&'static [u8]> {
-    if pointer == 0 || length == 0 || length > MAX_USER_TRANSFER {
+    if pointer == 0
+        || length == 0
+        || length > MAX_USER_TRANSFER
+        || !user_range(pointer, length)
+    {
         return None;
     }
     // SAFETY: the caller is an EL0 process whose mappings are trusted by this
@@ -55,7 +74,11 @@ fn user_bytes(pointer: u64, length: u64) -> Option<&'static [u8]> {
 fn user_u64_buffer(pointer: u64, count: u64) -> Option<&'static mut [u64]> {
     let bytes = count.checked_mul(8)?;
     let end = pointer.checked_add(bytes)?;
-    if pointer < USER_SPACE_START || end > USER_SPACE_END || pointer & 7 != 0 {
+    if pointer < USER_SPACE_START
+        || end > USER_SPACE_END
+        || pointer & 7 != 0
+        || !process::user_range_ok(pointer, bytes)
+    {
         return None;
     }
     // SAFETY: the pointer lies in the user window; the caller is an EL0
@@ -64,7 +87,11 @@ fn user_u64_buffer(pointer: u64, count: u64) -> Option<&'static mut [u64]> {
 }
 
 fn user_buffer(pointer: u64, length: u64) -> Option<&'static mut [u8]> {
-    if pointer == 0 || length == 0 || length > MAX_USER_TRANSFER {
+    if pointer == 0
+        || length == 0
+        || length > MAX_USER_TRANSFER
+        || !user_range(pointer, length)
+    {
         return None;
     }
     // SAFETY: as above; the syscall uses the buffer only for this call.
@@ -214,12 +241,17 @@ pub fn sys_list(pointer: u64, length: u64) -> u64 {
     for file in ramfs::files() {
         push(file.name);
     }
-    diskfs::for_each_name(|name| {
-        let mut path = [0u8; 40];
+    diskfs::list_dir("", |name, is_dir| {
+        let mut path = [0u8; 48];
         path[..6].copy_from_slice(b"/disk/");
-        let length = core::cmp::min(name.len(), path.len() - 6);
+        let length = core::cmp::min(name.len(), path.len() - 7);
         path[6..6 + length].copy_from_slice(&name.as_bytes()[..length]);
-        if let Ok(path) = core::str::from_utf8(&path[..6 + length]) {
+        let mut end = 6 + length;
+        if is_dir && end < path.len() {
+            path[end] = b'/';
+            end += 1;
+        }
+        if let Ok(path) = core::str::from_utf8(&path[..end]) {
             push(path);
         }
     });
@@ -339,8 +371,8 @@ pub fn sys_stat(pointer: u64, length: u64, out_pointer: u64) -> u64 {
             return 0;
         }
         if let Some(name) = path.strip_prefix("/disk/") {
-            if let Some((size, blocks)) = diskfs::stat(name) {
-                out[0] = 1;
+            if let Some((kind, size, blocks)) = diskfs::stat(name) {
+                out[0] = kind;
                 out[1] = size;
                 out[2] = blocks;
                 return 0;
@@ -389,6 +421,117 @@ pub fn sys_kill(pid: u64) -> u64 {
 /// brk(request): query (0) or extend the user heap.
 pub fn sys_brk(request: u64) -> u64 {
     process::sys_brk(request)
+}
+
+/// Map "/disk" and "/disk/..." to a disk-relative path.
+fn disk_relative(path: &str) -> Option<&str> {
+    if path == "/disk" {
+        Some("")
+    } else {
+        path.strip_prefix("/disk/")
+    }
+}
+
+/// listdir(path, out, len) -> bytes written; each entry is NUL-terminated.
+pub fn sys_listdir(
+    pointer: u64,
+    length: u64,
+    out_pointer: u64,
+    out_length: u64,
+) -> u64 {
+    let Some(buffer) = user_buffer(out_pointer, out_length) else {
+        return ERROR;
+    };
+    with_user_path(pointer, length, |path| {
+        let Some(name) = disk_relative(path) else {
+            return ERROR;
+        };
+        let mut written = 0;
+        {
+            let mut push = |child: &str, is_dir: bool| {
+                for &byte in child.as_bytes() {
+                    if written < buffer.len() {
+                        buffer[written] = byte;
+                        written += 1;
+                    }
+                }
+                if is_dir && written < buffer.len() {
+                    buffer[written] = b'/';
+                    written += 1;
+                }
+                if written < buffer.len() {
+                    buffer[written] = 0;
+                    written += 1;
+                }
+            };
+            diskfs::list_dir(name, &mut push);
+        }
+        written as u64
+    })
+}
+
+/// mkdir("/disk/...") -> 0 on success.
+pub fn sys_mkdir(pointer: u64, length: u64) -> u64 {
+    with_user_path(pointer, length, |path| {
+        let Some(name) = disk_relative(path) else {
+            return ERROR;
+        };
+        if diskfs::mkdir(name) {
+            0
+        } else {
+            ERROR
+        }
+    })
+}
+
+/// rmdir("/disk/...") -> 0 on success.
+pub fn sys_rmdir(pointer: u64, length: u64) -> u64 {
+    with_user_path(pointer, length, |path| {
+        let Some(name) = disk_relative(path) else {
+            return ERROR;
+        };
+        if diskfs::rmdir(name) {
+            0
+        } else {
+            ERROR
+        }
+    })
+}
+
+pub enum InputOutcome {
+    Done(u64),
+    Switched,
+}
+
+/// input_poll() -> packed event or u64::MAX.
+pub fn sys_input_poll() -> u64 {
+    crate::input::pop()
+        .map(crate::input::pack)
+        .unwrap_or(ERROR)
+}
+
+/// input_wait() -> packed event; blocks until one is queued.
+pub fn sys_input_wait(frame: &mut ExceptionFrame) -> InputOutcome {
+    if let Some(event) = crate::input::pop() {
+        return InputOutcome::Done(crate::input::pack(event));
+    }
+    if process::block_on_input(frame) {
+        return InputOutcome::Switched;
+    }
+    crate::input::wait_for_event();
+    InputOutcome::Done(
+        crate::input::pop()
+            .map(crate::input::pack)
+            .unwrap_or(ERROR),
+    )
+}
+
+/// fb_map() -> user address of the framebuffer, or u64::MAX.
+pub fn sys_fb_map() -> u64 {
+    if !crate::fb::ready() {
+        return ERROR;
+    }
+    process::map_framebuffer().unwrap_or(ERROR)
 }
 
 /// Number of free data blocks, or u64::MAX without a mounted disk.

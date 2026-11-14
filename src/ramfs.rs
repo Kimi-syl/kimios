@@ -39,7 +39,19 @@ static SLEEPER_ELF: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/sleeper.el
 
 static ALLOCTEST_ELF: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/alloctest.elf"));
 
-static FILES: [File; 10] = [
+static GFXTEST_ELF: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/gfxtest.elf"));
+
+static INPUTTEST_ELF: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/inputtest.elf"));
+
+static GUI_ELF: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/gui.elf"));
+
+static FAULTTEST_ELF: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/faulttest.elf"));
+
+static BADPTR_ELF: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/badptr.elf"));
+
+static STRESS_ELF: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/stress.elf"));
+
+static FILES: [File; 16] = [
     File {
         name: "/init",
         data: INIT_ELF,
@@ -75,6 +87,30 @@ static FILES: [File; 10] = [
     File {
         name: "/alloctest",
         data: ALLOCTEST_ELF,
+    },
+    File {
+        name: "/gfxtest",
+        data: GFXTEST_ELF,
+    },
+    File {
+        name: "/inputtest",
+        data: INPUTTEST_ELF,
+    },
+    File {
+        name: "/gui",
+        data: GUI_ELF,
+    },
+    File {
+        name: "/faulttest",
+        data: FAULTTEST_ELF,
+    },
+    File {
+        name: "/badptr",
+        data: BADPTR_ELF,
+    },
+    File {
+        name: "/stress",
+        data: STRESS_ELF,
     },
     File {
         name: "/motd",

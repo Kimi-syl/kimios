@@ -1,0 +1,7 @@
+[package]
+name = "kimi-inputtest"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+libkimi = { path = "../libkimi" }

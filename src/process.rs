@@ -19,6 +19,8 @@ pub const MAX_FDS: usize = 8;
 /// User heap window: `brk` grows page by page from here.
 pub const USER_HEAP_START: u64 = 0x6080_0000;
 pub const USER_HEAP_LIMIT: u64 = 0x60C0_0000;
+/// Fixed user mapping for the framebuffer (read/write, no execute).
+pub const USER_FB_VA: u64 = 0x6600_0000;
 pub const SYS_ERROR: u64 = u64::MAX;
 
 const INIT_PID: u64 = 1;
@@ -26,6 +28,8 @@ static NEXT_PID: AtomicU64 = AtomicU64::new(INIT_PID);
 static USER_ACTIVE: AtomicBool = AtomicBool::new(false);
 /// PID currently blocked in `read`, or 0. The console IRQ wakes it.
 static READER_PID: AtomicU64 = AtomicU64::new(0);
+/// PID currently blocked in `input_wait`, or 0. The input IRQ wakes it.
+static INPUT_PID: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum State {
@@ -60,12 +64,16 @@ pub struct Process {
     wait_target: u64,
     /// True when blocked in `read` rather than in `wait`.
     read_wait: bool,
+    /// True when blocked in `input_wait`.
+    input_wait: bool,
     /// Deadline in milliseconds for a blocked sleeper (0 = not sleeping).
     sleep_at: u64,
     /// Set by the timer IRQ so a woken sleeper's retried SVC returns 0.
     sleep_done: bool,
     /// Current program break (one past the last byte of the user heap).
     brk: u64,
+    /// True when the framebuffer has been mapped into this process.
+    fb_mapped: bool,
     space: Option<mmu::AddressSpace>,
     frame: ExceptionFrame,
     sp_el0: u64,
@@ -79,9 +87,11 @@ const EMPTY_PROCESS: Process = Process {
     exit_status: 0,
     wait_target: 0,
     read_wait: false,
+    input_wait: false,
     sleep_at: 0,
     sleep_done: false,
     brk: 0,
+    fb_mapped: false,
     space: None,
     frame: ExceptionFrame::EMPTY,
     sp_el0: 0,
@@ -168,6 +178,9 @@ pub fn user_active() -> bool {
 #[allow(static_mut_refs)]
 fn reap(slot: usize) {
     unsafe {
+        if PROCESSES[slot].fb_mapped {
+            crate::fb::set_console(true);
+        }
         if let Some(space) = PROCESSES[slot].space.take() {
             space.destroy();
         }
@@ -178,6 +191,9 @@ fn reap(slot: usize) {
 #[allow(static_mut_refs)]
 fn release_dead(slot: usize) {
     unsafe {
+        if PROCESSES[slot].fb_mapped {
+            crate::fb::set_console(true);
+        }
         if let Some(space) = PROCESSES[slot].space.take() {
             space.destroy();
         }
@@ -218,9 +234,11 @@ fn create(parent: u64, path: &str) -> Result<usize, &'static str> {
             exit_status: 0,
             wait_target: 0,
             read_wait: false,
+            input_wait: false,
             sleep_at: 0,
             sleep_done: false,
             brk: USER_HEAP_START,
+            fb_mapped: false,
             space: Some(space),
             frame: ExceptionFrame {
                 x: [0; 31],
@@ -371,6 +389,49 @@ pub fn block_on_read(frame: &mut ExceptionFrame) -> bool {
     true
 }
 
+/// Block the current process until an input event is queued.
+///
+/// Like `block_on_read`, the SVC is rewound so the retried call pops the event.
+#[allow(static_mut_refs)]
+pub fn block_on_input(frame: &mut ExceptionFrame) -> bool {
+    if !user_active() {
+        return false;
+    }
+    let Some(slot) = current_slot() else {
+        return false;
+    };
+    let Some(next) = pick_ready() else {
+        return false;
+    };
+
+    let pid = unsafe { PROCESSES[slot].pid };
+    INPUT_PID.store(pid, Ordering::Release);
+    unsafe {
+        PROCESSES[slot].state = State::Blocked;
+        PROCESSES[slot].input_wait = true;
+    }
+    frame.elr = frame.elr.wrapping_sub(4);
+    switch_to(frame, next);
+    true
+}
+
+/// Input-IRQ hook: make the process blocked in `input_wait` runnable.
+#[allow(static_mut_refs)]
+pub fn wake_input() {
+    let pid = INPUT_PID.swap(0, Ordering::AcqRel);
+    if pid == 0 {
+        return;
+    }
+    if let Some(slot) = slot_of_pid(pid) {
+        unsafe {
+            if PROCESSES[slot].state == State::Blocked {
+                PROCESSES[slot].state = State::Ready;
+                PROCESSES[slot].input_wait = false;
+            }
+        }
+    }
+}
+
 /// Console-IRQ hook: move the process blocked in `read` back to the ready
 /// queue. Runs with interrupts masked.
 #[allow(static_mut_refs)]
@@ -495,18 +556,23 @@ pub fn sys_wait(frame: &mut ExceptionFrame, target: u64) -> WaitOutcome {
     }
 
     match pick_ready() {
-        Some(next) => {
-            switch_to(frame, next);
-            WaitOutcome::Switched
-        }
+        Some(next) => switch_to(frame, next),
         None => {
-            unsafe {
-                PROCESSES[slot].state = State::Running;
-                PROCESSES[slot].wait_target = 0;
-            }
-            WaitOutcome::Status(SYS_ERROR)
+            // The child may be alive but blocked (e.g. a GUI waiting for
+            // input). Do not fail the wait: idle until an interrupt makes
+            // some process runnable, then switch to it.
+            crate::gic::enable_irqs();
+            let next = loop {
+                if let Some(ready) = pick_ready() {
+                    break ready;
+                }
+                unsafe { asm!("wfi") };
+            };
+            crate::gic::disable_irqs();
+            switch_to(frame, next);
         }
     }
+    WaitOutcome::Switched
 }
 
 /// Terminate the current process and resume another one.
@@ -522,6 +588,9 @@ pub fn sys_exit(frame: &mut ExceptionFrame, status: u64) {
 
     if READER_PID.load(Ordering::Acquire) == me {
         READER_PID.store(0, Ordering::Release);
+    }
+    if INPUT_PID.load(Ordering::Acquire) == me {
+        INPUT_PID.store(0, Ordering::Release);
     }
 
     unsafe {
@@ -582,11 +651,14 @@ pub fn sys_exit(frame: &mut ExceptionFrame, status: u64) {
         crate::gic::disable_irqs();
     }
 
+    // Reap before switching: `switch_to` resumes the parent via `eret` and
+    // never returns, so cleanup placed after it would be dead code.
+    if eager_reap {
+        release_dead(slot);
+    }
+
     if let Some(next) = next {
         switch_to(frame, next);
-        if eager_reap {
-            release_dead(slot);
-        }
     }
 }
 
@@ -628,6 +700,10 @@ pub fn sys_exec(frame: &mut ExceptionFrame, path: &str) -> u64 {
         let old = PROCESSES[slot].space.replace(space);
         PROCESSES[slot].sp_el0 = stack_top;
         PROCESSES[slot].brk = USER_HEAP_START;
+        if PROCESSES[slot].fb_mapped {
+            crate::fb::set_console(true);
+            PROCESSES[slot].fb_mapped = false;
+        }
         frame.elr = entry;
 
         PROCESSES[slot]
@@ -806,6 +882,60 @@ pub fn sys_brk(request: u64) -> u64 {
 
     process.brk = new_end;
     new_end
+}
+
+/// Whether `[pointer, pointer + length)` is fully mapped in the calling
+/// process. Syscalls use this before touching user memory so a bad pointer
+/// kills the caller instead of faulting the kernel.
+#[allow(static_mut_refs)]
+pub fn user_range_ok(pointer: u64, length: u64) -> bool {
+    if length == 0 {
+        return true;
+    }
+    let Some(end) = pointer.checked_add(length) else {
+        return false;
+    };
+    let Some(slot) = current_slot() else {
+        return false;
+    };
+    let Some(space) = (unsafe { PROCESSES[slot].space.as_ref() }) else {
+        return false;
+    };
+    let mut page = pointer & !0xfff;
+    while page < end {
+        if space.translate(page).is_none() {
+            return false;
+        }
+        page += 0x1000;
+    }
+    true
+}
+
+/// Map the framebuffer into the current process and hand drawing to user
+/// space by silencing the text console. Returns the fixed user address.
+#[allow(static_mut_refs)]
+pub fn map_framebuffer() -> Option<u64> {
+    let slot = current_slot()?;
+    if unsafe { PROCESSES[slot].fb_mapped } {
+        return Some(USER_FB_VA);
+    }
+    let (physical, stride, height) = crate::fb::mapping()?;
+    let bytes = (stride * height) as u64;
+    let pages = (bytes + 0xfff) / 0x1000;
+
+    let space = unsafe { PROCESSES[slot].space.as_mut() }?;
+    for page in 0..pages {
+        space.map_shared_page(
+            USER_FB_VA + page * 0x1000,
+            physical + page * 0x1000,
+            false,
+        );
+    }
+    unsafe {
+        PROCESSES[slot].fb_mapped = true;
+    }
+    crate::fb::set_console(false);
+    Some(USER_FB_VA)
 }
 
 /// Allocate a descriptor for `index` of `kind` in the current process.

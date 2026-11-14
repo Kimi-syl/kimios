@@ -95,6 +95,22 @@ Target-independent, implemented before display/device work:
 20. ~~Keyboard input.~~ Done: virtio-input (id 18) driver with legacy and
     modern transports, shift-aware keycode translation into the shared UART
     line editor; verified with QMP key events.
+21. ~~Directories.~~ Done: KimiFS parent/kind fields, component-wise path
+    resolution, `mkdir`/`rmdir`/`listdir`, nested `mv`/`rm`/`stat`; inode 0
+    reserved and legacy disks migrated at mount.
+22. ~~User-space framebuffer.~~ Done: `fb_map` (31) maps the shared pixel
+    buffer read/write and suppresses console mirroring; `/gfxtest` draws at
+    compositor speed and is pixel-verified via screendump.
+23. ~~Pointer input and events.~~ Done: two virtio-input devices (keyboard +
+    tablet), type detection via EV_BITS, lock-free event ring, blocking
+    `input_wait` (33) with its own wakeup path; `/inputtest` verified.
+24. ~~GUI demo.~~ Done: `/gui` draws windows and a cursor with a clickable
+    button over the mapped framebuffer; fixes `wait` on blocked children and
+    eager reaping before `switch_to`.
+25. ~~Stability hardening.~~ Done: coalescing kernel heap with ELF buffers
+    freed, lower-EL fault statuses (139/135) that kill only the faulting
+    process, and page-walked syscall buffer validation; `/stress` returns all
+    frames across repeated runs.
 
 EL0 processes are preempted by the timer (50 ms quantum, round-robin among
 `Ready` processes), and a process blocked in `read` yields the CPU. Syscalls

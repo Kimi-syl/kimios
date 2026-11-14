@@ -23,6 +23,7 @@ pub extern "C" fn irq_handler(frame: *mut ExceptionFrame) {
     let intid = iar & 0x00ff_ffff;
     let mut timer_tick = false;
     let mut line_ready = false;
+    let mut input_ready = false;
 
     if intid == gic::TIMER_INTID {
         // Re-arm before EOI so the level-sensitive line deasserts.
@@ -38,8 +39,13 @@ pub extern "C" fn irq_handler(frame: *mut ExceptionFrame) {
 
     } else if intid == gic::UART_INTID {
         line_ready = uart::rx_interrupt();
-    } else if intid == crate::virtio_input::interrupt_id() {
-        line_ready = crate::virtio_input::interrupt();
+    } else if crate::virtio_input::handles(intid) {
+        let (line, queued) = crate::virtio_input::interrupt(intid);
+        line_ready = line;
+        input_ready = queued;
+        if queued {
+            process::wake_input();
+        }
     } else if intid != 1023 {
         println!("Unexpected IRQ: INTID {}", intid);
     }
@@ -66,7 +72,7 @@ pub extern "C" fn irq_handler(frame: *mut ExceptionFrame) {
             // Kernel-thread round-robin during the Phase 7-8 demos.
             sched::on_timer_tick();
         }
-    } else if line_ready && from_el0 {
+    } else if (line_ready || input_ready) && from_el0 {
         // A blocked reader became runnable; switch to it promptly.
         process::preempt(frame);
     }

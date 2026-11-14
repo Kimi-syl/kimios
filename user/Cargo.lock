@@ -10,6 +10,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "kimi-badptr"
+version = "0.1.0"
+dependencies = [
+ "libkimi",
+]
+
+[[package]]
+name = "kimi-faulttest"
+version = "0.1.0"
+dependencies = [
+ "libkimi",
+]
+
+[[package]]
 name = "kimi-fbtest"
 version = "0.1.0"
 dependencies = [
@@ -18,6 +32,20 @@ dependencies = [
 
 [[package]]
 name = "kimi-fstest"
+version = "0.1.0"
+dependencies = [
+ "libkimi",
+]
+
+[[package]]
+name = "kimi-gfxtest"
+version = "0.1.0"
+dependencies = [
+ "libkimi",
+]
+
+[[package]]
+name = "kimi-gui"
 version = "0.1.0"
 dependencies = [
  "libkimi",
@@ -45,6 +73,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "kimi-inputtest"
+version = "0.1.0"
+dependencies = [
+ "libkimi",
+]
+
+[[package]]
 name = "kimi-sleeper"
 version = "0.1.0"
 dependencies = [
@@ -53,6 +88,13 @@ dependencies = [
 
 [[package]]
 name = "kimi-spin"
+version = "0.1.0"
+dependencies = [
+ "libkimi",
+]
+
+[[package]]
+name = "kimi-stress"
 version = "0.1.0"
 dependencies = [
  "libkimi",

@@ -27,15 +27,24 @@ pub fn load(
 ) -> Result<LoadedImage, &'static str> {
     // xmas-elf/zero requires the ELF header to be naturally aligned, but
     // include_bytes! only guarantees byte alignment. Parse from an aligned
-    // copy instead.
+    // copy instead; the copy is returned to the kernel heap afterwards.
     let layout = core::alloc::Layout::from_size_align(image.len(), 16)
         .map_err(|_| "invalid ELF size")?;
     let aligned = allocator::alloc(layout).ok_or("out of memory for ELF buffer")?;
-    let image = unsafe {
+    let buffer = unsafe {
         core::ptr::copy_nonoverlapping(image.as_ptr(), aligned.as_ptr(), image.len());
         core::slice::from_raw_parts(aligned.as_ptr(), image.len())
     };
 
+    let result = load_aligned(buffer, space);
+    allocator::dealloc(aligned);
+    result
+}
+
+fn load_aligned(
+    image: &[u8],
+    space: &mut mmu::AddressSpace,
+) -> Result<LoadedImage, &'static str> {
     let elf = ElfFile::new(image).map_err(|_| "not a valid ELF file")?;
     let entry = elf.header.pt2.entry_point();
 

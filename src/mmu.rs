@@ -227,6 +227,20 @@ impl AddressSpace {
 
     /// Map one 4 KiB user page. `executable` controls UXN; PXN is always set.
     pub fn map_page(&mut self, virtual_address: u64, physical_address: u64, executable: bool) {
+        self.map_entry(virtual_address, physical_address, executable);
+    }
+
+    /// Map an existing physical page without owning it (shared framebuffer).
+    pub fn map_shared_page(
+        &mut self,
+        virtual_address: u64,
+        physical_address: u64,
+        executable: bool,
+    ) {
+        self.map_entry(virtual_address, physical_address, executable);
+    }
+
+    fn map_entry(&mut self, virtual_address: u64, physical_address: u64, executable: bool) {
         let l2_index = ((virtual_address >> 21) & 0x1ff) as usize;
         let l3_index = ((virtual_address >> 12) & 0x1ff) as usize;
         let table = self.l3_table(l2_index);

@@ -34,6 +34,13 @@ const INODE_KIND: usize = 33;
 const INODE_SIZE_OFF: usize = 36;
 const INODE_FIRST: usize = 44;
 const INODE_BLOCKS_OFF: usize = 52;
+const INODE_PARENT: usize = 60;
+
+const KIND_FILE: u8 = 1;
+const KIND_DIR: u8 = 2;
+/// Parent value used by entries in the filesystem root. Inode 0 is reserved.
+const ROOT: u64 = 0;
+const MAX_COMPONENTS: usize = 8;
 
 struct Fs {
     mounted: bool,
@@ -243,6 +250,11 @@ pub fn mount() -> bool {
         return true;
     }
 
+    if let Err(error) = migrate_reserved_inode() {
+        crate::println!("[disk] inode migration failed: {}", error);
+        return false;
+    }
+
     if total > MAX_BLOCKS {
         crate::println!(
             "[disk] KimiFS supports at most {} sectors; {} not mounted",
@@ -289,6 +301,30 @@ fn count_files() -> Result<u64, &'static str> {
     Ok(count)
 }
 
+/// Inode 0 is reserved (specifically not a directory) so that parent 0 can
+/// mean "root". Older disks may store a file there; move it once at mount.
+fn migrate_reserved_inode() -> Result<(), &'static str> {
+    let mut first = [0u8; INODE_SIZE];
+    read_inode(0, &mut first)?;
+    if first[INODE_USED] == 0 {
+        return Ok(());
+    }
+
+    let mut inode = [0u8; INODE_SIZE];
+    for index in 1..INODE_COUNT {
+        read_inode(index, &mut inode)?;
+        if inode[INODE_USED] == 0 {
+            write_inode(index, &first)?;
+            let zero = [0u8; INODE_SIZE];
+            write_inode(0, &zero)?;
+            block::flush()?;
+            crate::println!("[disk] moved legacy inode 0 to {}", index);
+            return Ok(());
+        }
+    }
+    Err("no free inode for migration")
+}
+
 fn inode_lba(index: usize) -> (u64, usize) {
     let byte = index * INODE_SIZE;
     (INODE_LBA + (byte / SECTOR_SIZE) as u64, byte % SECTOR_SIZE)
@@ -327,78 +363,159 @@ fn name_is_valid(name: &str) -> bool {
         && name.bytes().all(|byte| byte.is_ascii_graphic() && byte != b'/')
 }
 
-/// Find a file by name; returns its inode index.
-pub fn lookup(name: &str) -> Option<usize> {
-    let fs = FS.lock();
-    if !fs.mounted {
+fn split_path(path: &str) -> Option<([&str; MAX_COMPONENTS], usize)> {
+    if path.is_empty()
+        || path.starts_with('/')
+        || path.ends_with('/')
+        || path.contains("//")
+    {
         return None;
     }
+    let mut parts = [""; MAX_COMPONENTS];
+    let mut count = 0;
+    for part in path.split('/') {
+        if count == MAX_COMPONENTS || !name_is_valid(part) {
+            return None;
+        }
+        parts[count] = part;
+        count += 1;
+    }
+    Some((parts, count))
+}
 
+/// Find `name` in directory `parent` (0 = root). Caller holds the FS lock.
+fn find_child(parent: u64, name: &str) -> Option<usize> {
     let mut inode = [0u8; INODE_SIZE];
-    for index in 0..INODE_COUNT {
+    for index in 1..INODE_COUNT {
         if read_inode(index, &mut inode).is_err() {
             return None;
         }
-        if inode[INODE_USED] != 0 && inode_name(&inode) == name {
+        if inode[INODE_USED] != 0
+            && read_u64(&inode, INODE_PARENT) == parent
+            && inode_name(&inode) == name
+        {
             return Some(index);
         }
     }
     None
 }
 
-/// Create or truncate a file; returns its inode index.
-pub fn create(name: &str) -> Option<usize> {
-    if !name_is_valid(name) {
-        return None;
+/// Resolve the first `count` components as directories, returning the final
+/// directory inode (0 = root). Caller holds the FS lock.
+fn resolve_dir(parts: &[&str], count: usize) -> Option<u64> {
+    let mut parent = ROOT;
+    for part in parts.iter().take(count) {
+        let index = find_child(parent, part)?;
+        let mut inode = [0u8; INODE_SIZE];
+        read_inode(index, &mut inode).ok()?;
+        if inode[INODE_KIND] != KIND_DIR {
+            return None;
+        }
+        parent = index as u64;
     }
+    Some(parent)
+}
 
-    let mut fs = FS.lock();
-    if !fs.mounted {
-        return None;
-    }
+/// Split a path into its parent directory and final component.
+fn resolve<'a>(path: &'a str) -> Option<(u64, &'a str)> {
+    let (parts, count) = split_path(path)?;
+    let parent = resolve_dir(&parts, count - 1)?;
+    Some((parent, parts[count - 1]))
+}
 
+fn first_free_inode() -> Option<usize> {
     let mut inode = [0u8; INODE_SIZE];
-    for index in 0..INODE_COUNT {
-        if read_inode(index, &mut inode).is_err() {
-            return None;
-        }
-        if inode[INODE_USED] != 0 && inode_name(&inode) == name {
-            let first = read_u64(&inode, INODE_FIRST);
-            let blocks = read_u64(&inode, INODE_BLOCKS_OFF);
-            if blocks > 0 {
-                fs.mark_range(first, blocks, false);
-            }
-            write_u64(&mut inode, INODE_SIZE_OFF, 0);
-            write_u64(&mut inode, INODE_FIRST, 0);
-            write_u64(&mut inode, INODE_BLOCKS_OFF, 0);
-            let result = write_inode(index, &inode);
-            let _ = write_superblock(&fs);
-            let _ = block::flush();
-            if result.is_err() {
-                return None;
-            }
-            return Some(index);
-        }
-    }
-
-    for index in 0..INODE_COUNT {
-        if read_inode(index, &mut inode).is_err() {
-            return None;
-        }
+    for index in 1..INODE_COUNT {
+        read_inode(index, &mut inode).ok()?;
         if inode[INODE_USED] == 0 {
-            let mut fresh = [0u8; INODE_SIZE];
-            fresh[..name.len()].copy_from_slice(name.as_bytes());
-            fresh[INODE_USED] = 1;
-            fresh[INODE_KIND] = 1;
-            if write_inode(index, &fresh).is_err() {
-                return None;
-            }
-            fs.files += 1;
-            let _ = block::flush();
             return Some(index);
         }
     }
     None
+}
+
+/// Find a file or directory by disk-relative path.
+pub fn lookup(path: &str) -> Option<usize> {
+    let fs = FS.lock();
+    if !fs.mounted {
+        return None;
+    }
+    let (parent, name) = resolve(path)?;
+    find_child(parent, name)
+}
+
+/// Create or truncate a file; returns its inode index.
+pub fn create(path: &str) -> Option<usize> {
+    let (parts, count) = split_path(path)?;
+    let mut fs = FS.lock();
+    if !fs.mounted {
+        return None;
+    }
+    let parent = resolve_dir(&parts, count - 1)?;
+    let name = parts[count - 1];
+
+    if let Some(index) = find_child(parent, name) {
+        let mut inode = [0u8; INODE_SIZE];
+        read_inode(index, &mut inode).ok()?;
+        if inode[INODE_KIND] == KIND_DIR {
+            return None;
+        }
+        let first = read_u64(&inode, INODE_FIRST);
+        let blocks = read_u64(&inode, INODE_BLOCKS_OFF);
+        if blocks > 0 {
+            fs.mark_range(first, blocks, false);
+        }
+        write_u64(&mut inode, INODE_SIZE_OFF, 0);
+        write_u64(&mut inode, INODE_FIRST, 0);
+        write_u64(&mut inode, INODE_BLOCKS_OFF, 0);
+        let result = write_inode(index, &inode);
+        let _ = write_superblock(&fs);
+        let _ = block::flush();
+        return result.is_ok().then_some(index);
+    }
+
+    let index = first_free_inode()?;
+    let mut fresh = [0u8; INODE_SIZE];
+    fresh[..name.len()].copy_from_slice(name.as_bytes());
+    fresh[INODE_USED] = 1;
+    fresh[INODE_KIND] = KIND_FILE;
+    write_u64(&mut fresh, INODE_PARENT, parent);
+    write_inode(index, &fresh).ok()?;
+    fs.files += 1;
+    let _ = block::flush();
+    Some(index)
+}
+
+/// Create a directory; fails if the name already exists.
+pub fn mkdir(path: &str) -> bool {
+    let Some((parts, count)) = split_path(path) else {
+        return false;
+    };
+    let mut fs = FS.lock();
+    if !fs.mounted {
+        return false;
+    }
+    let Some(parent) = resolve_dir(&parts, count - 1) else {
+        return false;
+    };
+    let name = parts[count - 1];
+    if find_child(parent, name).is_some() {
+        return false;
+    }
+    let Some(index) = first_free_inode() else {
+        return false;
+    };
+    let mut fresh = [0u8; INODE_SIZE];
+    fresh[..name.len()].copy_from_slice(name.as_bytes());
+    fresh[INODE_USED] = 1;
+    fresh[INODE_KIND] = KIND_DIR;
+    write_u64(&mut fresh, INODE_PARENT, parent);
+    if write_inode(index, &fresh).is_err() {
+        return false;
+    }
+    fs.files += 1;
+    let _ = block::flush();
+    true
 }
 
 /// Read up to `buffer.len()` bytes at `offset`.
@@ -542,102 +659,186 @@ pub fn write(inode_index: usize, offset: u64, data: &[u8]) -> Result<usize, &'st
 }
 
 /// Remove a file, returning its block run to the bitmap.
-pub fn unlink(name: &str) -> bool {
+pub fn unlink(path: &str) -> bool {
+    let Some((parent, name)) = resolve(path) else {
+        return false;
+    };
     let mut fs = FS.lock();
     if !fs.mounted {
         return false;
     }
-
+    let Some(index) = find_child(parent, name) else {
+        return false;
+    };
     let mut inode = [0u8; INODE_SIZE];
-    for index in 0..INODE_COUNT {
-        if read_inode(index, &mut inode).is_err() {
-            return false;
-        }
-        if inode[INODE_USED] != 0 && inode_name(&inode) == name {
-            let first = read_u64(&inode, INODE_FIRST);
-            let blocks = read_u64(&inode, INODE_BLOCKS_OFF);
-            if blocks > 0 {
-                fs.mark_range(first, blocks, false);
-            }
-
-            let zero = [0u8; INODE_SIZE];
-            if write_inode(index, &zero).is_err() {
-                return false;
-            }
-            fs.files = fs.files.saturating_sub(1);
-            let _ = write_superblock(&fs);
-            let _ = block::flush();
-            return true;
-        }
+    if read_inode(index, &mut inode).is_err() {
+        return false;
     }
-    false
+    if inode[INODE_KIND] == KIND_DIR {
+        return false;
+    }
+
+    let first = read_u64(&inode, INODE_FIRST);
+    let blocks = read_u64(&inode, INODE_BLOCKS_OFF);
+    if blocks > 0 {
+        fs.mark_range(first, blocks, false);
+    }
+
+    let zero = [0u8; INODE_SIZE];
+    if write_inode(index, &zero).is_err() {
+        return false;
+    }
+    fs.files = fs.files.saturating_sub(1);
+    let _ = write_superblock(&fs);
+    let _ = block::flush();
+    true
 }
 
-/// File size and block count, if the name exists.
-pub fn stat(name: &str) -> Option<(u64, u64)> {
+/// Remove an empty directory.
+pub fn rmdir(path: &str) -> bool {
+    let Some((parent, name)) = resolve(path) else {
+        return false;
+    };
+    let mut fs = FS.lock();
+    if !fs.mounted {
+        return false;
+    }
+    let Some(index) = find_child(parent, name) else {
+        return false;
+    };
+    let mut inode = [0u8; INODE_SIZE];
+    if read_inode(index, &mut inode).is_err() || inode[INODE_KIND] != KIND_DIR {
+        return false;
+    }
+
+    let mut child = [0u8; INODE_SIZE];
+    for other in 1..INODE_COUNT {
+        if read_inode(other, &mut child).is_err() {
+            return false;
+        }
+        if child[INODE_USED] != 0 && read_u64(&child, INODE_PARENT) == index as u64 {
+            return false;
+        }
+    }
+
+    let zero = [0u8; INODE_SIZE];
+    if write_inode(index, &zero).is_err() {
+        return false;
+    }
+    fs.files = fs.files.saturating_sub(1);
+    let _ = block::flush();
+    true
+}
+
+/// Entry kind, size and block count for a path.
+pub fn stat(path: &str) -> Option<(u64, u64, u64)> {
     let fs = FS.lock();
     if !fs.mounted {
         return None;
     }
+    let (parent, name) = resolve(path)?;
+    let index = find_child(parent, name)?;
     let mut inode = [0u8; INODE_SIZE];
-    for index in 0..INODE_COUNT {
-        if read_inode(index, &mut inode).is_err() {
-            return None;
-        }
-        if inode[INODE_USED] != 0 && inode_name(&inode) == name {
-            return Some((
-                read_u64(&inode, INODE_SIZE_OFF),
-                read_u64(&inode, INODE_BLOCKS_OFF),
-            ));
-        }
-    }
-    None
+    read_inode(index, &mut inode).ok()?;
+    Some((
+        inode[INODE_KIND] as u64,
+        read_u64(&inode, INODE_SIZE_OFF),
+        read_u64(&inode, INODE_BLOCKS_OFF),
+    ))
 }
 
-/// Rename a file. Fails if the old name is missing or the new one is taken.
+/// Rename or move a file or directory.
 pub fn rename(old: &str, new: &str) -> bool {
-    if !name_is_valid(old) || !name_is_valid(new) || old == new {
+    if old == new {
         return false;
     }
+    let Some((old_parent, old_name)) = resolve(old) else {
+        return false;
+    };
+    let Some((new_parent, new_name)) = resolve(new) else {
+        return false;
+    };
 
     let fs = FS.lock();
     if !fs.mounted {
         return false;
     }
-
-    let mut inode = [0u8; INODE_SIZE];
-    let mut target = None;
-    for index in 0..INODE_COUNT {
-        if read_inode(index, &mut inode).is_err() {
-            return false;
-        }
-        if inode[INODE_USED] == 0 {
-            continue;
-        }
-        let name = inode_name(&inode);
-        if name == new {
-            return false;
-        }
-        if name == old && target.is_none() {
-            target = Some(index);
-        }
-    }
-
-    let Some(index) = target else {
+    let Some(index) = find_child(old_parent, old_name) else {
         return false;
     };
+    if find_child(new_parent, new_name).is_some() {
+        return false;
+    }
+    // Moving a directory into itself would detach a subtree.
+    let mut inode = [0u8; INODE_SIZE];
     if read_inode(index, &mut inode).is_err() {
         return false;
     }
+    if inode[INODE_KIND] == KIND_DIR {
+        let mut cursor = new_parent;
+        while cursor != ROOT {
+            if cursor == index as u64 {
+                return false;
+            }
+            let Some(entry) = find_inode_by_index(cursor as usize) else {
+                return false;
+            };
+            cursor = entry;
+        }
+    }
+
     for byte in &mut inode[..32] {
         *byte = 0;
     }
-    inode[..new.len()].copy_from_slice(new.as_bytes());
+    inode[..new_name.len()].copy_from_slice(new_name.as_bytes());
+    write_u64(&mut inode, INODE_PARENT, new_parent);
     if write_inode(index, &inode).is_err() {
         return false;
     }
     let _ = block::flush();
     true
+}
+
+fn find_inode_by_index(index: usize) -> Option<u64> {
+    let mut inode = [0u8; INODE_SIZE];
+    read_inode(index, &mut inode).ok()?;
+    if inode[INODE_USED] == 0 {
+        return None;
+    }
+    Some(read_u64(&inode, INODE_PARENT))
+}
+
+/// Visit the direct children of a directory (`path == ""` means the root).
+pub fn list_dir(path: &str, mut visit: impl FnMut(&str, bool)) {
+    let fs = FS.lock();
+    if !fs.mounted {
+        return;
+    }
+    let parent = if path.is_empty() {
+        ROOT
+    } else {
+        let Some((parts, count)) = split_path(path) else {
+            return;
+        };
+        if count == 0 {
+            ROOT
+        } else {
+            let Some(dir) = resolve_dir(&parts, count) else {
+                return;
+            };
+            dir
+        }
+    };
+
+    let mut inode = [0u8; INODE_SIZE];
+    for index in 1..INODE_COUNT {
+        if read_inode(index, &mut inode).is_err() {
+            return;
+        }
+        if inode[INODE_USED] != 0 && read_u64(&inode, INODE_PARENT) == parent {
+            visit(inode_name(&inode), inode[INODE_KIND] == KIND_DIR);
+        }
+    }
 }
 
 /// Free data blocks (excluding the superblock/inode area).
@@ -647,23 +848,6 @@ pub fn free_blocks() -> Option<u64> {
         Some(fs.free)
     } else {
         None
-    }
-}
-
-/// Visit every live file name in inode order.
-pub fn for_each_name(mut visit: impl FnMut(&str)) {
-    let fs = FS.lock();
-    if !fs.mounted {
-        return;
-    }
-    let mut inode = [0u8; INODE_SIZE];
-    for index in 0..INODE_COUNT {
-        if read_inode(index, &mut inode).is_err() {
-            return;
-        }
-        if inode[INODE_USED] != 0 {
-            visit(inode_name(&inode));
-        }
     }
 }
 

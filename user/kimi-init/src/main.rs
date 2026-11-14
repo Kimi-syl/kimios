@@ -105,7 +105,7 @@ pub extern "C" fn _start() -> ! {
     k::print("\nKimiOS user shell (libkimi), pid ");
     k::print_u64(k::getpid());
     k::print("\n");
-    k::print("Commands: ls, cat, write, rm, mv, df, date, stat, time, sleep, spawn, run, wait, ps, kill, mem, exec, help, exit\n");
+    k::print("Commands: ls, cat, write, rm, mv, mkdir, rmdir, df, date, stat, time, sleep, spawn, run, wait, ps, kill, mem, exec, help, exit\n");
 
     let mut line = [0u8; 128];
     let mut path_buffer = [0u8; 96];
@@ -128,6 +128,8 @@ pub extern "C" fn _start() -> ! {
             k::print("  cat <file>     print a file (RamFS or /disk/...)\n");
             k::print("  write <path> <text>  create/truncate a /disk file\n");
             k::print("  rm <file>      remove a /disk file\n");
+            k::print("  mkdir <dir>    create a /disk directory\n");
+            k::print("  rmdir <dir>    remove an empty /disk directory\n");
             k::print("  mv <old> <new> rename a /disk file\n");
             k::print("  stat <file>    show kind, size and blocks\n");
             k::print("  date           show UTC wall-clock time\n");
@@ -141,19 +143,24 @@ pub extern "C" fn _start() -> ! {
             k::print("  exec <file>    replace the shell with an ELF or PE\n");
             k::print("  exit           halt the machine\n");
         } else if command == &b"ls"[..] {
-            let count = k::list(&mut listing);
+            let (count, listing) = if argument.is_empty() {
+                (k::list(&mut listing), &listing[..])
+            } else {
+                let Some(path) = with_slash(argument, &mut path_buffer) else {
+                    k::print("usage: ls [dir]\n");
+                    continue;
+                };
+                match k::listdir(path, &mut listing) {
+                    Some(count) => (count, &listing[..]),
+                    None => {
+                        k::print("ls: not a directory (disk paths only)\n");
+                        continue;
+                    }
+                }
+            };
             for name in listing[..count].split(|&byte| byte == 0) {
                 if !name.is_empty() {
                     k::print_bytes(name);
-                    if let Some((_, size)) = k::stat(
-                        core::str::from_utf8(name).unwrap_or(""),
-                    ) {
-                        let padding = 28usize.saturating_sub(name.len()).max(1);
-                        for _ in 0..padding {
-                            k::print(" ");
-                        }
-                        k::print_u64(size);
-                    }
                     k::print("\n");
                 }
             }
@@ -225,6 +232,30 @@ pub extern "C" fn _start() -> ! {
                 k::print("\n");
             } else {
                 k::print("rm: failed (disk files only)\n");
+            }
+        } else if command == &b"mkdir"[..] {
+            let Some(path) = with_slash(argument, &mut path_buffer) else {
+                k::print("usage: mkdir <dir>\n");
+                continue;
+            };
+            if k::mkdir(path) {
+                k::print("created ");
+                k::print(path);
+                k::print("\n");
+            } else {
+                k::print("mkdir: failed (disk path, name must be free)\n");
+            }
+        } else if command == &b"rmdir"[..] {
+            let Some(path) = with_slash(argument, &mut path_buffer) else {
+                k::print("usage: rmdir <dir>\n");
+                continue;
+            };
+            if k::rmdir(path) {
+                k::print("removed ");
+                k::print(path);
+                k::print("\n");
+            } else {
+                k::print("rmdir: failed (empty disk directories only)\n");
             }
         } else if command == &b"mv"[..] {
             let (old_word, new_word) = split_word(argument);
@@ -318,7 +349,11 @@ pub extern "C" fn _start() -> ! {
             match k::stat(path) {
                 Some((kind, size)) => {
                     k::print("kind: ");
-                    k::print(if kind == 0 { "ramfs" } else { "disk" });
+                    k::print(match kind {
+                        0 => "ramfs",
+                        2 => "directory",
+                        _ => "disk file",
+                    });
                     k::print(", size: ");
                     k::print_u64(size);
                     k::print(" bytes\n");

@@ -837,6 +837,169 @@ QMP drives the test without a GUI:
   {"type":"key","data":{"down":True,"key":{"type":"qcode","data":"d"}}}]}}
 ```
 
+### Phase 31 - directories on KimiFS
+
+An inode now stores a 64-bit parent index and a kind byte (1 file, 2
+directory). Inode 0 is reserved so that parent 0 unambiguously means the root;
+disks from earlier phases are migrated once at mount by moving whatever lived
+in inode 0 to the first free slot. Names still use the 32-byte field, and each
+path component must fit in it.
+
+```text
+$ mkdir disk/docs
+created /disk/docs
+$ mkdir disk/docs/sub
+created /disk/docs/sub
+$ write disk/docs/a.txt hi
+$ mv disk/docs/a.txt disk/docs/b.txt
+renamed /disk/docs/a.txt -> /disk/docs/b.txt
+$ ls disk/docs
+sub/
+b.txt
+$ rmdir disk/docs
+rmdir: failed (empty disk directories only)
+$ rm disk/docs/b.txt
+$ rmdir disk/docs/sub
+removed /disk/docs/sub
+$ rmdir disk/docs
+removed /disk/docs
+```
+
+Resolution walks one component at a time, requiring every intermediate entry
+to be a directory; `mkdir`, `lookup`, `create`, `stat`, `unlink` and `rename`
+all share it. `rename` also rewrites the parent field, so files and whole
+subtrees can move between directories, and refuses to move a directory into
+its own subtree. `listdir` returns direct children with a trailing `/` for
+directories; `ls /disk` uses it, so the listing is no longer flat.
+
+### Phase 32 - drawing from user space
+
+`fb_map` walks the framebuffer's physical pages and installs shared 4 KiB
+mappings at `0x6600_0000`. Unlike `brk` pages these are not owned by the
+process: teardown leaves the buffer alone. Mapping also clears the console
+mirror flag, so kernel and shell text no longer paint over a GUI; it is
+restored when the mapping process exits or `exec`s another image.
+
+```text
+$ run /gfxtest
+gfxtest: 640x480 stride 2560 format 875713112
+gfxtest: 8 frames in 40 ms, pattern drawn; press enter
+```
+
+The program writes a 640x480 animated gradient eight times (2.46 million
+pixels) in 40 ms under TCG, then paints known rectangles. A monitor
+`screendump` confirms exact colours: background `0x102040`, red/green/blue/
+yellow rectangles and one-pixel white rules, with corners still background.
+Fast scalar stores are enough for a compositor; no syscall per rectangle is
+needed.
+
+### Phase 33 - pointer events for a GUI
+
+`-device virtio-tablet-device` attaches a second virtio-input device. The
+driver distinguishes devices by asking the config space which event classes
+they support (`VIRTIO_INPUT_CFG_EV_BITS`, subselector EV_ABS/EV_REL): a device
+with either is treated as a pointer, otherwise as a keyboard. Both use the
+same queue setup and eight event buffers.
+
+Events go two places. Keyboards still translate presses into the UART line
+editor, so the shell is unchanged. Everything (key press/release, ABS_X/Y,
+BTN_LEFT/BTN_TOUCH, relative motion) is also written to a 128-entry
+single-producer/single-consumer ring in `src/input.rs`; SVCs pop from it.
+
+- `input_poll` (32) returns a packed event or `u64::MAX`.
+- `input_wait` (33) blocks until one is queued: it rewinds the SVC and marks
+  the process `Blocked`, using a dedicated `INPUT_PID` so pointer motion wakes
+  the event loop without disturbing a shell blocked in `read`. When it is the
+  only runnable process the kernel idles in `wfi` instead of spinning.
+
+```text
+$ run /inputtest
+inputtest: waiting
+event 0: type 3 code 0 value 16000
+event 1: type 3 code 1 value 8000
+event 2: type 1 code 272 value 1
+event 3: type 1 code 272 value 0
+event 4: type 1 code 30 value 1
+event 5: type 1 code 30 value 0
+inputtest: PASS
+```
+
+The events were injected with QMP `input-send-event`: two absolute axes, a
+left-button press/release (`BTN_LEFT` = 272) and an `a` key (code 30). The
+packed format is `[type:16][code:16][value:32]`; `libkimi::input_poll` and
+`input_wait` unpack it into `InputEvent`.
+
+### Phase 34 - a user-space GUI
+
+`/gui` is the proof that the pieces compose: `fb_map` gives pixel access,
+`input_wait` delivers pointer and key events, and the program runs a classic
+event loop. It draws a desktop, a back window, a front window with a title bar
+and a raised button, plus a 12x18 arrow cursor that saves and restores the
+pixels under it.
+
+```text
+$ run /gui
+(click the button: it turns green; ESC exits)
+[kernel] pid 2 exited with status 0
+```
+
+Two scheduling bugs surfaced and were fixed:
+
+- `wait` used to fail when the child was already blocked (the GUI waiting for
+  input) instead of waiting. It now idles in the kernel with interrupts on
+  until any process becomes runnable.
+- `sys_exit` reaped the exiting child *after* `switch_to`, which never
+  returns; the code was dead. Reaping now happens before the switch, so a
+  `run` child frees its slot and restores the text console immediately.
+
+`fb_map` disables console mirroring, and keyboard presses are no longer fed
+to the shell line editor while a GUI owns the display, so quitting the GUI
+does not leave stray escape bytes in the shell. Screendumps verify the button
+colour before/after the click (`0x909090` to `0x30c060`) and the restored
+kernel text afterwards.
+
+### Phase 35 - stability for GUI workloads
+
+Three changes make the kernel safe to hand to an untrusted graphics program.
+
+**Kernel heap.** The original 1 MiB allocator was a pure bump pointer. Almost
+every `spawn` copied the ELF into it to get natural alignment for `xmas-elf`,
+and nothing ever freed that copy: ten children exhausted the heap. It is now
+a sorted, coalescing free list with 16-byte headers; `elf::load` copies the
+image, loads it, and calls `dealloc` on both success and error paths.
+
+**Fault isolation.** Lower-EL instruction/data aborts were mislabelled as
+same-EL and got a generic status. They now report properly and terminate only
+the faulting process with `128 + SIGSEGV` (139); alignment faults use SIGBUS
+(135). The parent receives that status through the normal wait path.
+
+**Pointer validation.** Syscalls used to dereference user pointers directly.
+Every buffer is now checked against the coarse user window *and* walked page
+by page through the current address space (`user_range_ok`), so an unmapped
+pointer returns `u64::MAX` instead of faulting in EL1.
+
+```text
+$ run /stress
+stress: free frames 31666
+stress: children 6
+stress: file cycles done
+stress: alloc cycles done
+stress: free frames 31632 (high-water while running)
+stress: PASS
+$ mem
+free frames: 31675
+
+$ run /faulttest
+faulttest: reading unmapped memory
+[kernel] killing pid 13 after user fault (status 139)
+$ run /badptr
+badptr: PASS: syscall rejected the buffer
+```
+
+Running `/stress` twice returns exactly 31675 free frames after each exit:
+ten spawn/wait cycles, twenty create/stat/unlink/rmdir cycles and a hundred
+allocator rounds no longer leak physical frames or kernel heap.
+
 ### Phase 28 - file metadata
 
 `stat(path, out)` fills `[kind, size, blocks]`: kind 0 is a RamFS entry (no
@@ -890,7 +1053,8 @@ callers even though `stat` does not print them.
   5 read_file, 6 close, 7 exec, 8 list, 9 spawn, 10 wait, 11 getpid,
   12 stats, 13 create, 14 write_file, 15 diskinfo, 16 fb_info,
   17 fb_fill, 18 unlink, 19 freeblocks, 20 uptime, 21 sleep, 22 brk,
-  23 ps, 24 kill, 25 rename, 26 rtc, 27 stat), `x0..x4` = args,
+  23 ps, 24 kill, 25 rename, 26 rtc, 27 stat, 28 listdir, 29 mkdir,
+  30 rmdir, 31 fb_map, 32 input_poll, 33 input_wait), `x0..x4` = args,
   result in `x0`.
   For SVC, `ELR_EL1` already points to the next instruction; BRK is the
   exception that must advance ELR manually.

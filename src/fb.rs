@@ -40,6 +40,8 @@ struct Screen {
 
 static SCREEN: Mutex<Screen> = Mutex::new(Screen { column: 0, row: 0 });
 static ENABLED: AtomicBool = AtomicBool::new(false);
+/// When false, console text is not mirrored (a GUI owns the framebuffer).
+static CONSOLE: AtomicBool = AtomicBool::new(true);
 
 #[allow(static_mut_refs)]
 fn buffer() -> &'static mut [u32] {
@@ -150,7 +152,7 @@ fn putc_locked(screen: &mut Screen, fb: &mut [u32], byte: u8) {
 
 /// Mirror a byte from the console stream onto the framebuffer.
 pub fn putc(byte: u8) {
-    if !ENABLED.load(Ordering::Acquire) {
+    if !ENABLED.load(Ordering::Acquire) || !CONSOLE.load(Ordering::Acquire) {
         return;
     }
     let mut screen = SCREEN.lock();
@@ -163,6 +165,30 @@ pub fn info() -> Option<(usize, usize, usize, u32)> {
         return None;
     }
     Some((WIDTH, HEIGHT, STRIDE, FOURCC_XRGB8888))
+}
+
+/// Whether a framebuffer was configured at boot.
+pub fn ready() -> bool {
+    ENABLED.load(Ordering::Acquire)
+}
+
+/// Physical address, stride in bytes and height of the framebuffer.
+pub fn mapping() -> Option<(u64, usize, usize)> {
+    if !ENABLED.load(Ordering::Acquire) {
+        return None;
+    }
+    Some((addr_of!(FRAMEBUFFER) as u64, STRIDE, HEIGHT))
+}
+
+/// Enable or disable mirroring console text (GUI mode).
+pub fn set_console(enabled: bool) {
+    CONSOLE.store(enabled, Ordering::Release);
+}
+
+/// Whether console text (and therefore keyboard-to-line-editor input) is
+/// currently owned by the kernel console rather than a GUI.
+pub fn console_enabled() -> bool {
+    CONSOLE.load(Ordering::Acquire)
 }
 
 /// Fill a clipped rectangle with an `0x00RRGGBB` colour.
@@ -192,7 +218,7 @@ pub fn fill_rect(x: usize, y: usize, width: usize, height: usize, color: u32) ->
 /// Erase the previous cell. The UART echoes backspace-space-backspace; the
 /// framebuffer only needs the final state.
 pub fn backspace() {
-    if !ENABLED.load(Ordering::Acquire) {
+    if !ENABLED.load(Ordering::Acquire) || !CONSOLE.load(Ordering::Acquire) {
         return;
     }
     let mut screen = SCREEN.lock();

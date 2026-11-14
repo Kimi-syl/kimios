@@ -25,6 +25,8 @@ impl ExceptionFrame {
 
 const EC_UNKNOWN: u64 = 0x00;
 const EC_SVC64: u64 = 0x15;
+const EC_IABT_LOW: u64 = 0x20;
+const EC_DABT_LOW: u64 = 0x24;
 const EC_IABT_SAME: u64 = 0x21;
 const EC_DABT_SAME: u64 = 0x25;
 const EC_ALIGNMENT: u64 = 0x26;
@@ -34,6 +36,8 @@ fn ec_name(ec: u64) -> &'static str {
     match ec {
         EC_UNKNOWN => "Unknown",
         EC_SVC64 => "SVC (syscall)",
+        EC_IABT_LOW => "Instruction abort (lower EL)",
+        EC_DABT_LOW => "Data abort (lower EL)",
         EC_IABT_SAME => "Instruction abort (same EL)",
         EC_DABT_SAME => "Data abort (same EL)",
         EC_ALIGNMENT => "Alignment fault",
@@ -83,6 +87,13 @@ pub extern "C" fn exception_handler(frame: &mut ExceptionFrame) {
                 match usermode::sys_read(frame, arg0, arg1, arg2) {
                     usermode::ReadOutcome::Done(result) => frame.x[0] = result,
                     usermode::ReadOutcome::Switched => {}
+                }
+                return;
+            }
+            usermode::SYS_INPUT_WAIT => {
+                match usermode::sys_input_wait(frame) {
+                    usermode::InputOutcome::Done(result) => frame.x[0] = result,
+                    usermode::InputOutcome::Switched => {}
                 }
                 return;
             }
@@ -139,6 +150,13 @@ pub extern "C" fn exception_handler(frame: &mut ExceptionFrame) {
             }
             usermode::SYS_RTC => usermode::sys_rtc(arg0),
             usermode::SYS_STAT => usermode::sys_stat(arg0, arg1, arg2),
+            usermode::SYS_LISTDIR => {
+                usermode::sys_listdir(arg0, arg1, arg2, arg3)
+            }
+            usermode::SYS_MKDIR => usermode::sys_mkdir(arg0, arg1),
+            usermode::SYS_RMDIR => usermode::sys_rmdir(arg0, arg1),
+            usermode::SYS_FB_MAP => usermode::sys_fb_map(),
+            usermode::SYS_INPUT_POLL => usermode::sys_input_poll(),
             crate::pe::SYS_PE_GET_STD_HANDLE => {
                 usermode::pe_get_std_handle(arg0)
             }
@@ -181,8 +199,7 @@ pub extern "C" fn exception_handler(frame: &mut ExceptionFrame) {
         // A user fault terminates only that process; init or the parent keeps
         // running. Exit status 128 + a small synthetic signal-ish number.
         let status = 128 + match ec {
-            EC_IABT_SAME | 0x20 => 11,
-            EC_DABT_SAME | 0x24 => 11,
+            EC_IABT_LOW | EC_DABT_LOW | EC_IABT_SAME | EC_DABT_SAME => 11,
             EC_ALIGNMENT => 7,
             _ => 4,
         };
