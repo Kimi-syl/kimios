@@ -5,6 +5,15 @@ A small bare-metal operating system for ARM64 (AArch64), written in Rust with
 
 No bootloader is used: QEMU loads the ELF directly with `-kernel`.
 
+## The phone shell
+
+| Lock screen | Home | Calculator | Clock |
+|:---:|:---:|:---:|:---:|
+| ![Lock](docs/screenshot-lock.png) | ![Home](docs/screenshot-home.png) | ![Calculator](docs/screenshot-calculator.png) | ![Clock](docs/screenshot-clock.png) |
+
+Run it with `-display none -device ramfb -device virtio-tablet-device` and
+`run /gui`; ESC returns to the text console.
+
 ## Current features
 
 - **Phase 1 - Boot:** linker script at `0x4008_0000`, `_start`, stack setup,
