@@ -1,4 +1,5 @@
-//! Builds the EL0 workspace (`kimi-init`, `kimi-hello`, `kimi-fstest`), copies
+//! Builds the EL0 workspace (`kimi-init`, `kimi-hello`, `kimi-fstest`,
+//! `kimi-spin`, `kimi-fbtest`), copies
 //! the ELFs into OUT_DIR, and generates a tiny AArch64 PE image for the WinAPI translation
 //! test. The kernel embeds these files into RamFS with `include_bytes!`.
 //!
@@ -23,6 +24,9 @@ fn main() {
     println!("cargo:rerun-if-changed=user/kimi-hello");
     println!("cargo:rerun-if-changed=user/kimi-fstest");
     println!("cargo:rerun-if-changed=user/kimi-spin");
+    println!("cargo:rerun-if-changed=user/kimi-fbtest");
+    println!("cargo:rerun-if-changed=user/kimi-heaptest");
+    println!("cargo:rerun-if-changed=user/kimi-sleeper");
 
     let target_dir = manifest_dir.join("target/user-build");
     let linker = user_dir.join("linker.ld");
@@ -52,6 +56,9 @@ fn main() {
         ("kimi-hello", "hello.elf"),
         ("kimi-fstest", "fstest.elf"),
         ("kimi-spin", "spin.elf"),
+        ("kimi-fbtest", "fbtest.elf"),
+        ("kimi-heaptest", "heaptest.elf"),
+        ("kimi-sleeper", "sleeper.elf"),
     ] {
         let built = target_dir
             .join("aarch64-unknown-none/release")
@@ -117,39 +124,91 @@ fn push_load_address(code: &mut Vec<u32>, register: u32, address: u64) {
 }
 
 fn build_pe() -> Vec<u8> {
-    const MESSAGE: &[u8] = b"Hello from an ARM64 PE on KimiOS!\n";
+    const MESSAGE1: &[u8] = b"Hello from an ARM64 PE on KimiOS!\n";
+    const MESSAGE2: &[u8] = b"PE called WriteConsoleA and Sleep(50).\n";
+    const MESSAGE3: &[u8] = b"PE is still alive after sleeping.\n";
     const SECTION_RVA: u32 = 0x1000;
     const SECTION_RAW: usize = 0x200;
-    const MESSAGE_OFF: usize = 0x200;
-    const DLL_OFF: usize = 0x230;
-    const HINT_OFF: usize = 0x240;
-    const ILT_OFF: usize = 0x2a0;
-    const IAT_OFF: usize = 0x2c0;
-    const IMPORT_OFF: usize = 0x2e0;
+    const MESSAGE1_OFF: usize = 0x200;
+    const MESSAGE2_OFF: usize = 0x230;
+    const MESSAGE3_OFF: usize = 0x260;
+    const DLL_OFF: usize = 0x290;
+    const HINT_OFF: usize = 0x2a0;
+    const ILT_OFF: usize = 0x330;
+    const IAT_OFF: usize = 0x380;
+    const IMPORT_OFF: usize = 0x3d0;
     const SECTION_SIZE: usize = 0x400;
 
     let mut content = vec![0u8; SECTION_SIZE];
 
-    // Code: GetStdHandle -> WriteFile -> ExitProcess, using the IAT slots.
+    // Code: GetStdHandle -> WriteFile -> Sleep -> WriteConsoleA ->
+    // GetTickCount64 -> Sleep -> WriteConsoleA -> GetTickCount -> ExitProcess.
     let mut code: Vec<u32> = Vec::new();
     let iat = PE_IMAGE_BASE + SECTION_RVA as u64 + IAT_OFF as u64;
-    let message = PE_IMAGE_BASE + SECTION_RVA as u64 + MESSAGE_OFF as u64;
+    let message1 = PE_IMAGE_BASE + SECTION_RVA as u64 + MESSAGE1_OFF as u64;
+    let message2 = PE_IMAGE_BASE + SECTION_RVA as u64 + MESSAGE2_OFF as u64;
+    let message3 = PE_IMAGE_BASE + SECTION_RVA as u64 + MESSAGE3_OFF as u64;
 
+    // x19 = GetStdHandle(STD_OUTPUT_HANDLE = -11)
     push_load_address(&mut code, 16, iat);
     code.push(encode_ldr(16, 16));
-    code.push(encode_movn(0, 10)); // -11 = STD_OUTPUT_HANDLE
+    code.push(encode_movn(0, 10));
     code.push(encode_blr(16));
-    code.push(encode_mov(19, 0)); // save handle
+    code.push(encode_mov(19, 0));
 
+    // WriteFile(handle, message1, len, NULL, NULL)
     push_load_address(&mut code, 16, iat + 8);
     code.push(encode_ldr(16, 16));
     code.push(encode_mov(0, 19));
-    push_load_address(&mut code, 1, message);
-    code.push(encode_movz(2, MESSAGE.len() as u16));
+    push_load_address(&mut code, 1, message1);
+    code.push(encode_movz(2, MESSAGE1.len() as u16));
     code.push(encode_movz(3, 0));
     code.push(encode_movz(4, 0));
     code.push(encode_blr(16));
 
+    // Sleep(50)
+    push_load_address(&mut code, 16, iat + 40);
+    code.push(encode_ldr(16, 16));
+    code.push(encode_movz(0, 50));
+    code.push(encode_blr(16));
+
+    // WriteConsoleA(handle, message2, len, NULL, NULL)
+    push_load_address(&mut code, 16, iat + 64);
+    code.push(encode_ldr(16, 16));
+    code.push(encode_mov(0, 19));
+    push_load_address(&mut code, 1, message2);
+    code.push(encode_movz(2, MESSAGE2.len() as u16));
+    code.push(encode_movz(3, 0));
+    code.push(encode_movz(4, 0));
+    code.push(encode_blr(16));
+
+    // GetTickCount64()
+    push_load_address(&mut code, 16, iat + 48);
+    code.push(encode_ldr(16, 16));
+    code.push(encode_blr(16));
+
+    // Sleep(100)
+    push_load_address(&mut code, 16, iat + 40);
+    code.push(encode_ldr(16, 16));
+    code.push(encode_movz(0, 100));
+    code.push(encode_blr(16));
+
+    // WriteConsoleA(handle, message3, len, NULL, NULL)
+    push_load_address(&mut code, 16, iat + 64);
+    code.push(encode_ldr(16, 16));
+    code.push(encode_mov(0, 19));
+    push_load_address(&mut code, 1, message3);
+    code.push(encode_movz(2, MESSAGE3.len() as u16));
+    code.push(encode_movz(3, 0));
+    code.push(encode_movz(4, 0));
+    code.push(encode_blr(16));
+
+    // GetTickCount()
+    push_load_address(&mut code, 16, iat + 56);
+    code.push(encode_ldr(16, 16));
+    code.push(encode_blr(16));
+
+    // ExitProcess(0)
     push_load_address(&mut code, 16, iat + 16);
     code.push(encode_ldr(16, 16));
     code.push(encode_movz(0, 0));
@@ -161,7 +220,9 @@ fn build_pe() -> Vec<u8> {
         content[offset..offset + 4].copy_from_slice(&word.to_le_bytes());
     }
 
-    content[MESSAGE_OFF..MESSAGE_OFF + MESSAGE.len()].copy_from_slice(MESSAGE);
+    content[MESSAGE1_OFF..MESSAGE1_OFF + MESSAGE1.len()].copy_from_slice(MESSAGE1);
+    content[MESSAGE2_OFF..MESSAGE2_OFF + MESSAGE2.len()].copy_from_slice(MESSAGE2);
+    content[MESSAGE3_OFF..MESSAGE3_OFF + MESSAGE3.len()].copy_from_slice(MESSAGE3);
     content[DLL_OFF..DLL_OFF + 13].copy_from_slice(b"kernel32.dll\0");
 
     let names = [
@@ -170,13 +231,17 @@ fn build_pe() -> Vec<u8> {
         "ExitProcess",
         "GetLastError",
         "SetLastError",
+        "Sleep",
+        "GetTickCount64",
+        "GetTickCount",
+        "WriteConsoleA",
     ];
     for (index, name) in names.iter().enumerate() {
         let offset = HINT_OFF + index * 16;
         content[offset + 2..offset + 2 + name.len()].copy_from_slice(name.as_bytes());
     }
 
-    for index in 0..3 {
+    for index in 0..names.len() {
         let rva = (SECTION_RVA + HINT_OFF as u32 + index as u32 * 16) as u64;
         content[ILT_OFF + index * 8..ILT_OFF + index * 8 + 8]
             .copy_from_slice(&rva.to_le_bytes());

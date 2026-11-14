@@ -7,6 +7,9 @@ mod diskfs;
 mod dtb;
 mod elf;
 mod exceptions;
+mod fb;
+mod font;
+mod fwcfg;
 mod gic;
 mod irq;
 mod mmu;
@@ -15,6 +18,7 @@ mod pfa;
 mod process;
 mod ramfs;
 mod sched;
+mod smp;
 mod timer;
 mod usermode;
 mod uart;
@@ -131,6 +135,11 @@ pub extern "C" fn kmain(dtb: usize) -> ! {
     );
     println!("PFA free    : {} frames", pfa::stats().0);
 
+    // Phase 20: secondary CPUs through PSCI.
+    println!();
+    println!("Phase 20: symmetric multiprocessing (PSCI)");
+    smp::init();
+
     // Phase 6: GICv3 + ARM generic timer.
     println!();
     println!("Phase 6: GICv3 and timer interrupts");
@@ -203,6 +212,11 @@ pub extern "C" fn kmain(dtb: usize) -> ! {
         }
         None => println!("virtio-blk  : not present (RamFS only)"),
     }
+
+    // Phases 17-18: linear framebuffer and mirrored text console.
+    println!();
+    println!("Phases 17-18: framebuffer display and text console");
+    fb::init();
 
     // Phase 13: create the init process and enter EL0.
     process::start_init();

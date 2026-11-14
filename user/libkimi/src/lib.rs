@@ -23,6 +23,15 @@ pub const SYS_STATS: u64 = 12;
 pub const SYS_CREATE: u64 = 13;
 pub const SYS_WRITE_FILE: u64 = 14;
 pub const SYS_DISKINFO: u64 = 15;
+pub const SYS_FB_INFO: u64 = 16;
+pub const SYS_FB_FILL: u64 = 17;
+pub const SYS_UNLINK: u64 = 18;
+pub const SYS_FREEBLOCKS: u64 = 19;
+pub const SYS_UPTIME: u64 = 20;
+pub const SYS_SLEEP: u64 = 21;
+pub const SYS_BRK: u64 = 22;
+pub const SYS_PS: u64 = 23;
+pub const SYS_KILL: u64 = 24;
 
 pub const STDIN: u64 = 0;
 pub const STDOUT: u64 = 1;
@@ -55,6 +64,23 @@ fn syscall4(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64) -> u64 {
             in("x1") arg1,
             in("x2") arg2,
             in("x3") arg3,
+        );
+    }
+    result
+}
+
+#[inline(always)]
+fn syscall5(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> u64 {
+    let result;
+    unsafe {
+        asm!(
+            "svc #0",
+            in("x8") number,
+            inlateout("x0") arg0 => result,
+            in("x1") arg1,
+            in("x2") arg2,
+            in("x3") arg3,
+            in("x4") arg4,
         );
     }
     result
@@ -209,6 +235,71 @@ pub fn diskinfo() -> Option<u64> {
     } else {
         Some(result)
     }
+}
+
+/// Milliseconds since boot.
+pub fn uptime_ms() -> u64 {
+    syscall3(SYS_UPTIME, 0, 0, 0)
+}
+
+/// Sleep for at least `ms` milliseconds (other processes keep running).
+pub fn sleep_ms(ms: u64) {
+    syscall3(SYS_SLEEP, ms, 0, 0);
+}
+
+/// Remove a `/disk/...` file.
+pub fn unlink(path: &str) -> bool {
+    syscall3(SYS_UNLINK, path.as_ptr() as u64, path.len() as u64, 0) == 0
+}
+
+/// Free data blocks, or `None` without a mounted disk.
+pub fn free_blocks() -> Option<u64> {
+    let result = syscall3(SYS_FREEBLOCKS, 0, 0, 0);
+    if result == ERROR {
+        None
+    } else {
+        Some(result)
+    }
+}
+
+/// Fill `out` with `[pid, parent, state, exit_status]` records; returns the
+/// number of processes written.
+pub fn ps(out: &mut [u64]) -> usize {
+    let result = syscall3(SYS_PS, out.as_mut_ptr() as u64, out.len() as u64, 0);
+    if result == ERROR {
+        0
+    } else {
+        result as usize
+    }
+}
+
+/// Terminate `pid`; returns true when it was marked a zombie.
+pub fn kill(pid: u64) -> bool {
+    syscall3(SYS_KILL, pid, 0, 0) == 0
+}
+
+/// Current program break (one past the last heap byte).
+pub fn brk() -> u64 {
+    syscall3(SYS_BRK, 0, 0, 0)
+}
+
+/// Grow the heap to at least `address`; returns the new break.
+pub fn sbrk(address: u64) -> u64 {
+    syscall3(SYS_BRK, address, 0, 0)
+}
+
+/// Framebuffer geometry `(width, height, stride, format)`, if a display exists.
+pub fn fb_info() -> Option<(u64, u64, u64, u64)> {
+    let mut info = [0u64; 4];
+    if syscall3(SYS_FB_INFO, info.as_mut_ptr() as u64, 0, 0) == ERROR {
+        return None;
+    }
+    Some((info[0], info[1], info[2], info[3]))
+}
+
+/// Fill a rectangle with an `0x00RRGGBB` colour. Returns false without a display.
+pub fn fb_fill(x: u64, y: u64, width: u64, height: u64, color: u32) -> bool {
+    syscall5(SYS_FB_FILL, x, y, width, height, color as u64) == 0
 }
 
 /// Free physical frames (debug aid).

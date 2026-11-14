@@ -3,6 +3,7 @@
 //! The PL011 is memory-mapped at 0x0900_0000 on `virt`. All accesses use
 //! volatile reads/writes so the compiler cannot cache or reorder them.
 
+use crate::fb;
 use core::fmt;
 use core::ptr::{read_volatile, write_volatile};
 use core::sync::atomic::{AtomicBool, Ordering};
@@ -141,6 +142,7 @@ pub fn rx_interrupt() -> bool {
                 b'\r' | b'\n' => {
                     CONSOLE.send_byte(b'\r');
                     CONSOLE.send_byte(b'\n');
+                    fb::putc(b'\n');
 
                     if QUEUE_COUNT < QUEUE_LINES {
                         let index = (QUEUE_READ + QUEUE_COUNT) % QUEUE_LINES;
@@ -159,6 +161,7 @@ pub fn rx_interrupt() -> bool {
                         CONSOLE.send_byte(0x08);
                         CONSOLE.send_byte(b' ');
                         CONSOLE.send_byte(0x08);
+                        fb::backspace();
                     }
                 }
                 _ => {
@@ -166,6 +169,7 @@ pub fn rx_interrupt() -> bool {
                         LINE[LINE_LENGTH] = byte;
                         LINE_LENGTH += 1;
                         CONSOLE.send_byte(byte);
+                        fb::putc(byte);
                     }
                 }
             }
@@ -215,6 +219,7 @@ impl fmt::Write for Uart {
                 self.send_byte(b'\r');
             }
             self.send_byte(byte);
+            fb::putc(byte);
         }
         Ok(())
     }
@@ -236,6 +241,7 @@ pub fn write_bytes(bytes: &[u8]) {
             uart.send_byte(b'\r');
         }
         uart.send_byte(byte);
+        fb::putc(byte);
     }
 
     unsafe {

@@ -16,6 +16,9 @@ use crate::{elf, mmu, pe, println, ramfs};
 
 pub const MAX_PROCESSES: usize = 16;
 pub const MAX_FDS: usize = 8;
+/// User heap window: `brk` grows page by page from here.
+pub const USER_HEAP_START: u64 = 0x6080_0000;
+pub const USER_HEAP_LIMIT: u64 = 0x60C0_0000;
 pub const SYS_ERROR: u64 = u64::MAX;
 
 const INIT_PID: u64 = 1;
@@ -57,6 +60,12 @@ pub struct Process {
     wait_target: u64,
     /// True when blocked in `read` rather than in `wait`.
     read_wait: bool,
+    /// Deadline in milliseconds for a blocked sleeper (0 = not sleeping).
+    sleep_at: u64,
+    /// Set by the timer IRQ so a woken sleeper's retried SVC returns 0.
+    sleep_done: bool,
+    /// Current program break (one past the last byte of the user heap).
+    brk: u64,
     space: Option<mmu::AddressSpace>,
     frame: ExceptionFrame,
     sp_el0: u64,
@@ -70,6 +79,9 @@ const EMPTY_PROCESS: Process = Process {
     exit_status: 0,
     wait_target: 0,
     read_wait: false,
+    sleep_at: 0,
+    sleep_done: false,
+    brk: 0,
     space: None,
     frame: ExceptionFrame::EMPTY,
     sp_el0: 0,
@@ -206,6 +218,9 @@ fn create(parent: u64, path: &str) -> Result<usize, &'static str> {
             exit_status: 0,
             wait_target: 0,
             read_wait: false,
+            sleep_at: 0,
+            sleep_done: false,
+            brk: USER_HEAP_START,
             space: Some(space),
             frame: ExceptionFrame {
                 x: [0; 31],
@@ -374,6 +389,87 @@ pub fn wake_reader() {
     }
 }
 
+pub enum SleepOutcome {
+    Done(u64),
+    Switched,
+}
+
+/// Timer-IRQ hook: make expired sleepers runnable. Runs with IRQs masked.
+#[allow(static_mut_refs)]
+pub fn wake_sleepers(now_ms: u64) {
+    for slot in 0..MAX_PROCESSES {
+        unsafe {
+            let process = &mut PROCESSES[slot];
+            if process.state == State::Blocked
+                && process.sleep_at != 0
+                && now_ms >= process.sleep_at
+            {
+                process.sleep_at = 0;
+                process.sleep_done = true;
+                process.state = State::Ready;
+            }
+        }
+    }
+}
+
+/// sleep(ms): block until `ms` milliseconds have elapsed.
+///
+/// With another runnable process the SVC is rewound and the CPU switches; the
+/// retried syscall sees `sleep_done` and returns 0. If this is the only
+/// process, the kernel idles with `wfi` until the timer IRQ marks it ready.
+#[allow(static_mut_refs)]
+pub fn sys_sleep(frame: &mut ExceptionFrame, ms: u64) -> SleepOutcome {
+    if !user_active() {
+        return SleepOutcome::Done(SYS_ERROR);
+    }
+    let Some(slot) = current_slot() else {
+        return SleepOutcome::Done(SYS_ERROR);
+    };
+
+    unsafe {
+        if PROCESSES[slot].sleep_done {
+            PROCESSES[slot].sleep_done = false;
+            return SleepOutcome::Done(0);
+        }
+    }
+
+    if ms == 0 {
+        return SleepOutcome::Done(0);
+    }
+
+    let deadline = crate::timer::uptime_ms().saturating_add(ms);
+    unsafe {
+        PROCESSES[slot].sleep_at = deadline;
+        PROCESSES[slot].state = State::Blocked;
+    }
+
+    match pick_ready() {
+        Some(next) => {
+            frame.elr = frame.elr.wrapping_sub(4);
+            switch_to(frame, next);
+            SleepOutcome::Switched
+        }
+        None => {
+            // No other process: idle in the kernel until the timer IRQ wakes
+            // this one (it is re-marked Running on the way out).
+            loop {
+                if crate::timer::uptime_ms() >= deadline {
+                    break;
+                }
+                crate::gic::enable_irqs();
+                unsafe { asm!("wfi") };
+                crate::gic::disable_irqs();
+            }
+            unsafe {
+                PROCESSES[slot].sleep_at = 0;
+                PROCESSES[slot].sleep_done = false;
+                PROCESSES[slot].state = State::Running;
+            }
+            SleepOutcome::Done(0)
+        }
+    }
+}
+
 /// Block the current process until `target` (0 = any child) exits.
 #[allow(static_mut_refs)]
 pub fn sys_wait(frame: &mut ExceptionFrame, target: u64) -> WaitOutcome {
@@ -450,10 +546,12 @@ pub fn sys_exit(frame: &mut ExceptionFrame, status: u64) {
     let mut eager_reap = false;
     if let Some(parent_slot) = slot_of_pid(parent) {
         unsafe {
-            // A parent blocked in `read` is not waiting for this child.
+            // A parent blocked in `read` or `sleep` is not waiting for this
+            // child.
             let process = &mut PROCESSES[parent_slot];
             if process.state == State::Blocked
                 && !process.read_wait
+                && process.sleep_at == 0
                 && (process.wait_target == 0 || process.wait_target == me)
             {
                 process.frame.x[0] = status;
@@ -529,6 +627,7 @@ pub fn sys_exec(frame: &mut ExceptionFrame, path: &str) -> u64 {
     unsafe {
         let old = PROCESSES[slot].space.replace(space);
         PROCESSES[slot].sp_el0 = stack_top;
+        PROCESSES[slot].brk = USER_HEAP_START;
         frame.elr = entry;
 
         PROCESSES[slot]
@@ -566,6 +665,147 @@ pub fn sys_spawn(path: &str) -> u64 {
 
 pub fn sys_getpid() -> u64 {
     current_pid()
+}
+
+fn state_code(state: State) -> u64 {
+    match state {
+        State::Free => 0,
+        State::Ready => 1,
+        State::Running => 2,
+        State::Blocked => 3,
+        State::Zombie => 4,
+    }
+}
+
+/// Fill `out` with `[pid, parent, state, exit_status]` records for every live
+/// slot. Returns the number of records written.
+#[allow(static_mut_refs)]
+pub fn snapshot(out: &mut [u64]) -> usize {
+    let mut count = 0;
+    for slot in 0..MAX_PROCESSES {
+        if (count + 1) * 4 > out.len() {
+            break;
+        }
+        let process = unsafe { &PROCESSES[slot] };
+        if process.state == State::Free {
+            continue;
+        }
+        out[count * 4] = process.pid;
+        out[count * 4 + 1] = process.parent;
+        out[count * 4 + 2] = state_code(process.state);
+        out[count * 4 + 3] = process.exit_status;
+        count += 1;
+    }
+    count
+}
+
+/// kill(pid): mark another process a zombie. Returns 0 on success.
+#[allow(static_mut_refs)]
+pub fn sys_kill(pid: u64) -> u64 {
+    let Some(slot) = current_slot() else {
+        return SYS_ERROR;
+    };
+    let me = unsafe { PROCESSES[slot].pid };
+    if pid == 0 || pid == me {
+        return SYS_ERROR;
+    }
+    let Some(target) = slot_of_pid(pid) else {
+        return SYS_ERROR;
+    };
+    let state = unsafe { PROCESSES[target].state };
+    if state == State::Zombie {
+        return SYS_ERROR;
+    }
+
+    let status = 137; // 128 + SIGKILL
+    if READER_PID.load(Ordering::Acquire) == pid {
+        READER_PID.store(0, Ordering::Release);
+    }
+    unsafe {
+        PROCESSES[target].state = State::Zombie;
+        PROCESSES[target].exit_status = status;
+    }
+
+    // Orphaned children are adopted by init.
+    unsafe {
+        for index in 0..MAX_PROCESSES {
+            if PROCESSES[index].state != State::Free
+                && PROCESSES[index].parent == pid
+            {
+                PROCESSES[index].parent = INIT_PID;
+            }
+        }
+    }
+
+    // If the parent is blocked waiting for exactly this child, hand it the
+    // status now and reap the slot.
+    let parent = unsafe { PROCESSES[target].parent };
+    let mut reap_target = false;
+    if let Some(parent_slot) = slot_of_pid(parent) {
+        unsafe {
+            let process = &mut PROCESSES[parent_slot];
+            if process.state == State::Blocked
+                && !process.read_wait
+                && process.sleep_at == 0
+                && (process.wait_target == 0 || process.wait_target == pid)
+            {
+                process.frame.x[0] = status;
+                process.state = State::Ready;
+                process.wait_target = 0;
+                reap_target = true;
+            }
+        }
+    }
+    if reap_target {
+        reap(target);
+    }
+
+    0
+}
+
+/// brk(request): query (0) or grow the user heap. Returns the break, which is
+/// unchanged when the request is invalid or memory is exhausted.
+#[allow(static_mut_refs)]
+pub fn sys_brk(request: u64) -> u64 {
+    let Some(slot) = current_slot() else {
+        return 0;
+    };
+    let process = unsafe { &mut PROCESSES[slot] };
+    let current = process.brk;
+    if request == 0 {
+        return current;
+    }
+    if request <= current || request > USER_HEAP_LIMIT {
+        return current;
+    }
+
+    let new_end = (request + 0xfff) & !0xfff;
+    if new_end > USER_HEAP_LIMIT {
+        return current;
+    }
+    let pages = ((new_end - current) / 4096) as usize;
+
+    let Some(space) = process.space.as_mut() else {
+        return current;
+    };
+    // One spare frame for a possible new L3 table, plus a guard.
+    if space.spare_frames() < pages + 2 {
+        return current;
+    }
+
+    for page in 0..pages {
+        let address = current + (page as u64) * 4096;
+        let Some(frame) = space.alloc_frame() else {
+            return current;
+        };
+        unsafe {
+            core::ptr::write_bytes(frame as *mut u8, 0, 4096);
+        }
+        space.map_page(address, frame, false);
+    }
+
+    process.brk = new_end;
+    new_end
 }
 
 /// Allocate a descriptor for `index` of `kind` in the current process.

@@ -18,7 +18,7 @@ Two tracks share one kernel:
 | 4 | Correctly discover/map RAM | done (DTB + PFA) | needs khaje DTB parse |
 | 5 | Interrupt controller + timer | done (GICv3, CNTP) | needs khaje addresses |
 | 6 | Bring up secondary CPUs | next | - |
-| 7 | Basic display output | planned (ramfb) | needs panel/DSI |
+| 7 | Basic display output | done on QEMU (ramfb) | needs panel/DSI |
 | 8 | Touch | planned (virtio-input) | needs touch controller |
 | 9 | Persistent storage | done (virtio-blk + KimiFS) | needs UFS + partition access |
 | 10 | USB | planned (virtio/keyboard or DWC3) | needs DWC3 + PMIC |
@@ -54,6 +54,35 @@ Target-independent, implemented before display/device work:
 6. ~~Blocking console `read`.~~ Done: the PL011 RX interrupt (SPI 33) queues
    completed lines; `read` parks in a `Blocked` state with a rewound `SVC` and
    the console IRQ wakes it, so background processes run at the prompt.
+7. ~~Basic display output.~~ Done on QEMU: a fw_cfg DMA driver writes
+   `etc/ramfb` and the kernel draws a 640x480 XRGB8888 test pattern into an
+   identity-mapped buffer. Pixel output verified with monitor `screendump`.
+   Real hardware still needs a panel/DSI driver.
+8. ~~Framebuffer text console.~~ Done: an embedded 8x8 font mirrors kernel and
+   user console output at 80x60 with wrapping, scrolling and input echo;
+   verified pixel-for-pixel and with a 60-line scroll test.
+9. ~~Graphics syscalls.~~ Done: `fb_info` (16) and `fb_fill` (17) let EL0 query
+   the display and draw clipped `0x00RRGGBB` rectangles; `kimi-fbtest`
+   verified exact pixel colours.
+10. ~~Secondary CPU bring-up.~~ Done on QEMU with `-smp 4`: PSCI 1.1 over HVC,
+    per-core stacks, MMU/caches enabled on each core, atomics-based checksum
+    test, then parked in `wfe`. SMP scheduling is still future work.
+11. ~~KimiFS free-space reuse.~~ Done: a bitmap rebuilt at mount drives
+    first-fit allocation; `unlink` and truncation recycle runs; `rm`,
+    `freeblocks` (19) and a richer `df` exercise it across reboots.
+12. ~~Sleep and uptime.~~ Done: `uptime` (20) from `CNTPCT_EL0`, `sleep` (21)
+    with timer-IRQ wakeups, a rewind/`sleep_done` retry path and a kernel
+    `wfi` idle when nothing else is runnable; shell `time`/`sleep`.
+13. ~~WinAPI surface.~~ Done: 9 translated imports including `Sleep`,
+    `GetTickCount`/`64` and `WriteConsoleA`; the generated PE calls all of
+    them and survives sleeping.
+14. ~~User heap.~~ Done: `brk` (22) with page-rounded eager mapping, a
+    `spare_frames` guard against page-table exhaustion and a `/heaptest`
+    that verifies 16 KiB of fresh zeroed pages.
+15. ~~Process inspection and termination.~~ Done: `ps` (23) returns
+    PID/parent/state/exit records; `kill` (24) zombies a target with status
+    137, reparents its children and wakes a blocked parent; shell `ps`/`kill`
+    and the `/sleeper` test program.
 
 EL0 processes are preempted by the timer (50 ms quantum, round-robin among
 `Ready` processes), and a process blocked in `read` yields the CPU. Syscalls
@@ -62,8 +91,10 @@ beyond the console appears.
 
 ## Next
 
-1. Display output: ramfb on QEMU, panel/DSI investigation on spes.
-2. Block storage beyond QEMU: UFS and the spes partition table (blocked on
+1. Block storage beyond QEMU: UFS and the spes partition table (blocked on
    bootloader unlock for bare-metal testing).
-3. More filesystem surface: unlink, directories, reuse of freed runs.
-4. Bring up secondary CPUs (PSCI on QEMU; needs khaje firmware on spes).
+2. Filesystem surface: directories, rename, and a real free-inode list.
+3. SMP scheduling: per-CPU runqueues, GIC redistributor init and timer/IPIs on
+   secondary cores (needs khaje firmware on spes for hardware).
+4. More drawing: user-space font/glyph blitting or a shared framebuffer
+   mapping, plus a proper compositor/invalid-rect refresh model.

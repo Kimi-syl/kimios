@@ -5,9 +5,11 @@
 //! - LBA 1..17: 64 fixed 128-byte inodes.
 //! - LBA 17..: file data, each file allocated as a contiguous block run.
 //!
-//! There are no directories and no unlink yet. Files are created/truncated by
-//! name and grown contiguously. Every namespace update is written through to
-//! the block device and flushed, which is enough to survive a reboot.
+//! There are no directories yet. Files are created/truncated by name and kept
+//! as one contiguous run. A rebuilt-in-RAM block bitmap makes allocation
+//! first-fit, so `unlink` and truncation return their runs for reuse instead
+//! of leaking them. Every namespace update is written through to the block
+//! device and flushed, which is enough to survive a reboot.
 
 use spin::Mutex;
 
@@ -23,6 +25,10 @@ const INODE_BLOCKS: u64 = (INODE_COUNT * INODE_SIZE / SECTOR_SIZE) as u64;
 const DATA_LBA: u64 = INODE_LBA + INODE_BLOCKS;
 const MAX_NAME: usize = 31;
 
+/// Bitmap capacity: 65_536 blocks (32 MiB). Larger disks are not mounted.
+const MAX_BLOCKS: u64 = 65_536;
+const BITMAP_WORDS: usize = (MAX_BLOCKS as usize) / 64;
+
 const INODE_USED: usize = 32;
 const INODE_KIND: usize = 33;
 const INODE_SIZE_OFF: usize = 36;
@@ -32,8 +38,11 @@ const INODE_BLOCKS_OFF: usize = 52;
 struct Fs {
     mounted: bool,
     total_blocks: u64,
+    /// High-water mark kept in the superblock for information/back-compat.
     next_free: u64,
     files: u64,
+    free: u64,
+    used: [u64; BITMAP_WORDS],
 }
 
 static FS: Mutex<Fs> = Mutex::new(Fs {
@@ -41,7 +50,117 @@ static FS: Mutex<Fs> = Mutex::new(Fs {
     total_blocks: 0,
     next_free: DATA_LBA,
     files: 0,
+    free: 0,
+    used: [0; BITMAP_WORDS],
 });
+
+impl Fs {
+    fn is_used(&self, block: u64) -> bool {
+        let word = (block / 64) as usize;
+        let bit = 1u64 << (block % 64);
+        word < self.used.len() && self.used[word] & bit != 0
+    }
+
+    /// Set/clear a bit without touching the free count (used while rebuilding).
+    fn raw_set(&mut self, block: u64, used: bool) {
+        if block >= self.total_blocks {
+            return;
+        }
+        let word = (block / 64) as usize;
+        let bit = 1u64 << (block % 64);
+        if used {
+            self.used[word] |= bit;
+        } else {
+            self.used[word] &= !bit;
+        }
+    }
+
+    fn set_used(&mut self, block: u64, used: bool) {
+        if block < DATA_LBA || block >= self.total_blocks {
+            return;
+        }
+        let was = self.is_used(block);
+        if was == used {
+            return;
+        }
+        self.raw_set(block, used);
+        if used {
+            self.free -= 1;
+        } else {
+            self.free += 1;
+        }
+    }
+
+    fn mark_range(&mut self, first: u64, blocks: u64, used: bool) {
+        for index in 0..blocks {
+            self.set_used(first + index, used);
+        }
+    }
+
+    /// Rebuild the allocation bitmap by scanning the inode table.
+    fn rebuild(&mut self) -> Result<(), &'static str> {
+        self.used = [0; BITMAP_WORDS];
+        for block in 0..DATA_LBA {
+            self.raw_set(block, true);
+        }
+
+        let mut inode = [0u8; INODE_SIZE];
+        let mut data_used = 0u64;
+        for index in 0..INODE_COUNT {
+            read_inode(index, &mut inode)?;
+            if inode[INODE_USED] == 0 {
+                continue;
+            }
+            let first = read_u64(&inode, INODE_FIRST);
+            let blocks = read_u64(&inode, INODE_BLOCKS_OFF);
+            for block in first..first + blocks {
+                if block >= DATA_LBA && block < self.total_blocks && !self.is_used(block) {
+                    self.raw_set(block, true);
+                    data_used += 1;
+                }
+            }
+        }
+
+        self.free = self.total_blocks - DATA_LBA - data_used;
+        Ok(())
+    }
+
+    /// First-fit allocation of `needed` consecutive free blocks.
+    fn alloc_run(&mut self, needed: u64) -> Option<u64> {
+        if needed == 0 {
+            return None;
+        }
+
+        let mut run_start = 0u64;
+        let mut run = 0u64;
+        let mut block = DATA_LBA;
+        while block < self.total_blocks {
+            if self.is_used(block) {
+                run = 0;
+            } else {
+                if run == 0 {
+                    run_start = block;
+                }
+                run += 1;
+                if run == needed {
+                    for index in run_start..run_start + needed {
+                        self.set_used(index, true);
+                    }
+                    if run_start + needed > self.next_free {
+                        self.next_free = run_start + needed;
+                    }
+                    return Some(run_start);
+                }
+            }
+            block += 1;
+        }
+        None
+    }
+}
+
+fn write_superblock(fs: &Fs) -> Result<(), &'static str> {
+    block::write_block(0, &build_superblock(fs.total_blocks, fs.next_free))
+}
 
 fn read_u32(bytes: &[u8], offset: usize) -> u32 {
     u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap())
@@ -89,6 +208,11 @@ fn format(total: u64) -> Result<(), &'static str> {
     fs.total_blocks = total;
     fs.next_free = DATA_LBA;
     fs.files = 0;
+    fs.free = total - DATA_LBA;
+    fs.used = [0; BITMAP_WORDS];
+    for block in 0..DATA_LBA {
+        fs.raw_set(block, true);
+    }
     Ok(())
 }
 
@@ -119,6 +243,15 @@ pub fn mount() -> bool {
         return true;
     }
 
+    if total > MAX_BLOCKS {
+        crate::println!(
+            "[disk] KimiFS supports at most {} sectors; {} not mounted",
+            MAX_BLOCKS,
+            total
+        );
+        return false;
+    }
+
     let next_free = read_u64(&sector, 48).max(DATA_LBA);
     let mut files = 0u64;
     if let Ok(count) = count_files() {
@@ -130,11 +263,16 @@ pub fn mount() -> bool {
     fs.total_blocks = total;
     fs.next_free = next_free;
     fs.files = files;
+    if let Err(error) = fs.rebuild() {
+        crate::println!("[disk] bitmap rebuild failed: {}", error);
+        fs.mounted = false;
+        return false;
+    }
     crate::println!(
-        "[disk] KimiFS mounted: {} sectors, {} file(s), next free {}",
+        "[disk] KimiFS mounted: {} sectors, {} file(s), {} free block(s)",
         total,
         files,
-        next_free
+        fs.free
     );
     true
 }
@@ -225,11 +363,20 @@ pub fn create(name: &str) -> Option<usize> {
             return None;
         }
         if inode[INODE_USED] != 0 && inode_name(&inode) == name {
+            let first = read_u64(&inode, INODE_FIRST);
+            let blocks = read_u64(&inode, INODE_BLOCKS_OFF);
+            if blocks > 0 {
+                fs.mark_range(first, blocks, false);
+            }
             write_u64(&mut inode, INODE_SIZE_OFF, 0);
-            if write_inode(index, &inode).is_err() {
+            write_u64(&mut inode, INODE_FIRST, 0);
+            write_u64(&mut inode, INODE_BLOCKS_OFF, 0);
+            let result = write_inode(index, &inode);
+            let _ = write_superblock(&fs);
+            let _ = block::flush();
+            if result.is_err() {
                 return None;
             }
-            let _ = block::flush();
             return Some(index);
         }
     }
@@ -334,10 +481,9 @@ pub fn write(inode_index: usize, offset: u64, data: &[u8]) -> Result<usize, &'st
 
     let mut first = old_first;
     if needed > old_blocks {
-        let start = fs.next_free;
-        if start + needed > fs.total_blocks {
+        let Some(start) = fs.alloc_run(needed) else {
             return Err("disk full");
-        }
+        };
 
         for block_index in 0..needed {
             let zero = [0u8; SECTOR_SIZE];
@@ -358,11 +504,13 @@ pub fn write(inode_index: usize, offset: u64, data: &[u8]) -> Result<usize, &'st
             copied += chunk as u64;
         }
 
-        fs.next_free = start + needed;
+        if old_blocks > 0 {
+            fs.mark_range(old_first, old_blocks, false);
+        }
         first = start;
         write_u64(&mut inode, INODE_FIRST, first);
         write_u64(&mut inode, INODE_BLOCKS_OFF, needed);
-        block::write_block(0, &build_superblock(fs.total_blocks, fs.next_free))?;
+        write_superblock(&fs)?;
     }
 
     if offset > old_size {
@@ -391,6 +539,48 @@ pub fn write(inode_index: usize, offset: u64, data: &[u8]) -> Result<usize, &'st
     write_inode(inode_index, &inode)?;
     block::flush()?;
     Ok(data.len())
+}
+
+/// Remove a file, returning its block run to the bitmap.
+pub fn unlink(name: &str) -> bool {
+    let mut fs = FS.lock();
+    if !fs.mounted {
+        return false;
+    }
+
+    let mut inode = [0u8; INODE_SIZE];
+    for index in 0..INODE_COUNT {
+        if read_inode(index, &mut inode).is_err() {
+            return false;
+        }
+        if inode[INODE_USED] != 0 && inode_name(&inode) == name {
+            let first = read_u64(&inode, INODE_FIRST);
+            let blocks = read_u64(&inode, INODE_BLOCKS_OFF);
+            if blocks > 0 {
+                fs.mark_range(first, blocks, false);
+            }
+
+            let zero = [0u8; INODE_SIZE];
+            if write_inode(index, &zero).is_err() {
+                return false;
+            }
+            fs.files = fs.files.saturating_sub(1);
+            let _ = write_superblock(&fs);
+            let _ = block::flush();
+            return true;
+        }
+    }
+    false
+}
+
+/// Free data blocks (excluding the superblock/inode area).
+pub fn free_blocks() -> Option<u64> {
+    let fs = FS.lock();
+    if fs.mounted {
+        Some(fs.free)
+    } else {
+        None
+    }
 }
 
 /// Visit every live file name in inode order.

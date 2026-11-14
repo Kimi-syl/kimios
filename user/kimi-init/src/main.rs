@@ -93,7 +93,7 @@ pub extern "C" fn _start() -> ! {
     k::print("\nKimiOS user shell (libkimi), pid ");
     k::print_u64(k::getpid());
     k::print("\n");
-    k::print("Commands: ls, cat, write, df, spawn, run, wait, mem, exec, help, exit\n");
+    k::print("Commands: ls, cat, write, rm, df, time, sleep, spawn, run, wait, ps, kill, mem, exec, help, exit\n");
 
     let mut line = [0u8; 128];
     let mut path_buffer = [0u8; 96];
@@ -115,7 +115,10 @@ pub extern "C" fn _start() -> ! {
             k::print("  ls             list RamFS files\n");
             k::print("  cat <file>     print a file (RamFS or /disk/...)\n");
             k::print("  write <path> <text>  create/truncate a /disk file\n");
-            k::print("  df             show disk geometry and file count\n");
+            k::print("  rm <file>      remove a /disk file\n");
+            k::print("  df             show disk geometry, files and free blocks\n");
+            k::print("  time           show milliseconds since boot\n");
+            k::print("  sleep <ms>     sleep while other processes keep running\n");
             k::print("  spawn <file>   create a process from an ELF or PE\n");
             k::print("  run <file>     spawn and wait for a process\n");
             k::print("  wait <pid>     wait for a child (0 = any)\n");
@@ -182,6 +185,38 @@ pub extern "C" fn _start() -> ! {
                 }
                 None => k::print("df: no disk mounted\n"),
             }
+            if let Some(free) = k::free_blocks() {
+                k::print("free data blocks: ");
+                k::print_u64(free);
+                k::print("\n");
+            }
+        } else if command == &b"rm"[..] {
+            let Some(path) = with_slash(argument, &mut path_buffer) else {
+                k::print("usage: rm <file>\n");
+                continue;
+            };
+            if k::unlink(path) {
+                k::print("removed ");
+                k::print(path);
+                k::print("\n");
+            } else {
+                k::print("rm: failed (disk files only)\n");
+            }
+        } else if command == &b"time"[..] {
+            k::print("uptime ms: ");
+            k::print_u64(k::uptime_ms());
+            k::print("\n");
+        } else if command == &b"sleep"[..] {
+            let Some(ms) = parse_u64(argument) else {
+                k::print("usage: sleep <ms>\n");
+                continue;
+            };
+            let before = k::uptime_ms();
+            k::sleep_ms(ms);
+            let after = k::uptime_ms();
+            k::print("slept ");
+            k::print_u64(after.saturating_sub(before));
+            k::print(" ms\n");
         } else if command == &b"spawn"[..] {
             let Some(path) = with_slash(argument, &mut path_buffer) else {
                 k::print("usage: spawn <file>\n");
@@ -232,6 +267,39 @@ pub extern "C" fn _start() -> ! {
             k::print("\n");
             k::exec(path);
             k::print("exec failed\n");
+        } else if command == &b"ps"[..] {
+            let mut rows = [0u64; 64];
+            let count = k::ps(&mut rows);
+            k::print("PID PPID STATE EXIT\n");
+            for index in 0..count {
+                let base = index * 4;
+                k::print_u64(rows[base]);
+                k::print(" ");
+                k::print_u64(rows[base + 1]);
+                k::print(" ");
+                k::print(match rows[base + 2] {
+                    0 => "free ",
+                    1 => "ready",
+                    2 => "run  ",
+                    3 => "block",
+                    _ => "zombi",
+                });
+                k::print(" ");
+                k::print_u64(rows[base + 3]);
+                k::print("\n");
+            }
+        } else if command == &b"kill"[..] {
+            let Some(pid) = parse_u64(argument) else {
+                k::print("usage: kill <pid>\n");
+                continue;
+            };
+            if k::kill(pid) {
+                k::print("killed pid ");
+                k::print_u64(pid);
+                k::print("\n");
+            } else {
+                k::print("kill: no such live process\n");
+            }
         } else if command == &b"exit"[..] {
             k::print("bye\n");
             k::exit(0);

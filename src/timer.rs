@@ -14,6 +14,16 @@ pub fn frequency() -> u64 {
     frequency
 }
 
+/// Milliseconds since the system counter started (CNTPCT_EL0).
+pub fn uptime_ms() -> u64 {
+    let count: u64;
+    unsafe {
+        asm!("mrs {}, cntpct_el0", out(reg) count, options(nomem, nostack));
+    }
+    let ticks = count as u128 * 1000;
+    (ticks / frequency().max(1) as u128) as u64
+}
+
 /// Start a periodic timer. `interval` is in counter ticks.
 ///
 /// CNTP_TVAL_EL0 is a down-counter; when it reaches zero the condition is

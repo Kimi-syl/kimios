@@ -31,7 +31,13 @@ static FSTEST_ELF: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/fstest.elf"
 
 static SPIN_ELF: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/spin.elf"));
 
-static FILES: [File; 6] = [
+static FBTEST_ELF: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/fbtest.elf"));
+
+static HEAPTEST_ELF: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/heaptest.elf"));
+
+static SLEEPER_ELF: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/sleeper.elf"));
+
+static FILES: [File; 9] = [
     File {
         name: "/init",
         data: INIT_ELF,
@@ -51,6 +57,18 @@ static FILES: [File; 6] = [
     File {
         name: "/spin",
         data: SPIN_ELF,
+    },
+    File {
+        name: "/fbtest",
+        data: FBTEST_ELF,
+    },
+    File {
+        name: "/heaptest",
+        data: HEAPTEST_ELF,
+    },
+    File {
+        name: "/sleeper",
+        data: SLEEPER_ELF,
     },
     File {
         name: "/motd",

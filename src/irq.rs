@@ -52,6 +52,9 @@ pub extern "C" fn irq_handler(frame: *mut ExceptionFrame) {
     let from_el0 = frame.spsr & 0xf == 0;
 
     if timer_tick {
+        // Wake expired sleepers before preemption so they can be scheduled on
+        // this same tick.
+        process::wake_sleepers(timer::uptime_ms());
         if from_el0 {
             // Preempt the running user process (cooperative fallback stays in
             // place for spawn/wait/exit).

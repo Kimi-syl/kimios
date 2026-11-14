@@ -86,8 +86,22 @@ pub extern "C" fn exception_handler(frame: &mut ExceptionFrame) {
                 }
                 return;
             }
+            usermode::SYS_SLEEP => {
+                match usermode::sys_sleep(frame, arg0) {
+                    process::SleepOutcome::Done(result) => frame.x[0] = result,
+                    process::SleepOutcome::Switched => {}
+                }
+                return;
+            }
             crate::pe::SYS_PE_EXIT_PROCESS => {
                 usermode::pe_exit_process(frame, arg0);
+                return;
+            }
+            crate::pe::SYS_PE_SLEEP => {
+                match usermode::sys_sleep(frame, arg0) {
+                    process::SleepOutcome::Done(result) => frame.x[0] = result,
+                    process::SleepOutcome::Switched => {}
+                }
                 return;
             }
             _ => {}
@@ -110,6 +124,16 @@ pub extern "C" fn exception_handler(frame: &mut ExceptionFrame) {
                 usermode::sys_write_file(arg0, arg1, arg2, arg3)
             }
             usermode::SYS_DISKINFO => usermode::sys_diskinfo(),
+            usermode::SYS_FB_INFO => usermode::sys_fb_info(arg0),
+            usermode::SYS_FB_FILL => {
+                usermode::sys_fb_fill(arg0, arg1, arg2, arg3, arg4)
+            }
+            usermode::SYS_UNLINK => usermode::sys_unlink(arg0, arg1),
+            usermode::SYS_FREEBLOCKS => usermode::sys_freeblocks(),
+            usermode::SYS_UPTIME => usermode::sys_uptime(),
+            usermode::SYS_BRK => usermode::sys_brk(arg0),
+            usermode::SYS_PS => usermode::sys_ps(arg0, arg1),
+            usermode::SYS_KILL => usermode::sys_kill(arg0),
             crate::pe::SYS_PE_GET_STD_HANDLE => {
                 usermode::pe_get_std_handle(arg0)
             }
@@ -118,6 +142,11 @@ pub extern "C" fn exception_handler(frame: &mut ExceptionFrame) {
             ),
             crate::pe::SYS_PE_GET_LAST_ERROR => usermode::pe_get_last_error(),
             crate::pe::SYS_PE_SET_LAST_ERROR => usermode::pe_set_last_error(arg0),
+            crate::pe::SYS_PE_GET_TICK_COUNT_64 => usermode::pe_get_tick_count_64(),
+            crate::pe::SYS_PE_GET_TICK_COUNT => usermode::pe_get_tick_count(),
+            crate::pe::SYS_PE_WRITE_CONSOLE_A => usermode::pe_write_console_a(
+                arg0, arg1, arg2, arg3, arg4,
+            ),
             _ => {
                 println!("Unknown syscall {} (x0={:#x})", number, arg0);
                 u64::MAX

@@ -127,13 +127,45 @@ pub fn init() {
     }
 }
 
+/// Enable the MMU on a secondary CPU using the shared kernel tables.
+///
+/// PSCI starts secondary cores with translation and caches off at EL1. They
+/// must install the same MAIR/TCR/TTBR0/SCTLR values as the boot CPU before
+/// running Rust code that uses atomics or shared data.
+#[allow(static_mut_refs)]
+pub fn enable_secondary() {
+    unsafe {
+        asm!(
+            "dsb sy",
+            "msr mair_el1, {mair}",
+            "msr tcr_el1, {tcr}",
+            "msr ttbr0_el1, {ttbr}",
+            "dsb sy",
+            "isb",
+            "tlbi vmalle1",
+            "dsb sy",
+            "isb",
+            "mrs {sctlr}, sctlr_el1",
+            "mov x9, #0x1005", // M (MMU) | C (D-cache) | I (I-cache)
+            "orr {sctlr}, {sctlr}, x9",
+            "msr sctlr_el1, {sctlr}",
+            "isb",
+            mair = in(reg) MAIR_VALUE,
+            tcr = in(reg) TCR_VALUE,
+            ttbr = in(reg) addr_of_mut!(L0_TABLE) as u64,
+            sctlr = out(reg) _,
+            out("x9") _,
+        );
+    }
+}
+
 /// Per-process user address space.
 ///
 /// The kernel image and RAM are identity mapped, so every process gets a copy
 /// of the kernel L0/L1/L2 tables with only the user 2 MiB blocks replaced by
 /// private L3 tables. This keeps kernel code, stacks and physical memory
 /// reachable while TTBR0 points at a process.
-pub const MAX_FRAMES: usize = 64;
+pub const MAX_FRAMES: usize = 256;
 
 pub struct AddressSpace {
     ttbr0: u64,
@@ -186,6 +218,11 @@ impl AddressSpace {
         self.frames[self.frame_count] = frame;
         self.frame_count += 1;
         Some(frame)
+    }
+
+    /// Frames still available for this address space (tables and pages).
+    pub fn spare_frames(&self) -> usize {
+        MAX_FRAMES - self.frame_count
     }
 
     /// Map one 4 KiB user page. `executable` controls UXN; PXN is always set.
