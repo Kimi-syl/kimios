@@ -134,6 +134,11 @@ pub extern "C" fn exception_handler(frame: &mut ExceptionFrame) {
             usermode::SYS_BRK => usermode::sys_brk(arg0),
             usermode::SYS_PS => usermode::sys_ps(arg0, arg1),
             usermode::SYS_KILL => usermode::sys_kill(arg0),
+            usermode::SYS_RENAME => {
+                usermode::sys_rename(arg0, arg1, arg2, arg3)
+            }
+            usermode::SYS_RTC => usermode::sys_rtc(arg0),
+            usermode::SYS_STAT => usermode::sys_stat(arg0, arg1, arg2),
             crate::pe::SYS_PE_GET_STD_HANDLE => {
                 usermode::pe_get_std_handle(arg0)
             }

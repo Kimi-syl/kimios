@@ -32,6 +32,9 @@ pub const SYS_SLEEP: u64 = 21;
 pub const SYS_BRK: u64 = 22;
 pub const SYS_PS: u64 = 23;
 pub const SYS_KILL: u64 = 24;
+pub const SYS_RENAME: u64 = 25;
+pub const SYS_RTC: u64 = 26;
+pub const SYS_STAT: u64 = 27;
 
 pub const STDIN: u64 = 0;
 pub const STDOUT: u64 = 1;
@@ -278,6 +281,44 @@ pub fn kill(pid: u64) -> bool {
     syscall3(SYS_KILL, pid, 0, 0) == 0
 }
 
+/// Rename a `/disk/...` file.
+pub fn rename(old: &str, new: &str) -> bool {
+    syscall4(
+        SYS_RENAME,
+        old.as_ptr() as u64,
+        old.len() as u64,
+        new.as_ptr() as u64,
+        new.len() as u64,
+    ) == 0
+}
+
+/// File metadata: `(kind, size)` where kind 0 is RamFS and 1 is a disk file.
+pub fn stat(path: &str) -> Option<(u64, u64)> {
+    let mut fields = [0u64; 3];
+    let result = syscall4(
+        SYS_STAT,
+        path.as_ptr() as u64,
+        path.len() as u64,
+        fields.as_mut_ptr() as u64,
+        0,
+    );
+    if result == ERROR {
+        None
+    } else {
+        Some((fields[0], fields[1]))
+    }
+}
+
+/// Read the UTC clock: `[epoch, year, month, day, hour, minute, second]`.
+pub fn rtc() -> Option<[u64; 7]> {
+    let mut fields = [0u64; 7];
+    if syscall3(SYS_RTC, fields.as_mut_ptr() as u64, 0, 0) == ERROR {
+        None
+    } else {
+        Some(fields)
+    }
+}
+
 /// Current program break (one past the last heap byte).
 pub fn brk() -> u64 {
     syscall3(SYS_BRK, 0, 0, 0)
@@ -326,5 +367,110 @@ pub fn exit(status: u64) -> ! {
     syscall3(SYS_EXIT, status, 0, 0);
     loop {
         unsafe { asm!("wfe") };
+    }
+}
+
+/// A minimal global allocator backed by `brk`.
+///
+/// Freed blocks are kept in a singly linked first-fit list; new memory is
+/// carved from a bump pointer that grows the program break a page at a time.
+/// Blocks are 16-byte aligned (larger alignments are served from the bump
+/// path), which is enough for `alloc` collections and typical user code.
+///
+/// Processes are single-threaded and the kernel never preempts inside this
+/// crate's bookkeeping, so no lock is needed: the free list is private to the
+/// process's address space.
+pub struct Heap;
+
+const HEADER: usize = 16;
+const ALIGN: usize = 16;
+
+#[repr(C)]
+struct Block {
+    size: usize,
+    next: *mut Block,
+}
+
+static mut FREE: *mut Block = core::ptr::null_mut();
+static NEXT: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+static END: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+fn align_up(value: usize, align: usize) -> Option<usize> {
+    value.checked_add(align - 1).map(|sum| sum & !(align - 1))
+}
+
+impl Heap {
+    unsafe fn take_free(&self, size: usize) -> Option<*mut u8> {
+        let mut previous: *mut Block = core::ptr::null_mut();
+        let mut current = FREE;
+        while !current.is_null() {
+            let block = &mut *current;
+            if block.size >= size + HEADER {
+                if previous.is_null() {
+                    FREE = block.next;
+                } else {
+                    (*previous).next = block.next;
+                }
+                let used = align_up(size + HEADER, ALIGN).unwrap_or(block.size);
+                if block.size >= used + HEADER + ALIGN {
+                    let rest = (current as usize + used) as *mut Block;
+                    (*rest).size = block.size - used;
+                    (*rest).next = FREE;
+                    FREE = rest;
+                    (*current).size = used;
+                }
+                return Some((current as usize + HEADER) as *mut u8);
+            }
+            previous = current;
+            current = block.next;
+        }
+        None
+    }
+
+    unsafe fn bump(&self, size: usize, align: usize) -> Option<*mut u8> {
+        let mut start = NEXT.load(core::sync::atomic::Ordering::Relaxed);
+        if start == 0 {
+            start = brk() as usize;
+        }
+        let payload = align_up(start + HEADER, align)?;
+        let wanted = payload.checked_add(size)?;
+        let mut end = END.load(core::sync::atomic::Ordering::Relaxed);
+        if wanted > end {
+            let rounded = align_up(wanted, 4096)?;
+            let grown = sbrk(rounded as u64) as usize;
+            if grown < wanted {
+                return None;
+            }
+            end = grown;
+            END.store(end, core::sync::atomic::Ordering::Relaxed);
+        }
+        NEXT.store(wanted, core::sync::atomic::Ordering::Relaxed);
+        let block = (payload - HEADER) as *mut Block;
+        (*block).size = size + HEADER;
+        (*block).next = core::ptr::null_mut();
+        Some(payload as *mut u8)
+    }
+}
+
+unsafe impl core::alloc::GlobalAlloc for Heap {
+    unsafe fn alloc(&self, layout: core::alloc::Layout) -> *mut u8 {
+        let size = layout.size().max(1);
+        let align = layout.align().max(ALIGN);
+        if align > ALIGN {
+            return self.bump(size, align).unwrap_or(core::ptr::null_mut());
+        }
+        match self.take_free(size) {
+            Some(pointer) => pointer,
+            None => self.bump(size, align).unwrap_or(core::ptr::null_mut()),
+        }
+    }
+
+    unsafe fn dealloc(&self, pointer: *mut u8, _layout: core::alloc::Layout) {
+        if pointer.is_null() {
+            return;
+        }
+        let block = (pointer as usize - HEADER) as *mut Block;
+        (*block).next = FREE;
+        FREE = block;
     }
 }

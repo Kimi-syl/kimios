@@ -27,6 +27,7 @@ fn main() {
     println!("cargo:rerun-if-changed=user/kimi-fbtest");
     println!("cargo:rerun-if-changed=user/kimi-heaptest");
     println!("cargo:rerun-if-changed=user/kimi-sleeper");
+    println!("cargo:rerun-if-changed=user/kimi-alloctest");
 
     let target_dir = manifest_dir.join("target/user-build");
     let linker = user_dir.join("linker.ld");
@@ -59,6 +60,7 @@ fn main() {
         ("kimi-fbtest", "fbtest.elf"),
         ("kimi-heaptest", "heaptest.elf"),
         ("kimi-sleeper", "sleeper.elf"),
+        ("kimi-alloctest", "alloctest.elf"),
     ] {
         let built = target_dir
             .join("aarch64-unknown-none/release")

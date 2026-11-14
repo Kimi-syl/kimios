@@ -32,6 +32,9 @@ pub const SYS_SLEEP: u64 = 21;
 pub const SYS_BRK: u64 = 22;
 pub const SYS_PS: u64 = 23;
 pub const SYS_KILL: u64 = 24;
+pub const SYS_RENAME: u64 = 25;
+pub const SYS_RTC: u64 = 26;
+pub const SYS_STAT: u64 = 27;
 
 /// Coarse user-accessible window: ELF, stack, PE image/thunks/stack.
 const USER_SPACE_START: u64 = 0x6000_0000;
@@ -290,6 +293,80 @@ pub fn sys_uptime() -> u64 {
 /// sleep(ms): block until the deadline; dispatching is handled by the caller.
 pub fn sys_sleep(frame: &mut ExceptionFrame, ms: u64) -> process::SleepOutcome {
     process::sys_sleep(frame, ms)
+}
+
+/// rename(old, new) for `/disk/...` paths; 0 on success.
+pub fn sys_rename(
+    old_pointer: u64,
+    old_length: u64,
+    new_pointer: u64,
+    new_length: u64,
+) -> u64 {
+    let Some(old_bytes) = user_bytes(old_pointer, old_length) else {
+        return ERROR;
+    };
+    let Some(new_bytes) = user_bytes(new_pointer, new_length) else {
+        return ERROR;
+    };
+    let (Ok(old), Ok(new)) = (
+        core::str::from_utf8(old_bytes),
+        core::str::from_utf8(new_bytes),
+    ) else {
+        return ERROR;
+    };
+    let (Some(old), Some(new)) =
+        (old.strip_prefix("/disk/"), new.strip_prefix("/disk/"))
+    else {
+        return ERROR;
+    };
+    if diskfs::rename(old, new) {
+        0
+    } else {
+        ERROR
+    }
+}
+
+/// stat(path, out): write `[kind, size, blocks]` (kind 0 RamFS, 1 disk).
+pub fn sys_stat(pointer: u64, length: u64, out_pointer: u64) -> u64 {
+    let Some(out) = user_u64_buffer(out_pointer, 3) else {
+        return ERROR;
+    };
+    with_user_path(pointer, length, |path| {
+        if let Some(file) = ramfs::index_of(path).and_then(ramfs::file_at) {
+            out[0] = 0;
+            out[1] = file.data.len() as u64;
+            out[2] = 0;
+            return 0;
+        }
+        if let Some(name) = path.strip_prefix("/disk/") {
+            if let Some((size, blocks)) = diskfs::stat(name) {
+                out[0] = 1;
+                out[1] = size;
+                out[2] = blocks;
+                return 0;
+            }
+        }
+        ERROR
+    })
+}
+
+/// rtc(out): write `[epoch, year, month, day, hour, minute, second]`.
+pub fn sys_rtc(pointer: u64) -> u64 {
+    let Some(epoch) = crate::rtc::epoch_seconds() else {
+        return ERROR;
+    };
+    let Some(out) = user_u64_buffer(pointer, 7) else {
+        return ERROR;
+    };
+    let (year, month, day, hour, minute, second) = crate::rtc::civil(epoch);
+    out[0] = epoch;
+    out[1] = year;
+    out[2] = month;
+    out[3] = day;
+    out[4] = hour;
+    out[5] = minute;
+    out[6] = second;
+    0
 }
 
 /// ps(out, capacity): write process records, return the count.

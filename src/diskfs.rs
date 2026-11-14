@@ -573,6 +573,73 @@ pub fn unlink(name: &str) -> bool {
     false
 }
 
+/// File size and block count, if the name exists.
+pub fn stat(name: &str) -> Option<(u64, u64)> {
+    let fs = FS.lock();
+    if !fs.mounted {
+        return None;
+    }
+    let mut inode = [0u8; INODE_SIZE];
+    for index in 0..INODE_COUNT {
+        if read_inode(index, &mut inode).is_err() {
+            return None;
+        }
+        if inode[INODE_USED] != 0 && inode_name(&inode) == name {
+            return Some((
+                read_u64(&inode, INODE_SIZE_OFF),
+                read_u64(&inode, INODE_BLOCKS_OFF),
+            ));
+        }
+    }
+    None
+}
+
+/// Rename a file. Fails if the old name is missing or the new one is taken.
+pub fn rename(old: &str, new: &str) -> bool {
+    if !name_is_valid(old) || !name_is_valid(new) || old == new {
+        return false;
+    }
+
+    let fs = FS.lock();
+    if !fs.mounted {
+        return false;
+    }
+
+    let mut inode = [0u8; INODE_SIZE];
+    let mut target = None;
+    for index in 0..INODE_COUNT {
+        if read_inode(index, &mut inode).is_err() {
+            return false;
+        }
+        if inode[INODE_USED] == 0 {
+            continue;
+        }
+        let name = inode_name(&inode);
+        if name == new {
+            return false;
+        }
+        if name == old && target.is_none() {
+            target = Some(index);
+        }
+    }
+
+    let Some(index) = target else {
+        return false;
+    };
+    if read_inode(index, &mut inode).is_err() {
+        return false;
+    }
+    for byte in &mut inode[..32] {
+        *byte = 0;
+    }
+    inode[..new.len()].copy_from_slice(new.as_bytes());
+    if write_inode(index, &inode).is_err() {
+        return false;
+    }
+    let _ = block::flush();
+    true
+}
+
 /// Free data blocks (excluding the superblock/inode area).
 pub fn free_blocks() -> Option<u64> {
     let fs = FS.lock();

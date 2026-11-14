@@ -35,8 +35,11 @@ pub extern "C" fn irq_handler(frame: *mut ExceptionFrame) {
         // Safety net: poll the RX FIFO in case the level interrupt was masked
         // or the trigger level was not reached (single-character input).
         line_ready = uart::rx_interrupt();
+
     } else if intid == gic::UART_INTID {
         line_ready = uart::rx_interrupt();
+    } else if intid == crate::virtio_input::interrupt_id() {
+        line_ready = crate::virtio_input::interrupt();
     } else if intid != 1023 {
         println!("Unexpected IRQ: INTID {}", intid);
     }

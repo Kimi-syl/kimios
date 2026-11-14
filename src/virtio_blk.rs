@@ -45,8 +45,8 @@ const REG_CONFIG: u64 = 0x100;
 
 const STATUS_ACK: u32 = 1;
 const STATUS_DRIVER: u32 = 2;
-const STATUS_FEATURES_OK: u32 = 4;
-const STATUS_DRIVER_OK: u32 = 8;
+const STATUS_FEATURES_OK: u32 = 8;
+const STATUS_DRIVER_OK: u32 = 4;
 
 const FEATURE_FLUSH: u32 = 1 << 9;
 const FEATURE_VERSION_1: u32 = 1;

@@ -37,7 +37,9 @@ static HEAPTEST_ELF: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/heaptest.
 
 static SLEEPER_ELF: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/sleeper.elf"));
 
-static FILES: [File; 9] = [
+static ALLOCTEST_ELF: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/alloctest.elf"));
+
+static FILES: [File; 10] = [
     File {
         name: "/init",
         data: INIT_ELF,
@@ -69,6 +71,10 @@ static FILES: [File; 9] = [
     File {
         name: "/sleeper",
         data: SLEEPER_ELF,
+    },
+    File {
+        name: "/alloctest",
+        data: ALLOCTEST_ELF,
     },
     File {
         name: "/motd",

@@ -17,12 +17,14 @@ mod pe;
 mod pfa;
 mod process;
 mod ramfs;
+mod rtc;
 mod sched;
 mod smp;
 mod timer;
 mod usermode;
 mod uart;
 mod virtio_blk;
+mod virtio_input;
 
 use core::alloc::Layout;
 use core::arch::{asm, global_asm};
@@ -217,6 +219,17 @@ pub extern "C" fn kmain(dtb: usize) -> ! {
     println!();
     println!("Phases 17-18: framebuffer display and text console");
     fb::init();
+
+    // Phase 30: virtio-input keyboard (shares the UART line editor).
+    println!();
+    println!("Phase 30: virtio keyboard");
+    match virtio_input::init() {
+        Ok((irq, version)) => println!(
+            "virtio-input: keyboard irq {} mmio v{}",
+            irq, version
+        ),
+        Err(reason) => println!("virtio-input: {}", reason),
+    }
 
     // Phase 13: create the init process and enter EL0.
     process::start_init();

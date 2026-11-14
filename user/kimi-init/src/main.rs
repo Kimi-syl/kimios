@@ -71,6 +71,18 @@ fn parse_u64(input: &[u8]) -> Option<u64> {
     Some(value)
 }
 
+fn print_padded(value: u64, width: usize) {
+    let mut divisor = 1;
+    for _ in 1..width {
+        divisor *= 10;
+    }
+    while divisor > 1 && value < divisor {
+        k::print("0");
+        divisor /= 10;
+    }
+    k::print_u64(value);
+}
+
 fn report_status(pid: u64, status: Option<u64>) {
     match status {
         Some(code) => {
@@ -93,7 +105,7 @@ pub extern "C" fn _start() -> ! {
     k::print("\nKimiOS user shell (libkimi), pid ");
     k::print_u64(k::getpid());
     k::print("\n");
-    k::print("Commands: ls, cat, write, rm, df, time, sleep, spawn, run, wait, ps, kill, mem, exec, help, exit\n");
+    k::print("Commands: ls, cat, write, rm, mv, df, date, stat, time, sleep, spawn, run, wait, ps, kill, mem, exec, help, exit\n");
 
     let mut line = [0u8; 128];
     let mut path_buffer = [0u8; 96];
@@ -112,10 +124,13 @@ pub extern "C" fn _start() -> ! {
         let argument = trim(rest);
 
         if command == &b"help"[..] {
-            k::print("  ls             list RamFS files\n");
+            k::print("  ls             list files with sizes\n");
             k::print("  cat <file>     print a file (RamFS or /disk/...)\n");
             k::print("  write <path> <text>  create/truncate a /disk file\n");
             k::print("  rm <file>      remove a /disk file\n");
+            k::print("  mv <old> <new> rename a /disk file\n");
+            k::print("  stat <file>    show kind, size and blocks\n");
+            k::print("  date           show UTC wall-clock time\n");
             k::print("  df             show disk geometry, files and free blocks\n");
             k::print("  time           show milliseconds since boot\n");
             k::print("  sleep <ms>     sleep while other processes keep running\n");
@@ -130,6 +145,15 @@ pub extern "C" fn _start() -> ! {
             for name in listing[..count].split(|&byte| byte == 0) {
                 if !name.is_empty() {
                     k::print_bytes(name);
+                    if let Some((_, size)) = k::stat(
+                        core::str::from_utf8(name).unwrap_or(""),
+                    ) {
+                        let padding = 28usize.saturating_sub(name.len()).max(1);
+                        for _ in 0..padding {
+                            k::print(" ");
+                        }
+                        k::print_u64(size);
+                    }
                     k::print("\n");
                 }
             }
@@ -202,6 +226,25 @@ pub extern "C" fn _start() -> ! {
             } else {
                 k::print("rm: failed (disk files only)\n");
             }
+        } else if command == &b"mv"[..] {
+            let (old_word, new_word) = split_word(argument);
+            let mut new_buffer = [0u8; 64];
+            let (Some(old), Some(new)) = (
+                with_slash(old_word, &mut path_buffer),
+                with_slash(new_word, &mut new_buffer),
+            ) else {
+                k::print("usage: mv <old> <new>\n");
+                continue;
+            };
+            if k::rename(old, new) {
+                k::print("renamed ");
+                k::print(old);
+                k::print(" -> ");
+                k::print(new);
+                k::print("\n");
+            } else {
+                k::print("mv: failed (disk files only, new name must be free)\n");
+            }
         } else if command == &b"time"[..] {
             k::print("uptime ms: ");
             k::print_u64(k::uptime_ms());
@@ -267,6 +310,41 @@ pub extern "C" fn _start() -> ! {
             k::print("\n");
             k::exec(path);
             k::print("exec failed\n");
+        } else if command == &b"stat"[..] {
+            let Some(path) = with_slash(argument, &mut path_buffer) else {
+                k::print("usage: stat <file>\n");
+                continue;
+            };
+            match k::stat(path) {
+                Some((kind, size)) => {
+                    k::print("kind: ");
+                    k::print(if kind == 0 { "ramfs" } else { "disk" });
+                    k::print(", size: ");
+                    k::print_u64(size);
+                    k::print(" bytes\n");
+                }
+                None => k::print("stat: not found\n"),
+            }
+        } else if command == &b"date"[..] {
+            match k::rtc() {
+                Some(clock) => {
+                    print_padded(clock[1], 4);
+                    k::print("-");
+                    print_padded(clock[2], 2);
+                    k::print("-");
+                    print_padded(clock[3], 2);
+                    k::print(" ");
+                    print_padded(clock[4], 2);
+                    k::print(":");
+                    print_padded(clock[5], 2);
+                    k::print(":");
+                    print_padded(clock[6], 2);
+                    k::print(" UTC (");
+                    k::print_u64(clock[0]);
+                    k::print(")\n");
+                }
+                None => k::print("date: no RTC\n"),
+            }
         } else if command == &b"ps"[..] {
             let mut rows = [0u64; 64];
             let count = k::ps(&mut rows);

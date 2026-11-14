@@ -137,8 +137,18 @@ pub fn rx_interrupt() -> bool {
 
     let mut completed = false;
     while let Some(byte) = CONSOLE.try_recv() {
-        unsafe {
-            match byte {
+        completed |= inject(byte);
+    }
+
+    completed
+}
+
+/// Feed one byte through the same editor/echo path as UART input. Used by the
+/// virtio keyboard driver; must run with interrupts masked.
+pub fn inject(byte: u8) -> bool {
+    let mut completed = false;
+    unsafe {
+        match byte {
                 b'\r' | b'\n' => {
                     CONSOLE.send_byte(b'\r');
                     CONSOLE.send_byte(b'\n');
@@ -172,10 +182,8 @@ pub fn rx_interrupt() -> bool {
                         fb::putc(byte);
                     }
                 }
-            }
         }
     }
-
     completed
 }
 

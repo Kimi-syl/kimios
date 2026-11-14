@@ -109,6 +109,19 @@ No bootloader is used: QEMU loads the ELF directly with `-kernel`.
   zombie with status 137, clears it as console reader, adopts its orphans and
   wakes a parent blocked on it. Shell `ps` prints the table and `kill <pid>`
   terminates a child; `/sleeper` is a quiet long-lived test target.
+- **Phase 26 - Rename:** `rename` (25) rewrites a KimiFS inode's name field
+  and flushes it, refusing missing sources and taken destinations. Shell `mv`
+  moves disk files without copying data.
+- **Phase 27 - Wall clock:** `rtc` (26) reads the PL031 data register at
+  `0x0901_0000` and converts Unix seconds to UTC civil time (Hinnant's
+  `civil_from_days`); shell `date` prints `YYYY-MM-DD HH:MM:SS UTC`.
+- **Phase 28 - File metadata:** `stat` (27) reports `[kind, size, blocks]`
+  for RamFS and KimiFS paths; `ls` now aligns names and shows sizes, and the
+  shell gained a `stat <file>` command.
+- **Phase 29 - User-space allocator:** `libkimi::Heap` implements
+  `GlobalAlloc` over `brk` with a first-fit free list, 16-byte alignment and
+  page-rounded growth. User binaries can now use `alloc::vec::Vec` and
+  friends; `/alloctest` exercises reuse and a 40 KiB vector.
 
 ## Layout
 
@@ -181,7 +194,9 @@ supports. Add `-global virtio-mmio.force-legacy=false` to exercise the modern
 (v2) path.
 
 For display output add `-display none -device ramfb` to the command line (or
-keep the default window). `-display none` is convenient in headless shells;
+keep the default window). Add `-device virtio-keyboard-device` for keyboard
+input; QEMU routes monitor/QMP key events to it even without a graphical
+window. `-display none` is convenient in headless shells;
 `screendump` on the monitor still captures the framebuffer.
 
 Add `-smp 4` to exercise the Phase 20 PSCI bring-up (CPU 1-3). The default
@@ -718,6 +733,133 @@ receives the status through its saved `x0` before the target slot is reaped.
 Because only the current process executes on this uniprocessor kernel, there
 is no need to stop or switch away from the target.
 
+### Phase 26 - renaming disk files
+
+`rename` takes the two `/disk/...` paths in registers (`x0/x1` = old pointer
+and length, `x2/x3` = new pointer and length) and rewrites the 32-byte name
+field of the existing inode. No data blocks move:
+
+```text
+$ write disk/a.txt hello
+$ mv disk/a.txt disk/b.txt
+renamed /disk/a.txt -> /disk/b.txt
+$ cat disk/b.txt
+hello
+$ write disk/c.txt x
+$ mv disk/b.txt disk/c.txt
+mv: failed (disk files only, new name must be free)
+```
+
+The inode is flushed before returning, so the new name survives a reboot. A
+rename onto itself is rejected as a collision, and names still cannot contain
+`/`; directories remain future work.
+
+### Phase 27 - wall-clock time
+
+QEMU `virt` includes a PL031 RTC in the device-mapped first GiB. Reading its
+data register yields whole seconds since the Unix epoch; QEMU defaults to
+`-rtc base=utc,clock=host`, so it tracks the host clock in UTC:
+
+```text
+$ date
+2026-11-14 06:54:07 UTC (1794639247)
+```
+
+`rtc(out)` returns `[epoch, year, month, day, hour, minute, second]`. The
+kernel does the calendar conversion with Howard Hinnant's branch-light
+`civil_from_days`, so user programs can format dates without carrying the
+algorithm themselves. A zero register reads as "no RTC" and returns an error.
+
+### Phase 29 - a heap for user programs
+
+`libkimi::Heap` plugs into Rust's `alloc` crate, so `Vec`, `Box` and `String`
+work in user binaries:
+
+```rust
+#[global_allocator]
+static HEAP: libkimi::Heap = libkimi::Heap;
+```
+
+The allocator keeps a singly linked free list of 16-byte blocks and carves new
+memory from a bump pointer that calls `sbrk` one page at a time. Freed blocks
+are reused first-fit and split when the remainder can hold another block.
+There is no coalescing and no realloc-specific path: `GlobalAlloc`'s default
+`realloc` allocates, copies and frees. Alignment above 16 bytes bypasses the
+free list and is served directly from the bump pointer.
+
+```text
+$ run /alloctest
+alloctest: checksum 21216
+alloctest: large vector sum 12497500, brk 1619267584
+alloctest: PASS
+```
+
+The checksum proves 64 rounds of 200-element vectors (`Vec` growth and drops)
+reused memory correctly; the second phase pushes 5000 `u64`s, forcing the
+break past sixty pages. No lock is needed: the allocator state is private to
+each process address space and the kernel never preempts inside its
+bookkeeping.
+
+### Phase 30 - a virtio keyboard
+
+`-device virtio-keyboard-device` attaches an input device (virtio id 18) to a
+virtio-mmio slot. The driver configures both queues (event and status), posts
+eight 8-byte event buffers with `VIRTQ_DESC_F_WRITE`, and enables the slot's
+SPI. Each EV_KEY press is translated from its Linux keycode to ASCII, with
+shift and its symbol/uppercase variants, then pushed through `uart::inject`;
+the shell cannot tell keyboard bytes from serial bytes.
+
+```text
+$ datx<backspace>e
+2026-11-14 07:36:04 UTC (1794641764)
+$ A
+unknown command: A
+$ ps
+PID PPID STATE EXIT
+1 0 run   0
+```
+
+Two transport bugs surfaced while verifying:
+
+- virtio status bits are `DRIVER_OK = 4` and `FEATURES_OK = 8`. The block and
+  input drivers had them swapped; legacy QEMU did not enforce `DRIVER_OK`, so
+  disk I/O worked while the input device never started its queues. Both are
+  fixed, and modern virtio (`force-legacy=false`) now negotiates correctly.
+- The DTB lists virtio-mmio interrupts as SPI numbers (`16 + slot`), so the
+  GIC INTID is `48 + slot`. Using `16 + slot` enabled the wrong SPI and left
+  keyboard events to be picked up only by polling; the correct INTID (78 for
+  slot 30) delivers the level interrupt as expected.
+
+QMP drives the test without a GUI:
+
+```python
+{"execute":"input-send-event","arguments":{"events":[
+  {"type":"key","data":{"down":True,"key":{"type":"qcode","data":"d"}}}]}}
+```
+
+### Phase 28 - file metadata
+
+`stat(path, out)` fills `[kind, size, blocks]`: kind 0 is a RamFS entry (no
+blocks), kind 1 is a KimiFS inode. The shell uses it for both a `stat`
+command and the new size column in `ls`:
+
+```text
+$ ls
+/init                       84176
+/hello                      70824
+/hello.exe                  1536
+/motd                       45
+/disk/b.txt                 6
+$ stat disk/b.txt
+kind: disk, size: 6 bytes
+$ stat motd
+kind: ramfs, size: 45 bytes
+```
+
+The disk side re-reads the inode under the filesystem lock, so the size is
+the on-disk value rather than a cached copy; block counts are available to
+callers even though `stat` does not print them.
+
 ## ARM64 details worth knowing
 
 - QEMU enters `_start` at **EL1** with `x0` = DTB address. With a raw ELF and
@@ -748,7 +890,8 @@ is no need to stop or switch away from the target.
   5 read_file, 6 close, 7 exec, 8 list, 9 spawn, 10 wait, 11 getpid,
   12 stats, 13 create, 14 write_file, 15 diskinfo, 16 fb_info,
   17 fb_fill, 18 unlink, 19 freeblocks, 20 uptime, 21 sleep, 22 brk,
-  23 ps, 24 kill), `x0..x4` = args, result in `x0`.
+  23 ps, 24 kill, 25 rename, 26 rtc, 27 stat), `x0..x4` = args,
+  result in `x0`.
   For SVC, `ELR_EL1` already points to the next instruction; BRK is the
   exception that must advance ELR manually.
 - `exec` reuses the ELF loader, so it remaps and zeroes the user stack page.
@@ -817,6 +960,9 @@ is no need to stop or switch away from the target.
 - `CNTPCT_EL0` is a free-running 64-bit counter; `CNTFRQ_EL0` gives its rate
   (62.5 MHz on QEMU virt). Compute milliseconds with a 128-bit product to
   avoid overflow over long uptimes.
+- `rename` resolves both names while holding the filesystem lock: checking
+  the destination and updating the source inode in one critical section
+  prevents two racing renames from claiming the same name.
 - `kill` never frees a target that the parent has not waited for: the slot
   becomes a zombie, exactly like a normal exit. This keeps `wait(pid)`
   meaningful and avoids resurrecting a PID before its status is collected.

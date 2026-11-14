@@ -17,9 +17,9 @@ Two tracks share one kernel:
 | 3 | Early debug output works somehow | done (PL011 UART) | needs framebuffer/UART path |
 | 4 | Correctly discover/map RAM | done (DTB + PFA) | needs khaje DTB parse |
 | 5 | Interrupt controller + timer | done (GICv3, CNTP) | needs khaje addresses |
-| 6 | Bring up secondary CPUs | next | - |
+| 6 | Bring up secondary CPUs | done (PSCI over HVC) | - |
 | 7 | Basic display output | done on QEMU (ramfb) | needs panel/DSI |
-| 8 | Touch | planned (virtio-input) | needs touch controller |
+| 8 | Input | keyboard done (virtio-input); touch planned | needs touch controller |
 | 9 | Persistent storage | done (virtio-blk + KimiFS) | needs UFS + partition access |
 | 10 | USB | planned (virtio/keyboard or DWC3) | needs DWC3 + PMIC |
 | 11 | Battery/charging | not meaningful in QEMU | needs PMIC (PMI632?) |
@@ -83,6 +83,18 @@ Target-independent, implemented before display/device work:
     PID/parent/state/exit records; `kill` (24) zombies a target with status
     137, reparents its children and wakes a blocked parent; shell `ps`/`kill`
     and the `/sleeper` test program.
+16. ~~Rename.~~ Done: `rename` (25) updates the inode name and flushes,
+    rejecting collisions; shell `mv`.
+17. ~~Wall clock.~~ Done: `rtc` (26) reads the PL031 at `0x0901_0000`, with
+    UTC civil-time conversion in the kernel; shell `date`.
+18. ~~File metadata.~~ Done: `stat` (27) returns kind/size/blocks, `ls`
+    shows aligned sizes, shell `stat`.
+19. ~~User-space allocator.~~ Done: `libkimi::Heap` (`GlobalAlloc` over
+    `brk`, free list + bump), `alloc` collections usable in user programs;
+    `/alloctest` verifies reuse and large vectors.
+20. ~~Keyboard input.~~ Done: virtio-input (id 18) driver with legacy and
+    modern transports, shift-aware keycode translation into the shared UART
+    line editor; verified with QMP key events.
 
 EL0 processes are preempted by the timer (50 ms quantum, round-robin among
 `Ready` processes), and a process blocked in `read` yields the CPU. Syscalls
