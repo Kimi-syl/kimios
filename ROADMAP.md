@@ -111,6 +111,9 @@ Target-independent, implemented before display/device work:
     freed, lower-EL fault statuses (139/135) that kill only the faulting
     process, and page-walked syscall buffer validation; `/stress` returns all
     frames across repeated runs.
+26. ~~Phone UI.~~ Done: 480x800 portrait display, lock screen, status bar,
+    home grid/dock, Calculator, live Clock and Settings apps with working
+    toggles and slide transitions; user-space 8x8 text renderer.
 
 EL0 processes are preempted by the timer (50 ms quantum, round-robin among
 `Ready` processes), and a process blocked in `read` yields the CPU. Syscalls

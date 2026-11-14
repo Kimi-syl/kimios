@@ -15,8 +15,8 @@ use core::ptr::addr_of;
 use core::sync::atomic::{AtomicBool, Ordering};
 use spin::Mutex;
 
-pub const WIDTH: usize = 640;
-pub const HEIGHT: usize = 480;
+pub const WIDTH: usize = 480;
+pub const HEIGHT: usize = 800;
 pub const STRIDE: usize = WIDTH * 4;
 
 const COLS: usize = WIDTH / 8;
@@ -180,9 +180,18 @@ pub fn mapping() -> Option<(u64, usize, usize)> {
     Some((addr_of!(FRAMEBUFFER) as u64, STRIDE, HEIGHT))
 }
 
-/// Enable or disable mirroring console text (GUI mode).
+/// Enable or disable mirroring console text (GUI mode). Re-enabling clears
+/// the pixels a GUI left behind and restarts the text cursor at the top.
 pub fn set_console(enabled: bool) {
     CONSOLE.store(enabled, Ordering::Release);
+    if enabled && ENABLED.load(Ordering::Acquire) {
+        let mut screen = SCREEN.lock();
+        for pixel in buffer() {
+            *pixel = COLOR_BG;
+        }
+        screen.column = 0;
+        screen.row = 0;
+    }
 }
 
 /// Whether console text (and therefore keyboard-to-line-editor input) is

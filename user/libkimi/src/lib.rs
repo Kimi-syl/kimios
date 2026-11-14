@@ -442,6 +442,13 @@ pub fn print_u64(mut value: u64) {
     print_bytes(&buffer[index..]);
 }
 
+pub fn print_i64(value: i64) {
+    if value < 0 {
+        print("-");
+    }
+    print_u64(value.unsigned_abs());
+}
+
 pub fn exit(status: u64) -> ! {
     syscall3(SYS_EXIT, status, 0, 0);
     loop {

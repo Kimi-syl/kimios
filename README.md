@@ -16,7 +16,7 @@ No bootloader is used: QEMU loads the ELF directly with `-kernel`.
   `ESR_EL1` / `FAR_EL1` and resumes past `BRK`.
 - **Phase 4 - Memory:** 4 KiB-granule translation tables (L0 -> L1 -> L2,
   2 MiB blocks), identity map with Device memory for peripherals and Normal
-  memory for RAM, MMU + caches enabled via `SCTLR_EL1`, and a 1 MiB bump heap.
+  memory for RAM, MMU + caches enabled via `SCTLR_EL1`, and a 1 MiB kernel heap.
 - **Phase 5 - DTB + PFA:** captures `x0`, validates/scans for the
   `0xd00dfeed` DTB, parses `/memory` with `hermit-dtb`, and manages 4 KiB
   physical frames with a bitmap allocator (alloc/free/stats).
@@ -25,7 +25,7 @@ No bootloader is used: QEMU loads the ELF directly with `-kernel`.
   physical timer on PPI 30, separate synchronous/IRQ vector paths, IRQ-safe
   console output.
 - **Phases 7-8 - Threads + scheduler:** callee-saved context switch
-  (`x19-x30`, SP, DAIF), 64 KiB kernel thread stacks from the bump heap,
+  (`x19-x30`, SP, DAIF), 64 KiB kernel thread stacks from the kernel heap,
   thread trampoline, `thread_exit`, and a preemptive round-robin scheduler
   driven by the timer IRQ.
 - **Phase 9 - EL0 + syscalls:** L3 4 KiB pages (AP=EL0 RW, UXN controlled by
@@ -68,11 +68,11 @@ No bootloader is used: QEMU loads the ELF directly with `-kernel`.
   console IRQ wakes the reader so background processes keep running while the
   shell waits at the prompt.
 - **Phase 17 - Framebuffer:** a minimal fw_cfg driver (MMIO selector/data plus
-  the DMA interface) programs QEMU's `ramfb` file with a 640x480 XRGB8888
+  the DMA interface) programs QEMU's `ramfb` file with a 480x800 XRGB8888
   linear buffer in kernel RAM. Drawing is a plain store to the identity-mapped
   buffer; no GPU or 3D is involved. Verified by QEMU `screendump`.
 - **Phase 18 - Text console:** an embedded public-domain 8x8 bitmap font
-  renders all console output (80x60 cells) on the framebuffer, mirroring both
+  renders all console output (60x100 cells) on the framebuffer, mirroring both
   kernel `println!` and user `write` syscalls. Lines wrap and scroll; typed
   input and backspace are echoed. Verified by exact pixel comparison against
   the font tables and a 60-line scroll test.
@@ -195,8 +195,8 @@ supports. Add `-global virtio-mmio.force-legacy=false` to exercise the modern
 
 For display output add `-display none -device ramfb` to the command line (or
 keep the default window). Add `-device virtio-keyboard-device` for keyboard
-input; QEMU routes monitor/QMP key events to it even without a graphical
-window. `-display none` is convenient in headless shells;
+input and `-device virtio-tablet-device` for the touch pointer; QEMU routes
+monitor/QMP input events to them even without a graphical window. `-display none` is convenient in headless shells;
 `screendump` on the monitor still captures the framebuffer.
 
 Add `-smp 4` to exercise the Phase 20 PSCI bring-up (CPU 1-3). The default
@@ -461,7 +461,7 @@ big-endian `RAMFBCfg` (address, fourcc, flags, width, height, stride) is
 written into RAM together with an aligned DMA descriptor, and QEMU copies it
 synchronously when the kernel kicks the DMA register.
 
-The pixel buffer is a 4 KiB-aligned `[u32; 640*480]` static in `.bss`. It is
+The pixel buffer is a 4 KiB-aligned `[u32; 480*800]` static in `.bss`. It is
 inside the identity-mapped RAM window, so QEMU can read it directly; drawing
 is ordinary memory stores and the display refreshes without extra calls.
 
@@ -469,7 +469,7 @@ is ordinary memory stores and the display refreshes without extra calls.
 $ qemu-system-aarch64 ... -display none -device ramfb
 ...
 Phase 17: framebuffer display
-ramfb       : 640x480 XRGB8888 at 0x40100000 (1200 KiB)
+ramfb       : 480x800 XRGB8888 at 0x40100000 (1500 KiB)
 ```
 
 The initial bring-up drew a colour ramp, an eight-bar SMPTE-style strip and
@@ -480,7 +480,7 @@ decoding the PPM. Phase 18 replaces that pattern with a text console. Without
 ### Phase 18 - framebuffer text console
 
 `src/font.rs` embeds the public-domain `font8x8_basic` table for ASCII
-`0x20..=0x7e`. The framebuffer is divided into 80x60 cells of 8x8 pixels;
+`0x20..=0x7e`. The framebuffer is divided into 60x100 cells of 8x8 pixels;
 `fb::putc` handles `\n`, `\r` and backspace, wraps at column 80, and scrolls
 by copying the pixel buffer up one text row.
 
@@ -493,7 +493,7 @@ glyph.
 ```text
 $ qemu-system-aarch64 ... -display none -device ramfb
 Phases 17-18: framebuffer display and text console
-ramfb       : 640x480 XRGB8888 at 0x400f8000 (1200 KiB, 80x60 text)
+ramfb       : 480x800 XRGB8888 at 0x400f8000 (1500 KiB, 60x100 text)
 ...
 $ help
   ls             list RamFS files
@@ -522,7 +522,7 @@ background elsewhere, both while the process was blocked and after it exited:
 
 ```text
 $ run /fbtest
-fbtest: 640x480 stride 2560 format 875713112
+fbtest: 480x800 stride 1920 format 875713112
 fbtest: drew pattern; press enter to exit
 ```
 
@@ -882,12 +882,12 @@ restored when the mapping process exits or `exec`s another image.
 
 ```text
 $ run /gfxtest
-gfxtest: 640x480 stride 2560 format 875713112
+gfxtest: 480x800 stride 1920 format 875713112
 gfxtest: 8 frames in 40 ms, pattern drawn; press enter
 ```
 
-The program writes a 640x480 animated gradient eight times (2.46 million
-pixels) in 40 ms under TCG, then paints known rectangles. A monitor
+The program writes a 480x800 animated gradient eight times (3.07 million
+pixels) under TCG, then paints known rectangles. A monitor
 `screendump` confirms exact colours: background `0x102040`, red/green/blue/
 yellow rectangles and one-pixel white rules, with corners still background.
 Fast scalar stores are enough for a compositor; no syscall per rectangle is
@@ -995,6 +995,34 @@ faulttest: reading unmapped memory
 $ run /badptr
 badptr: PASS: syscall rejected the buffer
 ```
+
+### Phase 36 - the phone shell
+
+`/gui` is now a portrait phone UI rather than a drawing demo. Boot it with a
+framebuffer and a tablet:
+
+```text
+-display none -device ramfb -device virtio-tablet-device
+$ run /gui
+```
+
+- **Lock screen:** large live clock, date, padlock, "swipe up to unlock";
+  a tap or an upward drag slides the home screen into place.
+- **Status bar:** HH:MM from the PL031, signal bars, battery.
+- **Home:** gradient wallpaper with soft halos, a 4x2 grid of rounded icons
+  with hand-drawn glyphs and labels, a Messages notification dot, page dots,
+  a dock and a home indicator. Icons shrink while pressed.
+- **Apps:** Calculator works with AC, sign, backspace, + - * / and equals;
+  Clock shows a second-accurate analog face plus digital time and date;
+  Settings has Wi-Fi/Bluetooth/Dark-mode switches (dark mode repaints the
+  wallpaper) and an About card. Phone/Messages/Camera/Music/Notes are stubs.
+- **Transitions:** apps slide in from the right and back out; the lock screen
+  slides up. Taps are distinguished from drags by a 24 px threshold.
+
+Everything is drawn by a small user-space renderer (`draw.rs`): clipped fills,
+rounded rectangles, circles, rings, Bresenham lines, vertical gradients and
+8x8 text. The status bar and Clock redraw on the minute/second boundary; no
+cursor is drawn because the UI is touch-first.
 
 Running `/stress` twice returns exactly 31675 free frames after each exit:
 ten spawn/wait cycles, twenty create/stat/unlink/rmdir cycles and a hundred
@@ -1106,7 +1134,7 @@ callers even though `stat` does not print them.
 - fw_cfg lives at `0x0902_0000` (`qemu,fw-cfg-mmio`) with big-endian selector
   and DMA registers. `write_file` stores every descriptor field big-endian and
   passes the guest physical address of `etc/ramfb`; QEMU performs the transfer
-  during the register write. ramfb accepts 640x480 (min 16, max 2560x1600) and
+  during the register write. ramfb accepts 480x800 (min 16, max 2560x1600) and
   requires `stride == width * 4` for XRGB8888.
 - font8x8 rows are bitmaps with bit 0 as the leftmost pixel. The RGB channels
   are `0x00RRGGBB`; XRGB8888 stores bytes as B, G, R, X in little-endian
