@@ -28,16 +28,23 @@ No bootloader is used: QEMU loads the ELF directly with `-kernel`.
   (`x19-x30`, SP, DAIF), 64 KiB kernel thread stacks from the bump heap,
   thread trampoline, `thread_exit`, and a preemptive round-robin scheduler
   driven by the timer IRQ.
-- **Phase 9 - EL0 + syscalls:** L3 4 KiB pages for a user code/stack region
-  at `0x5000_0000` (AP=EL0 RW, UXN=0 for code, PXN=1), `eret` into EL0, SVC
-  decoding from `ESR_EL1.EC`, and `write`/`exit` syscalls.
+- **Phase 9 - EL0 + syscalls:** L3 4 KiB pages (AP=EL0 RW, UXN controlled by
+  the ELF `PF_X` flag, PXN=1), `eret` into EL0, SVC decoding from
+  `ESR_EL1.EC`, and `write`/`exit` syscalls.
+- **Phase 10 - VFS + RamFS + ELF:** `Vfs` trait (`open`/`read`/`write`/`close`),
+  a read-only RamFS embedding `kimi-init` via `include_bytes!`, and an
+  `xmas-elf` loader that allocates PFA frames, copies `PT_LOAD` segments,
+  zeroes BSS, and maps them with user permissions. `build.rs` builds the
+  user program with a separate target directory.
 
 ## Layout
 
 ```text
 .cargo/config.toml   target + linker flags
-Cargo.toml           spin dependency, panic=abort
+Cargo.toml           dependencies, panic=abort
+build.rs             builds user/kimi-init and copies the ELF into OUT_DIR
 linker.ld            0x4008_0000, .text.boot first, vector table kept, 64 KiB stack
+user/                EL0 program (kimi-init), linked at 0x6000_0000
 src/boot.s           _start: EL1 entry, FP/SIMD enable, stack, .bss, kmain
 src/vectors.s        16-entry exception vector table + save/restore
 src/main.rs          kmain, panic handler, semihosting exit
@@ -52,8 +59,9 @@ src/timer.rs         ARM generic timer (CNTP) periodic ticks
 src/irq.rs           IRQ acknowledge/EOI + timer tick handler
 src/sched.rs         thread struct, spawn, context switch, round-robin
 src/switch.s         context_switch + thread_entry trampoline
-src/usermode.rs      EL0 user pages, syscall implementations
-src/user.s           position-independent EL0 demo blob
+src/usermode.rs      EL0 entry, syscall implementations
+src/ramfs.rs         VFS trait + embedded RamFS
+src/elf.rs           xmas-elf loader -> PFA frames -> user mappings
 virt.dtb             trimmed QEMU virt DTB (regenerate if -m/-smp changes)
 ```
 
@@ -115,10 +123,15 @@ ABABABABABABABABAB
 Scheduler stats: A=10 B=10 ticks=35
 Phases 1-8 complete.
 
-Phase 9: user mode (EL0) and syscalls
-User image : 52 bytes
-Dropping to EL0: entry=0x50000000 sp_el0=0x50002000
-Hello from EL0!
+Phase 10: VFS + RamFS + ELF loader
+RamFS      : /init (70368 bytes)
+VFS read   : 4 bytes, magic [7f, 45, 4c, 46]
+  PT_LOAD va=0x60000000 filesz=76 memsz=76 flags=X R
+  PT_LOAD va=0x60001000 filesz=88 memsz=88 flags=  R
+ELF loaded : entry=0x60000000 stack_top=0x61001000 pages=3
+Dropping to EL0...
+Hello from an ELF binary loaded by KimiOS!
+RamFS + xmas-elf + EL0 syscalls all working.
 
 [kernel] EL0 exit(0)
 ```
@@ -156,5 +169,12 @@ proper shutdown driver exists.
 - SVC syscall ABI: `x8` = number (1 = write, 2 = exit), `x0..x2` = args,
   result in `x0`. For SVC, `ELR_EL1` already points to the next instruction;
   BRK is the exception that must advance ELR manually.
+- The user ELF is linked at `0x6000_0000`; its stack page is mapped at
+  `0x6100_0000`. `user/linker.ld` page-aligns each section so no two
+  `PT_LOAD` segments share a page. The loader parses an aligned copy of the
+  embedded bytes because `xmas-elf` requires natural alignment.
+- `build.rs` invokes cargo recursively for `user/` with a separate
+  `target/user-build` directory and explicit `RUSTFLAGS`; this keeps the
+  kernel and user program builds independent.
 - `MAIR_EL1` Attr0 = Normal write-back, Attr1 = Device-nGnRnE; the low 1 GiB
   (UART, GIC, ...) is mapped Device, the next 1 GiB (RAM) is mapped Normal.

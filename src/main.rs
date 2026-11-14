@@ -3,11 +3,13 @@
 
 mod allocator;
 mod dtb;
+mod elf;
 mod exceptions;
 mod gic;
 mod irq;
 mod mmu;
 mod pfa;
+mod ramfs;
 mod sched;
 mod timer;
 mod usermode;
@@ -21,7 +23,6 @@ use core::sync::atomic::{AtomicU64, Ordering};
 global_asm!(include_str!("boot.s"));
 global_asm!(include_str!("vectors.s"));
 global_asm!(include_str!("switch.s"));
-global_asm!(include_str!("user.s"));
 
 /// Entry point called from `_start` in boot.s.
 ///
@@ -180,8 +181,8 @@ pub extern "C" fn kmain(dtb: usize) -> ! {
     );
     println!("Phases 1-8 complete.");
 
-    // Phase 9: drop to EL0 and service SVCs (write/exit).
-    usermode::run();
+    // Phase 10: load /init from RamFS and run it at EL0.
+    usermode::run_init();
 }
 
 static A_RUNS: AtomicU64 = AtomicU64::new(0);

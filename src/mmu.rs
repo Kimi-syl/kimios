@@ -62,7 +62,14 @@ struct PageTable {
 static mut L0_TABLE: PageTable = PageTable { entries: [0; 512] };
 static mut L1_TABLE: PageTable = PageTable { entries: [0; 512] };
 static mut L2_TABLE: PageTable = PageTable { entries: [0; 512] };
-static mut L3_USER_TABLE: PageTable = PageTable { entries: [0; 512] };
+// Pool of L3 tables for user mappings. Each 2 MiB block that receives a
+// user page needs one table; four blocks is plenty for the loader + stack.
+const USER_TABLE_POOL: usize = 4;
+
+const EMPTY_TABLE: PageTable = PageTable { entries: [0; 512] };
+
+static mut L3_POOL: [PageTable; USER_TABLE_POOL] = [EMPTY_TABLE; USER_TABLE_POOL];
+static mut L3_BLOCK: [usize; USER_TABLE_POOL] = [usize::MAX; USER_TABLE_POOL];
 
 fn l1_device_block(base: u64) -> u64 {
     base | PTE_VALID | PTE_ATTR_DEVICE | PTE_AF | PTE_PXN | PTE_UXN
@@ -123,44 +130,57 @@ pub fn init() {
     }
 }
 
-/// Map one user code page and one user stack page at 4 KiB granularity.
-///
-/// The virtual addresses must share a 2 MiB block; that block's existing L2
-/// identity block descriptor is replaced with a table descriptor pointing at
-/// `L3_USER_TABLE`. Only the two requested pages become user-accessible.
+/// Return (allocating if necessary) the L3 table that backs a 2 MiB block.
+/// Replacing the L2 block descriptor removes the identity mapping for that
+/// block and installs a table descriptor instead.
 #[allow(static_mut_refs)]
-pub fn map_user_pages(code_va: u64, code_pa: u64, stack_va: u64, stack_pa: u64) {
-    let l2_index = ((code_va >> 21) & 0x1ff) as usize;
-    let code_index = ((code_va >> 12) & 0x1ff) as usize;
-    let stack_index = ((stack_va >> 12) & 0x1ff) as usize;
+fn user_l3_table(l2_index: usize) -> *mut PageTable {
+    unsafe {
+        for slot in 0..USER_TABLE_POOL {
+            if L3_BLOCK[slot] == l2_index {
+                return addr_of_mut!(L3_POOL[slot]);
+            }
+        }
+
+        for slot in 0..USER_TABLE_POOL {
+            if L3_BLOCK[slot] == usize::MAX {
+                L3_BLOCK[slot] = l2_index;
+                let table = addr_of_mut!(L3_POOL[slot]);
+                (*table).entries = [0; 512];
+                L2_TABLE.entries[l2_index] =
+                    (table as u64) | PTE_VALID | PTE_TABLE;
+                return table;
+            }
+        }
+    }
+
+    panic!("user page-table pool exhausted");
+}
+
+/// Map one 4 KiB page into the user address space.
+///
+/// `executable` controls UXN: EL0 can execute code pages but not the stack.
+/// PXN is always set, so EL1 never executes user pages.
+#[allow(static_mut_refs)]
+pub fn map_user_page(virtual_address: u64, physical_address: u64, executable: bool) {
+    let l2_index = ((virtual_address >> 21) & 0x1ff) as usize;
+    let l3_index = ((virtual_address >> 12) & 0x1ff) as usize;
+
+    let table = user_l3_table(l2_index);
+
+    let mut flags = PTE_VALID
+        | PTE_PAGE
+        | PTE_ATTR_NORMAL
+        | PTE_AP_EL0_RW
+        | PTE_SH_INNER
+        | PTE_AF
+        | PTE_PXN;
+    if !executable {
+        flags |= PTE_UXN;
+    }
 
     unsafe {
-        L2_TABLE.entries[l2_index] =
-            (addr_of_mut!(L3_USER_TABLE) as u64) | PTE_VALID | PTE_TABLE;
-
-        let l3 = &mut *addr_of_mut!(L3_USER_TABLE);
-
-        // User code: EL0-executable, EL1 never executes it.
-        l3.entries[code_index] = code_pa
-            | PTE_VALID
-            | PTE_PAGE
-            | PTE_ATTR_NORMAL
-            | PTE_AP_EL0_RW
-            | PTE_SH_INNER
-            | PTE_AF
-            | PTE_PXN;
-
-        // User stack: data only.
-        l3.entries[stack_index] = stack_pa
-            | PTE_VALID
-            | PTE_PAGE
-            | PTE_ATTR_NORMAL
-            | PTE_AP_EL0_RW
-            | PTE_SH_INNER
-            | PTE_AF
-            | PTE_PXN
-            | PTE_UXN;
-
+        (*table).entries[l3_index] = (physical_address & !(0xfff)) | flags;
         asm!("dsb sy", "tlbi vmalle1", "dsb sy", "isb");
     }
 }
