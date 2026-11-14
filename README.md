@@ -47,6 +47,16 @@ No bootloader is used: QEMU loads the ELF directly with `-kernel`.
   `GetLastError` and `SetLastError` are translated to KimiOS syscalls
   (100-104), so the generated `hello.exe` runs at EL0 and prints through the
   kernel console.
+- **Phase 13 - Processes:** per-process address spaces (private TTBR0 L3
+  tables), PID/parent/state tracking, exit statuses and reaping, `spawn` /
+  `exec` / `wait` / `getpid` (no `fork`), per-process file descriptor tables
+  with ownership, and eager teardown of address-space frames. `init` is PID 1
+  and adopts orphans. The shell gained `spawn`, `run`, `wait` and `mem`.
+- **Phase 14 - Persistent storage:** a block-device trait with a virtio-mmio
+  driver (legacy v1 and modern v2 transports, polling request queue) and
+  KimiFS, a small on-disk filesystem with a superblock, fixed inode table and
+  contiguous file data. Files under `/disk/` survive reboots; `/init`,
+  `/hello`, `/hello.exe`, `/fstest` and `/motd` remain embedded in RamFS.
 
 ## Layout
 
@@ -72,7 +82,12 @@ src/sched.rs         thread struct, spawn, context switch, round-robin
 src/switch.s         context_switch + thread_entry trampoline
 src/usermode.rs      EL0 entry, syscall implementations
 src/ramfs.rs         VFS trait + embedded RamFS
-src/elf.rs           xmas-elf loader -> PFA frames -> user mappings
+src/block.rs         block-device trait + registered device
+src/virtio_blk.rs    virtio-mmio block driver (legacy v1 + modern v2)
+src/diskfs.rs        KimiFS: superblock, inodes, contiguous file data
+src/elf.rs           xmas-elf loader -> per-process AddressSpace
+src/pe.rs            PE32+ loader + kernel32 thunks
+src/process.rs       process table, spawn/exec/wait/exit, FDs, TTBR0 switching
 virt.dtb             trimmed QEMU virt DTB (regenerate if -m/-smp changes)
 ```
 
@@ -89,16 +104,24 @@ sudo apt install qemu-system-arm
 ```bash
 cargo build
 
+# Optional 4 MiB disk image. Without it the kernel runs from RamFS only.
+truncate -s 4M disk.img
+
 qemu-system-aarch64 \
   -machine virt,gic-version=3 \
   -cpu cortex-a53 \
   -m 128M \
   -nographic \
   -semihosting-config enable=on,target=native \
-  -machine virt,gic-version=3 \
   -dtb virt.dtb \
+  -drive if=none,format=raw,file=disk.img,id=hd0 \
+  -device virtio-blk-device,drive=hd0 \
   -kernel target/aarch64-unknown-none/debug/kimios
 ```
+
+QEMU 11 defaults virtio-mmio to the legacy (v1) transport, which the driver
+supports. Add `-global virtio-mmio.force-legacy=false` to exercise the modern
+(v2) path.
 
 Expected output ends with:
 
@@ -193,6 +216,97 @@ ELF into the same address space and rewrites the exception return frame
 (`ELR_EL1`) and `SP_EL0`, so the syscall returns directly into the new program
 at EL0.
 
+### Phase 13 - processes
+
+Every process gets its own `AddressSpace`: a private copy of the kernel's L2
+table whose L1 entries point at fresh L3 tables for the user region. Frames
+are allocated from the PFA, mapped with the right UXN/PXN/AP bits, and released
+when the process exits (including after `exec`). The scheduler-free process
+model uses `spawn` as the primitive: the parent blocks in `wait`, the kernel
+switches TTBR0 and the saved exception frame, and resumes the parent with the
+child's exit status. PID 1 (`/init`) adopts orphans; when it exits and nothing
+is runnable, the kernel shuts QEMU down.
+
+```text
+Phase 13: per-process address spaces, spawn/exec/wait
+  PT_LOAD va=0x60000000 filesz=5580 memsz=5580 flags=X R
+  PT_LOAD va=0x60002000 filesz=884 memsz=884 flags=  R
+[kernel] created pid 1 (parent 0) at 0x60000034
+
+KimiOS user shell (libkimi), pid 1
+Commands: ls, cat, spawn, run, wait, mem, exec, help, exit
+$ run /hello
+[kernel] created pid 2 (parent 1) at 0x6000001c
+spawned pid 2
+Hello from /hello, pid 2!
+Cheerio from EL0.
+[kernel] pid 2 exited with status 0
+pid 2 exited with status 0
+$ spawn /hello
+[kernel] created pid 4 (parent 1) at 0x6000001c
+spawned pid 4
+$ spawn /hello.exe
+[kernel] created pid 5 (parent 1) at 0x62001000
+spawned pid 5
+$ wait 0
+Hello from /hello, pid 4!
+Cheerio from EL0.
+[kernel] pid 4 exited with status 0
+child exited with status 0
+$ wait 0
+Hello from an ARM64 PE on KimiOS!
+
+[kernel] PE ExitProcess(0)
+[kernel] pid 5 exited with status 0
+child exited with status 0
+$ mem
+free frames: 32267
+$ exit
+bye
+[kernel] pid 1 exited with status 0
+[kernel] no runnable process; shutting down
+```
+
+The free-frame count is identical before and after repeated spawn/exit cycles,
+which verifies that address spaces, L3 tables and user frames are returned to
+the PFA.
+
+### Phase 14 - persistent storage
+
+`block::BlockDevice` is the hardware-independent interface: read/write one
+512-byte sector, plus flush. `virtio_blk` scans the 32 virtio-mmio slots at
+`0x0a00_0000`, initialises queue 0 (256 descriptors for legacy, 8 for modern),
+and submits synchronous three-descriptor chains (header, sector buffer,
+status). The driver supports both the legacy `QueuePFN` transport and the
+modern v2 register map, so it works with QEMU's default and with
+`-global virtio-mmio.force-legacy=false`.
+
+KimiFS puts a 64-byte superblock in LBA 0, 64 fixed 128-byte inodes in LBA
+1-16, and file data from LBA 17. Each file is one contiguous run; growing a
+file allocates a new run and copies the old data. `spawn`/`exec` still load
+executables from RamFS, while `/disk/<name>` is served by the disk filesystem
+through the same VFS descriptor table:
+
+```text
+Phase 14: persistent storage
+virtio-blk  : 8192 sectors (4 MiB), mmio v1
+[disk] KimiFS mounted: 8192 sectors, 3 file(s), next free 22
+
+$ df
+disk sectors: 8192, files: 3
+$ run /fstest
+fstest: PASS (800 bytes across 2 sectors)
+$ write /disk/hello Greetings from persistent storage
+$ cat /disk/hello
+Greetings from persistent storage
+$ exit
+```
+
+Rebooting with the same `disk.img` mounts the filesystem instead of
+formatting it, and `cat /disk/hello` returns the saved text. The free-frame
+count and file contents confirm that process teardown and disk updates both
+work.
+
 The kernel exits QEMU cleanly (`status 0`) through ARM semihosting
 (`SYS_EXIT_EXTENDED`, `HLT #0xF000`). This is temporary scaffolding until a
 proper shutdown driver exists.
@@ -220,16 +334,32 @@ proper shutdown driver exists.
 - `ICC_IAR1_EL1` acknowledges a Group 1 interrupt, `ICC_EOIR1_EL1` signals
   end-of-interrupt; the timer must be re-armed before EOI because PPI 30 is
   level-sensitive.
-- EL0 isolation uses 4 KiB L3 pages: the user region at `0x5000_0000` has
+- EL0 isolation uses 4 KiB L3 pages: the ELF user region at `0x6000_0000` has
   AP=EL0/EL1 RW, code is EL0-executable (UXN=0, PXN=1), the stack is
   UXN=1. Kernel RAM stays EL1-only, and the UART/device MMIO is EL1-only.
 - SVC syscall ABI: `x8` = number (1 write, 2 exit, 3 read, 4 open,
-  5 read_file, 6 close, 7 exec, 8 list), `x0..x3` = args, result in `x0`.
+  5 read_file, 6 close, 7 exec, 8 list, 9 spawn, 10 wait, 11 getpid,
+  12 stats, 13 create, 14 write_file, 15 diskinfo), `x0..x3` = args, result
+  in `x0`.
   For SVC, `ELR_EL1` already points to the next instruction; BRK is the
   exception that must advance ELR manually.
 - `exec` reuses the ELF loader, so it remaps and zeroes the user stack page.
   The kernel copies the path out of user memory first, because the user
   path buffer usually lives on that stack.
+- Process switching is synchronous: `spawn`/`wait`/`exit` save the current
+  `ExceptionFrame`, set `TTBR0_EL1` to the next process's table, `TLBI
+  VMALLE1`, and return the next process's frame to the exception return path.
+  No timer-driven EL0 preemption yet; the process model is deliberately
+  `spawn`-based rather than `fork`-based.
+- virtio-mmio legacy publishes a queue by page frame number and requires the
+  descriptor table and available ring to be contiguous; using a 256-entry
+  queue makes both rings land on separate 4 KiB pages, which also works for
+  the modern transport. The modern ring registers are `0x080` (descriptor),
+  `0x090` (available) and `0x0a0` (used); the `0x088`/`0x090` pair is a
+  reserved gap, not the avail/used pair.
+- The request queue lives in a 16 KiB page-aligned static region. Requests
+  are synchronous: publish the chain, `DSB`, notify queue 0, then poll
+  `used.idx`; no virtio interrupts are used.
 - PE images use the Windows ARM64 calling convention (`x0-x7` arguments,
   result in `x0`). Each imported function is pointed at a 16-byte EL0 thunk
   (`mov x8, #id; svc #0; ret; nop`), so no user-visible DLL is needed.

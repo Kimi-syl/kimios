@@ -2,11 +2,13 @@
 #![no_main]
 
 use core::panic::PanicInfo;
-use libkimi::{exit, print};
+use libkimi::{exit, getpid, print, print_u64};
 
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
-    print("Hello from /hello, loaded by exec!\n");
+    print("Hello from /hello, pid ");
+    print_u64(getpid());
+    print("!\n");
     print("Cheerio from EL0.\n");
     exit(0);
 }

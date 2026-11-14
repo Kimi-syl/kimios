@@ -57,10 +57,43 @@ fn with_slash<'a>(argument: &[u8], buffer: &'a mut [u8]) -> Option<&'a str> {
     core::str::from_utf8(&buffer[..length]).ok()
 }
 
+fn parse_u64(input: &[u8]) -> Option<u64> {
+    if input.is_empty() {
+        return None;
+    }
+    let mut value = 0u64;
+    for &byte in input {
+        if !byte.is_ascii_digit() {
+            return None;
+        }
+        value = value.checked_mul(10)?.checked_add((byte - b'0') as u64)?;
+    }
+    Some(value)
+}
+
+fn report_status(pid: u64, status: Option<u64>) {
+    match status {
+        Some(code) => {
+            if pid == 0 {
+                k::print("child exited with status ");
+            } else {
+                k::print("pid ");
+                k::print_u64(pid);
+                k::print(" exited with status ");
+            }
+            k::print_u64(code);
+            k::print("\n");
+        }
+        None => k::print("wait failed\n"),
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
-    k::print("\nKimiOS user shell (libkimi)\n");
-    k::print("Commands: ls, cat <file>, exec <file>, help, exit\n");
+    k::print("\nKimiOS user shell (libkimi), pid ");
+    k::print_u64(k::getpid());
+    k::print("\n");
+    k::print("Commands: ls, cat, write, df, spawn, run, wait, mem, exec, help, exit\n");
 
     let mut line = [0u8; 128];
     let mut path_buffer = [0u8; 96];
@@ -80,7 +113,13 @@ pub extern "C" fn _start() -> ! {
 
         if command == &b"help"[..] {
             k::print("  ls             list RamFS files\n");
-            k::print("  cat <file>     print a file\n");
+            k::print("  cat <file>     print a file (RamFS or /disk/...)\n");
+            k::print("  write <path> <text>  create/truncate a /disk file\n");
+            k::print("  df             show disk geometry and file count\n");
+            k::print("  spawn <file>   create a process from an ELF or PE\n");
+            k::print("  run <file>     spawn and wait for a process\n");
+            k::print("  wait <pid>     wait for a child (0 = any)\n");
+            k::print("  mem            report free physical frames\n");
             k::print("  exec <file>    replace the shell with an ELF or PE\n");
             k::print("  exit           halt the machine\n");
         } else if command == &b"ls"[..] {
@@ -112,6 +151,76 @@ pub extern "C" fn _start() -> ! {
                 offset += count;
             }
             k::close(handle);
+        } else if command == &b"write"[..] {
+            let (path_word, text) = split_word(argument);
+            let Some(path) = with_slash(path_word, &mut path_buffer) else {
+                k::print("usage: write /disk/<file> <text>\n");
+                continue;
+            };
+            let Some(handle) = k::create(path) else {
+                k::print("write: no disk or bad path\n");
+                continue;
+            };
+            let count = k::write_file(handle, 0, text);
+            if count != text.len() {
+                k::print("write: short write\n");
+            }
+            if k::write_file(handle, text.len(), b"\n") != 1 {
+                k::print("write: short write\n");
+            }
+            k::close(handle);
+        } else if command == &b"df"[..] {
+            match k::diskinfo() {
+                Some(info) => {
+                    let total = info >> 32;
+                    let files = info & 0xffff_ffff;
+                    k::print("disk sectors: ");
+                    k::print_u64(total);
+                    k::print(", files: ");
+                    k::print_u64(files);
+                    k::print("\n");
+                }
+                None => k::print("df: no disk mounted\n"),
+            }
+        } else if command == &b"spawn"[..] {
+            let Some(path) = with_slash(argument, &mut path_buffer) else {
+                k::print("usage: spawn <file>\n");
+                continue;
+            };
+
+            match k::spawn(path) {
+                Some(pid) => {
+                    k::print("spawned pid ");
+                    k::print_u64(pid);
+                    k::print("\n");
+                }
+                None => k::print("spawn failed\n"),
+            }
+        } else if command == &b"mem"[..] {
+            k::print("free frames: ");
+            k::print_u64(k::free_frames());
+            k::print("\n");
+        } else if command == &b"wait"[..] {
+            let Some(pid) = parse_u64(argument) else {
+                k::print("usage: wait <pid>\n");
+                continue;
+            };
+            report_status(pid, k::wait(pid));
+        } else if command == &b"run"[..] {
+            let Some(path) = with_slash(argument, &mut path_buffer) else {
+                k::print("usage: run <file>\n");
+                continue;
+            };
+
+            match k::spawn(path) {
+                Some(pid) => {
+                    k::print("spawned pid ");
+                    k::print_u64(pid);
+                    k::print("\n");
+                    report_status(pid, k::wait(pid));
+                }
+                None => k::print("spawn failed\n"),
+            }
         } else if command == &b"exec"[..] {
             let Some(path) = with_slash(argument, &mut path_buffer) else {
                 k::print("usage: exec <file>\n");

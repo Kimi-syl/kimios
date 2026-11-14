@@ -1,5 +1,5 @@
-//! Builds the EL0 workspace (`kimi-init`, `kimi-hello`), copies both ELFs into
-//! OUT_DIR, and generates a tiny AArch64 PE image for the WinAPI translation
+//! Builds the EL0 workspace (`kimi-init`, `kimi-hello`, `kimi-fstest`), copies
+//! the ELFs into OUT_DIR, and generates a tiny AArch64 PE image for the WinAPI translation
 //! test. The kernel embeds these files into RamFS with `include_bytes!`.
 //!
 //! The nested cargo invocation uses a separate target directory to avoid
@@ -21,6 +21,7 @@ fn main() {
     println!("cargo:rerun-if-changed=user/libkimi");
     println!("cargo:rerun-if-changed=user/kimi-init");
     println!("cargo:rerun-if-changed=user/kimi-hello");
+    println!("cargo:rerun-if-changed=user/kimi-fstest");
 
     let target_dir = manifest_dir.join("target/user-build");
     let linker = user_dir.join("linker.ld");
@@ -45,7 +46,11 @@ fn main() {
 
     assert!(status.success(), "user program build failed");
 
-    for (binary, embedded) in [("kimi-init", "init.elf"), ("kimi-hello", "hello.elf")] {
+    for (binary, embedded) in [
+        ("kimi-init", "init.elf"),
+        ("kimi-hello", "hello.elf"),
+        ("kimi-fstest", "fstest.elf"),
+    ] {
         let built = target_dir
             .join("aarch64-unknown-none/release")
             .join(binary);

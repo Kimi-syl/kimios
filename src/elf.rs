@@ -9,7 +9,7 @@
 use xmas_elf::program::Type;
 use xmas_elf::ElfFile;
 
-use crate::{allocator, mmu, pfa, println};
+use crate::{allocator, mmu, println};
 
 const PAGE_SIZE: u64 = 4096;
 
@@ -19,10 +19,12 @@ const USER_STACK_VA: u64 = 0x6100_0000;
 pub struct LoadedImage {
     pub entry: u64,
     pub stack_top: u64,
-    pub pages: usize,
 }
 
-pub fn load(image: &[u8]) -> Result<LoadedImage, &'static str> {
+pub fn load(
+    image: &[u8],
+    space: &mut mmu::AddressSpace,
+) -> Result<LoadedImage, &'static str> {
     // xmas-elf/zero requires the ELF header to be naturally aligned, but
     // include_bytes! only guarantees byte alignment. Parse from an aligned
     // copy instead.
@@ -36,7 +38,6 @@ pub fn load(image: &[u8]) -> Result<LoadedImage, &'static str> {
 
     let elf = ElfFile::new(image).map_err(|_| "not a valid ELF file")?;
     let entry = elf.header.pt2.entry_point();
-    let mut pages = 0;
 
     for program in elf.program_iter() {
         if program.get_type() != Ok(Type::Load) {
@@ -76,7 +77,7 @@ pub fn load(image: &[u8]) -> Result<LoadedImage, &'static str> {
 
         let mut page = first_page;
         while page < last_page {
-            let frame = pfa::alloc_frame().ok_or("out of physical memory")?;
+            let frame = space.alloc_frame().ok_or("out of physical memory")?;
 
             // SAFETY: identity-mapped RAM, one page, reserved by the PFA.
             unsafe {
@@ -100,22 +101,21 @@ pub fn load(image: &[u8]) -> Result<LoadedImage, &'static str> {
                 }
             }
 
-            mmu::map_user_page(page, frame, executable);
-            pages += 1;
+            space.map_page(page, frame, executable);
             page += PAGE_SIZE;
         }
     }
 
-    let stack_frame = pfa::alloc_frame().ok_or("out of physical memory for stack")?;
+    let stack_frame = space
+        .alloc_frame()
+        .ok_or("out of physical memory for stack")?;
     unsafe {
         core::ptr::write_bytes(stack_frame as *mut u8, 0, PAGE_SIZE as usize);
     }
-    mmu::map_user_page(USER_STACK_VA, stack_frame, false);
-    pages += 1;
+    space.map_page(USER_STACK_VA, stack_frame, false);
 
     Ok(LoadedImage {
         entry,
         stack_top: USER_STACK_VA + PAGE_SIZE,
-        pages,
     })
 }

@@ -2,6 +2,8 @@
 #![no_main]
 
 mod allocator;
+mod block;
+mod diskfs;
 mod dtb;
 mod elf;
 mod exceptions;
@@ -10,11 +12,13 @@ mod irq;
 mod mmu;
 mod pe;
 mod pfa;
+mod process;
 mod ramfs;
 mod sched;
 mod timer;
 mod usermode;
 mod uart;
+mod virtio_blk;
 
 use core::alloc::Layout;
 use core::arch::{asm, global_asm};
@@ -182,8 +186,26 @@ pub extern "C" fn kmain(dtb: usize) -> ! {
     );
     println!("Phases 1-8 complete.");
 
-    // Phase 10: load /init from RamFS and run it at EL0.
-    usermode::run_init();
+    // Phase 14: block device + persistent filesystem.
+    println!();
+    println!("Phase 14: persistent storage");
+    match virtio_blk::init() {
+        Some((sectors, version)) => {
+            println!(
+                "virtio-blk  : {} sectors ({} MiB), mmio v{}",
+                sectors,
+                sectors * 512 / (1024 * 1024),
+                version
+            );
+            if !diskfs::mount() {
+                println!("[disk] KimiFS not available; falling back to RamFS");
+            }
+        }
+        None => println!("virtio-blk  : not present (RamFS only)"),
+    }
+
+    // Phase 13: create the init process and enter EL0.
+    process::start_init();
 }
 
 static A_RUNS: AtomicU64 = AtomicU64::new(0);

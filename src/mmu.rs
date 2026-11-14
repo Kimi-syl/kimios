@@ -27,6 +27,8 @@
 use core::arch::asm;
 use core::ptr::addr_of_mut;
 
+use crate::pfa;
+
 // Descriptor bits (ARM ARM, VMSAv8-64).
 const PTE_VALID: u64 = 1 << 0;
 const PTE_TABLE: u64 = 1 << 1;
@@ -38,6 +40,10 @@ const PTE_SH_INNER: u64 = 3 << 8;
 const PTE_AF: u64 = 1 << 10;
 const PTE_PXN: u64 = 1 << 53;
 const PTE_UXN: u64 = 1 << 54;
+/// Physical address bits [47:12] of a page descriptor.
+const PTE_PAGE_ADDR: u64 = 0x0000_ffff_ffff_f000;
+/// Physical address bits [47:21] of a 2 MiB block descriptor.
+const PTE_BLOCK_ADDR: u64 = 0x0000_ffff_ffe0_0000;
 
 // MAIR_EL1: Attr0 = Normal write-back RW-allocate (0xFF),
 //           Attr1 = Device-nGnRnE (0x00).
@@ -62,15 +68,6 @@ struct PageTable {
 static mut L0_TABLE: PageTable = PageTable { entries: [0; 512] };
 static mut L1_TABLE: PageTable = PageTable { entries: [0; 512] };
 static mut L2_TABLE: PageTable = PageTable { entries: [0; 512] };
-// Pool of L3 tables for user mappings. Each 2 MiB block that receives a
-// user page needs one table; four blocks is plenty for the loader + stack.
-const USER_TABLE_POOL: usize = 8;
-
-const EMPTY_TABLE: PageTable = PageTable { entries: [0; 512] };
-
-static mut L3_POOL: [PageTable; USER_TABLE_POOL] = [EMPTY_TABLE; USER_TABLE_POOL];
-static mut L3_BLOCK: [usize; USER_TABLE_POOL] = [usize::MAX; USER_TABLE_POOL];
-
 fn l1_device_block(base: u64) -> u64 {
     base | PTE_VALID | PTE_ATTR_DEVICE | PTE_AF | PTE_PXN | PTE_UXN
 }
@@ -130,59 +127,210 @@ pub fn init() {
     }
 }
 
-/// Return (allocating if necessary) the L3 table that backs a 2 MiB block.
-/// Replacing the L2 block descriptor removes the identity mapping for that
-/// block and installs a table descriptor instead.
-#[allow(static_mut_refs)]
-fn user_l3_table(l2_index: usize) -> *mut PageTable {
-    unsafe {
-        for slot in 0..USER_TABLE_POOL {
-            if L3_BLOCK[slot] == l2_index {
-                return addr_of_mut!(L3_POOL[slot]);
-            }
-        }
+/// Per-process user address space.
+///
+/// The kernel image and RAM are identity mapped, so every process gets a copy
+/// of the kernel L0/L1/L2 tables with only the user 2 MiB blocks replaced by
+/// private L3 tables. This keeps kernel code, stacks and physical memory
+/// reachable while TTBR0 points at a process.
+pub const MAX_FRAMES: usize = 64;
 
-        for slot in 0..USER_TABLE_POOL {
-            if L3_BLOCK[slot] == usize::MAX {
-                L3_BLOCK[slot] = l2_index;
-                let table = addr_of_mut!(L3_POOL[slot]);
-                (*table).entries = [0; 512];
-                L2_TABLE.entries[l2_index] =
-                    (table as u64) | PTE_VALID | PTE_TABLE;
-                return table;
-            }
-        }
-    }
-
-    panic!("user page-table pool exhausted");
+pub struct AddressSpace {
+    ttbr0: u64,
+    frames: [u64; MAX_FRAMES],
+    frame_count: usize,
 }
 
-/// Map one 4 KiB page into the user address space.
-///
-/// `executable` controls UXN: EL0 can execute code pages but not the stack.
-/// PXN is always set, so EL1 never executes user pages.
-#[allow(static_mut_refs)]
-pub fn map_user_page(virtual_address: u64, physical_address: u64, executable: bool) {
-    let l2_index = ((virtual_address >> 21) & 0x1ff) as usize;
-    let l3_index = ((virtual_address >> 12) & 0x1ff) as usize;
+impl AddressSpace {
+    /// Create a fresh address space from the kernel's identity tables.
+    pub fn new() -> Option<Self> {
+        let l0 = pfa::alloc_frame()?;
+        let l1 = pfa::alloc_frame()?;
+        let l2 = pfa::alloc_frame()?;
 
-    let table = user_l3_table(l2_index);
+        let mut space = Self {
+            ttbr0: l0,
+            frames: [0; MAX_FRAMES],
+            frame_count: 3,
+        };
+        space.frames[0] = l0;
+        space.frames[1] = l1;
+        space.frames[2] = l2;
 
-    let mut flags = PTE_VALID
-        | PTE_PAGE
-        | PTE_ATTR_NORMAL
-        | PTE_AP_EL0_RW
-        | PTE_SH_INNER
-        | PTE_AF
-        | PTE_PXN;
-    if !executable {
-        flags |= PTE_UXN;
+        let kernel_l0 = addr_of_mut!(L0_TABLE) as u64;
+        let kernel_l1 = addr_of_mut!(L1_TABLE) as u64;
+        let kernel_l2 = addr_of_mut!(L2_TABLE) as u64;
+
+        // SAFETY: all three frames are page-aligned and reserved by the PFA.
+        unsafe {
+            copy_page(kernel_l0, l0);
+            copy_page(kernel_l1, l1);
+            copy_page(kernel_l2, l2);
+
+            // L0[0] -> this address space's L1; L1[1] -> its L2.
+            (*((l0) as *mut PageTable)).entries[0] = l1 | PTE_VALID | PTE_TABLE;
+            (*((l1) as *mut PageTable)).entries[1] = l2 | PTE_VALID | PTE_TABLE;
+            asm!("dsb sy", "isb");
+        }
+
+        Some(space)
     }
 
-    unsafe {
-        (*table).entries[l3_index] = (physical_address & !(0xfff)) | flags;
-        asm!("dsb sy", "tlbi vmalle1", "dsb sy", "isb");
+    /// Allocate a frame and track it for teardown.
+    pub fn alloc_frame(&mut self) -> Option<u64> {
+        let frame = pfa::alloc_frame()?;
+        if self.frame_count == MAX_FRAMES {
+            pfa::free_frame(frame);
+            return None;
+        }
+        self.frames[self.frame_count] = frame;
+        self.frame_count += 1;
+        Some(frame)
     }
+
+    /// Map one 4 KiB user page. `executable` controls UXN; PXN is always set.
+    pub fn map_page(&mut self, virtual_address: u64, physical_address: u64, executable: bool) {
+        let l2_index = ((virtual_address >> 21) & 0x1ff) as usize;
+        let l3_index = ((virtual_address >> 12) & 0x1ff) as usize;
+        let table = self.l3_table(l2_index);
+        let table = table.expect("user page-table frame pool exhausted");
+
+        let mut flags = PTE_VALID
+            | PTE_PAGE
+            | PTE_ATTR_NORMAL
+            | PTE_AP_EL0_RW
+            | PTE_SH_INNER
+            | PTE_AF
+            | PTE_PXN;
+        if !executable {
+            flags |= PTE_UXN;
+        }
+
+        unsafe {
+            (*(table as *mut PageTable)).entries[l3_index] =
+                (physical_address & PTE_PAGE_ADDR) | flags;
+        }
+    }
+
+    fn l3_table(&mut self, l2_index: usize) -> Option<u64> {
+        let l2 = self.l2_table();
+        let entry = unsafe { (*(l2 as *const PageTable)).entries[l2_index] };
+
+        if entry & PTE_VALID != 0 && entry & PTE_TABLE != 0 {
+            return Some(entry & PTE_PAGE_ADDR);
+        }
+
+        let frame = self.alloc_frame()?;
+        unsafe {
+            core::ptr::write_bytes(frame as *mut u8, 0, 4096);
+            (*(l2 as *mut PageTable)).entries[l2_index] = frame | PTE_VALID | PTE_TABLE;
+            asm!("dsb sy", "isb");
+        }
+        Some(frame)
+    }
+
+    fn l1_table(&self) -> u64 {
+        unsafe {
+            (*(self.ttbr0 as *const PageTable)).entries[0] & PTE_PAGE_ADDR
+        }
+    }
+
+    fn l2_table(&self) -> u64 {
+        unsafe {
+            (*(self.l1_table() as *const PageTable)).entries[1] & PTE_PAGE_ADDR
+        }
+    }
+
+    /// Translate a user virtual address through this address space.
+    pub fn translate(&self, virtual_address: u64) -> Option<u64> {
+        let l0_index = ((virtual_address >> 39) & 0x1ff) as usize;
+        let l1_index = ((virtual_address >> 30) & 0x1ff) as usize;
+        let l2_index = ((virtual_address >> 21) & 0x1ff) as usize;
+        let l3_index = ((virtual_address >> 12) & 0x1ff) as usize;
+
+        let l0_entry = unsafe { (*(self.ttbr0 as *const PageTable)).entries[l0_index] };
+        if l0_entry & PTE_VALID == 0 || l0_entry & PTE_TABLE == 0 {
+            return None;
+        }
+        let l1 = l0_entry & PTE_PAGE_ADDR;
+        let l1_entry = unsafe { (*(l1 as *const PageTable)).entries[l1_index] };
+        if l1_entry & PTE_VALID == 0 || l1_entry & PTE_TABLE == 0 {
+            return None;
+        }
+        let l2 = l1_entry & PTE_PAGE_ADDR;
+        let l2_entry = unsafe { (*(l2 as *const PageTable)).entries[l2_index] };
+        if l2_entry & PTE_VALID == 0 {
+            return None;
+        }
+
+        if l2_entry & PTE_TABLE == 0 {
+            // 2 MiB block descriptor.
+            return Some(
+                (l2_entry & PTE_BLOCK_ADDR) | (virtual_address & 0x1f_ffff),
+            );
+        }
+
+        let l3 = l2_entry & PTE_PAGE_ADDR;
+        let l3_entry = unsafe { (*(l3 as *const PageTable)).entries[l3_index] };
+        if l3_entry & PTE_VALID == 0 || l3_entry & PTE_PAGE == 0 {
+            return None;
+        }
+        Some((l3_entry & PTE_PAGE_ADDR) | (virtual_address & 0xfff))
+    }
+
+    /// Write a 64-bit value into this (possibly inactive) address space.
+    pub fn write_u64(&mut self, virtual_address: u64, value: u64) -> bool {
+        let Some(physical) = self.translate(virtual_address) else {
+            return false;
+        };
+        unsafe {
+            core::ptr::write_volatile(physical as *mut u64, value);
+        }
+        true
+    }
+
+    /// Switch TTBR0 to this address space.
+    pub fn activate(&self) {
+        unsafe {
+            asm!(
+                "msr ttbr0_el1, {ttbr}",
+                "dsb sy",
+                "tlbi vmalle1",
+                "dsb sy",
+                "isb",
+                ttbr = in(reg) self.ttbr0,
+            );
+        }
+    }
+
+    /// Release every frame owned by this address space.
+    pub fn destroy(mut self) {
+        self.release();
+    }
+
+    fn release(&mut self) {
+        unsafe {
+            asm!("dsb sy", "tlbi vmalle1", "dsb sy", "isb");
+        }
+        for index in 0..self.frame_count {
+            pfa::free_frame(self.frames[index]);
+        }
+        self.frame_count = 0;
+    }
+}
+
+impl Drop for AddressSpace {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
+
+unsafe fn copy_page(source: u64, destination: u64) {
+    core::ptr::copy_nonoverlapping(
+        source as *const u8,
+        destination as *mut u8,
+        4096,
+    );
 }
 
 pub fn enabled() -> bool {

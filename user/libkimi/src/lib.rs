@@ -16,6 +16,13 @@ pub const SYS_READ_FILE: u64 = 5;
 pub const SYS_CLOSE: u64 = 6;
 pub const SYS_EXEC: u64 = 7;
 pub const SYS_LIST: u64 = 8;
+pub const SYS_SPAWN: u64 = 9;
+pub const SYS_WAIT: u64 = 10;
+pub const SYS_GETPID: u64 = 11;
+pub const SYS_STATS: u64 = 12;
+pub const SYS_CREATE: u64 = 13;
+pub const SYS_WRITE_FILE: u64 = 14;
+pub const SYS_DISKINFO: u64 = 15;
 
 pub const STDIN: u64 = 0;
 pub const STDOUT: u64 = 1;
@@ -133,6 +140,95 @@ pub fn list(buffer: &mut [u8]) -> usize {
     } else {
         result as usize
     }
+}
+
+/// Create a child process from an ELF or PE at `path`.
+pub fn spawn(path: &str) -> Option<u64> {
+    let result = syscall3(
+        SYS_SPAWN,
+        path.as_ptr() as u64,
+        path.len() as u64,
+        0,
+    );
+    if result == ERROR {
+        None
+    } else {
+        Some(result)
+    }
+}
+
+/// Wait for `pid` (0 = any child); returns its exit status.
+pub fn wait(pid: u64) -> Option<u64> {
+    let result = syscall3(SYS_WAIT, pid, 0, 0);
+    if result == ERROR {
+        None
+    } else {
+        Some(result)
+    }
+}
+
+pub fn getpid() -> u64 {
+    syscall3(SYS_GETPID, 0, 0, 0)
+}
+
+/// Create or truncate `/disk/<name>`; returns a descriptor.
+pub fn create(path: &str) -> Option<u64> {
+    let result = syscall3(
+        SYS_CREATE,
+        path.as_ptr() as u64,
+        path.len() as u64,
+        0,
+    );
+    if result == ERROR {
+        None
+    } else {
+        Some(result)
+    }
+}
+
+pub fn write_file(handle: u64, offset: usize, data: &[u8]) -> usize {
+    let result = syscall4(
+        SYS_WRITE_FILE,
+        handle,
+        offset as u64,
+        data.as_ptr() as u64,
+        data.len() as u64,
+    );
+    if result == ERROR {
+        0
+    } else {
+        result as usize
+    }
+}
+
+/// Packed `(total_sectors << 32) | file_count`; `None` without a disk.
+pub fn diskinfo() -> Option<u64> {
+    let result = syscall3(SYS_DISKINFO, 0, 0, 0);
+    if result == ERROR {
+        None
+    } else {
+        Some(result)
+    }
+}
+
+/// Free physical frames (debug aid).
+pub fn free_frames() -> u64 {
+    syscall3(SYS_STATS, 0, 0, 0)
+}
+
+/// Print an unsigned decimal number.
+pub fn print_u64(mut value: u64) {
+    let mut buffer = [0u8; 20];
+    let mut index = buffer.len();
+    loop {
+        index -= 1;
+        buffer[index] = b'0' + (value % 10) as u8;
+        value /= 10;
+        if value == 0 {
+            break;
+        }
+    }
+    print_bytes(&buffer[index..]);
 }
 
 pub fn exit(status: u64) -> ! {

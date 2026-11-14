@@ -12,7 +12,7 @@
 
 use core::arch::asm;
 
-use crate::{mmu, pfa, println};
+use crate::{mmu, println};
 
 const PAGE_SIZE: u64 = 4096;
 
@@ -133,7 +133,10 @@ pub fn is_pe(image: &[u8]) -> bool {
     image.len() >= 0x40 && &image[..2] == b"MZ"
 }
 
-pub fn load(image: &[u8]) -> Result<LoadedImage, &'static str> {
+pub fn load(
+    image: &[u8],
+    space: &mut mmu::AddressSpace,
+) -> Result<LoadedImage, &'static str> {
     if !is_pe(image) {
         return Err("missing MZ header");
     }
@@ -217,7 +220,7 @@ pub fn load(image: &[u8]) -> Result<LoadedImage, &'static str> {
 
         let mut page = first_page;
         while page < last_page {
-            let frame = pfa::alloc_frame().ok_or("out of physical memory")?;
+            let frame = space.alloc_frame().ok_or("out of physical memory")?;
             unsafe {
                 core::ptr::write_bytes(frame as *mut u8, 0, PAGE_SIZE as usize);
             }
@@ -239,7 +242,7 @@ pub fn load(image: &[u8]) -> Result<LoadedImage, &'static str> {
                 }
             }
 
-            mmu::map_user_page(page, frame, section.executable);
+            space.map_page(page, frame, section.executable);
             pages += 1;
             page += PAGE_SIZE;
         }
@@ -297,8 +300,8 @@ pub fn load(image: &[u8]) -> Result<LoadedImage, &'static str> {
                     let id = thunk_id(name).ok_or("unsupported import")?;
 
                     let slot = image_base + first_thunk as u64 + index as u64 * 8;
-                    unsafe {
-                        core::ptr::write_volatile(slot as *mut u64, thunk_address(id));
+                    if !space.write_u64(slot, thunk_address(id)) {
+                        return Err("IAT slot is not mapped");
                     }
 
                     println!("  import {}!{}", dll, name);
@@ -312,19 +315,23 @@ pub fn load(image: &[u8]) -> Result<LoadedImage, &'static str> {
     }
 
     // Thunk page (EL0 executable) and stack page.
-    let thunk_frame = pfa::alloc_frame().ok_or("out of memory for PE thunks")?;
+    let thunk_frame = space
+        .alloc_frame()
+        .ok_or("out of memory for PE thunks")?;
     unsafe {
         core::ptr::write_bytes(thunk_frame as *mut u8, 0, PAGE_SIZE as usize);
     }
     build_thunks(thunk_frame, 5);
-    mmu::map_user_page(THUNK_VA, thunk_frame, true);
+    space.map_page(THUNK_VA, thunk_frame, true);
     pages += 1;
 
-    let stack_frame = pfa::alloc_frame().ok_or("out of memory for PE stack")?;
+    let stack_frame = space
+        .alloc_frame()
+        .ok_or("out of memory for PE stack")?;
     unsafe {
         core::ptr::write_bytes(stack_frame as *mut u8, 0, PAGE_SIZE as usize);
     }
-    mmu::map_user_page(PE_STACK_VA, stack_frame, false);
+    space.map_page(PE_STACK_VA, stack_frame, false);
     pages += 1;
 
     let entry = image_base + entry_rva as u64;
