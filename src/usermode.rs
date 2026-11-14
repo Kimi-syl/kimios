@@ -8,7 +8,7 @@ use core::arch::asm;
 
 use crate::exceptions::ExceptionFrame;
 use crate::ramfs::Vfs;
-use crate::{elf, println, ramfs};
+use crate::{elf, pe, println, ramfs};
 
 pub const SYS_WRITE: u64 = 1;
 pub const SYS_EXIT: u64 = 2;
@@ -41,7 +41,7 @@ fn user_buffer(pointer: u64, length: u64) -> Option<&'static mut [u8]> {
 
 pub fn run_init() -> ! {
     println!();
-    println!("Phase 10/11: RamFS, ELF loader, EL0 shell");
+    println!("Phase 12: RamFS, ELF/PE loaders, EL0 shell");
 
     let file = ramfs::RAMFS.open("/init").expect("no /init in RamFS");
     println!("RamFS      : /init ({} bytes)", file.data.len());
@@ -199,13 +199,19 @@ pub fn sys_exec(frame: &mut ExceptionFrame, pointer: u64, length: u64) -> u64 {
         return ERROR;
     };
 
-    match elf::load(file.data) {
-        Ok(image) => {
-            println!("exec: {} -> entry {:#x}", path, image.entry);
+    let result = if pe::is_pe(file.data) {
+        pe::load(file.data).map(|image| (image.entry, image.stack_top))
+    } else {
+        elf::load(file.data).map(|image| (image.entry, image.stack_top))
+    };
+
+    match result {
+        Ok((entry, stack_top)) => {
+            println!("exec: {} -> entry {:#x}", path, entry);
             unsafe {
-                asm!("msr sp_el0, {}", in(reg) image.stack_top, options(nostack));
+                asm!("msr sp_el0, {}", in(reg) stack_top, options(nostack));
             }
-            frame.elr = image.entry;
+            frame.elr = entry;
             0
         }
         Err(error) => {
@@ -213,6 +219,54 @@ pub fn sys_exec(frame: &mut ExceptionFrame, pointer: u64, length: u64) -> u64 {
             ERROR
         }
     }
+}
+
+/// GetStdHandle(STD_*_HANDLE) -> console handle 1.
+pub fn pe_get_std_handle(_which: u64) -> u64 {
+    1
+}
+
+/// WriteFile(handle, buffer, length, written, overlapped) -> BOOL.
+pub fn pe_write_file(
+    handle: u64,
+    pointer: u64,
+    length: u64,
+    written_pointer: u64,
+    _overlapped: u64,
+) -> u64 {
+    if handle != 1 {
+        return 0;
+    }
+
+    if length != 0 {
+        let Some(bytes) = user_bytes(pointer, length) else {
+            return 0;
+        };
+        crate::uart::write_bytes(bytes);
+    }
+
+    if written_pointer != 0 {
+        unsafe {
+            core::ptr::write_unaligned(written_pointer as *mut u32, length as u32);
+        }
+    }
+
+    1
+}
+
+/// ExitProcess(code) -> never returns.
+pub fn pe_exit_process(code: u64) -> ! {
+    println!();
+    println!("[kernel] PE ExitProcess({})", code);
+    crate::semihosting_exit(0x20026, 0);
+}
+
+pub fn pe_get_last_error() -> u64 {
+    0
+}
+
+pub fn pe_set_last_error(_code: u64) -> u64 {
+    0
 }
 
 /// exit(status) -> never returns.

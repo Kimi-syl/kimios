@@ -64,7 +64,7 @@ static mut L1_TABLE: PageTable = PageTable { entries: [0; 512] };
 static mut L2_TABLE: PageTable = PageTable { entries: [0; 512] };
 // Pool of L3 tables for user mappings. Each 2 MiB block that receives a
 // user page needs one table; four blocks is plenty for the loader + stack.
-const USER_TABLE_POOL: usize = 4;
+const USER_TABLE_POOL: usize = 8;
 
 const EMPTY_TABLE: PageTable = PageTable { entries: [0; 512] };
 

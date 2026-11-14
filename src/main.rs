@@ -8,6 +8,7 @@ mod exceptions;
 mod gic;
 mod irq;
 mod mmu;
+mod pe;
 mod pfa;
 mod ramfs;
 mod sched;

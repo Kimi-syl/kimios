@@ -52,6 +52,7 @@ pub extern "C" fn exception_handler(frame: &mut ExceptionFrame) {
         let arg1 = frame.x[1];
         let arg2 = frame.x[2];
         let arg3 = frame.x[3];
+        let arg4 = frame.x[4];
 
         let result = match number {
             usermode::SYS_WRITE => usermode::sys_write(arg0, arg1, arg2),
@@ -64,6 +65,15 @@ pub extern "C" fn exception_handler(frame: &mut ExceptionFrame) {
             usermode::SYS_CLOSE => usermode::sys_close(arg0),
             usermode::SYS_EXEC => usermode::sys_exec(frame, arg0, arg1),
             usermode::SYS_LIST => usermode::sys_list(arg0, arg1),
+            crate::pe::SYS_PE_GET_STD_HANDLE => {
+                usermode::pe_get_std_handle(arg0)
+            }
+            crate::pe::SYS_PE_WRITE_FILE => usermode::pe_write_file(
+                arg0, arg1, arg2, arg3, arg4,
+            ),
+            crate::pe::SYS_PE_EXIT_PROCESS => usermode::pe_exit_process(arg0),
+            crate::pe::SYS_PE_GET_LAST_ERROR => usermode::pe_get_last_error(),
+            crate::pe::SYS_PE_SET_LAST_ERROR => usermode::pe_set_last_error(arg0),
             _ => {
                 println!("Unknown syscall {} (x0={:#x})", number, arg0);
                 u64::MAX

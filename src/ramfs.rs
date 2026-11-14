@@ -25,7 +25,9 @@ static INIT_ELF: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/init.elf"));
 
 static HELLO_ELF: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/hello.elf"));
 
-static FILES: [File; 3] = [
+static HELLO_PE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/hello.exe"));
+
+static FILES: [File; 4] = [
     File {
         name: "/init",
         data: INIT_ELF,
@@ -33,6 +35,10 @@ static FILES: [File; 3] = [
     File {
         name: "/hello",
         data: HELLO_ELF,
+    },
+    File {
+        name: "/hello.exe",
+        data: HELLO_PE,
     },
     File {
         name: "/motd",

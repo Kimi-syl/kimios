@@ -81,7 +81,7 @@ pub extern "C" fn _start() -> ! {
         if command == &b"help"[..] {
             k::print("  ls             list RamFS files\n");
             k::print("  cat <file>     print a file\n");
-            k::print("  exec <file>    replace the shell with an ELF\n");
+            k::print("  exec <file>    replace the shell with an ELF or PE\n");
             k::print("  exit           halt the machine\n");
         } else if command == &b"ls"[..] {
             let count = k::list(&mut listing);
