@@ -3,5 +3,19 @@
 version = 4
 
 [[package]]
+name = "kimi-hello"
+version = "0.1.0"
+dependencies = [
+ "libkimi",
+]
+
+[[package]]
 name = "kimi-init"
+version = "0.1.0"
+dependencies = [
+ "libkimi",
+]
+
+[[package]]
+name = "libkimi"
 version = "0.1.0"

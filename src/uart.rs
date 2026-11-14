@@ -73,13 +73,22 @@ impl Uart {
     }
 
     /// Non-blocking receive. Returns `None` if the RX FIFO is empty.
-    #[allow(dead_code)]
     pub fn try_recv(&self) -> Option<u8> {
         if self.read(UARTFR) & FR_RXFE != 0 {
             None
         } else {
             Some((self.read(UARTDR) & 0xff) as u8)
         }
+    }
+}
+
+/// Blocking receive of one byte from the serial console.
+pub fn read_byte() -> u8 {
+    loop {
+        if let Some(byte) = UART0.lock().try_recv() {
+            return byte;
+        }
+        core::hint::spin_loop();
     }
 }
 

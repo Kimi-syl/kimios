@@ -23,10 +23,22 @@ pub trait Vfs {
 
 static INIT_ELF: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/init.elf"));
 
-static FILES: [File; 1] = [File {
-    name: "/init",
-    data: INIT_ELF,
-}];
+static HELLO_ELF: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/hello.elf"));
+
+static FILES: [File; 3] = [
+    File {
+        name: "/init",
+        data: INIT_ELF,
+    },
+    File {
+        name: "/hello",
+        data: HELLO_ELF,
+    },
+    File {
+        name: "/motd",
+        data: b"Welcome to KimiOS!\nThis file lives in RamFS.\n",
+    },
+];
 
 pub struct RamFs;
 
@@ -48,8 +60,14 @@ impl Vfs for RamFs {
 
 pub static RAMFS: RamFs = RamFs;
 
-/// Convenience for diagnostics and the future shell.
-#[allow(dead_code)]
-pub fn list() -> impl Iterator<Item = &'static File> {
+pub fn index_of(path: &str) -> Option<usize> {
+    FILES.iter().position(|file| file.name == path)
+}
+
+pub fn file_at(index: usize) -> Option<&'static File> {
+    FILES.get(index)
+}
+
+pub fn files() -> impl Iterator<Item = &'static File> {
     FILES.iter()
 }

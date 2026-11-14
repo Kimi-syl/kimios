@@ -17,7 +17,9 @@ fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=user/Cargo.toml");
     println!("cargo:rerun-if-changed=user/linker.ld");
-    println!("cargo:rerun-if-changed=user/src/main.rs");
+    println!("cargo:rerun-if-changed=user/libkimi");
+    println!("cargo:rerun-if-changed=user/kimi-init");
+    println!("cargo:rerun-if-changed=user/kimi-hello");
 
     let target_dir = manifest_dir.join("target/user-build");
     let linker = user_dir.join("linker.ld");
@@ -36,12 +38,18 @@ fn main() {
         .arg("aarch64-unknown-none")
         .arg("--target-dir")
         .arg(&target_dir)
+        .arg("--workspace")
         .status()
         .expect("failed to spawn cargo for the user program");
 
     assert!(status.success(), "user program build failed");
 
-    let built = target_dir.join("aarch64-unknown-none/release/kimi-init");
-    let destination = out_dir.join("init.elf");
-    fs::copy(&built, &destination).expect("failed to copy user ELF into OUT_DIR");
+    for (binary, embedded) in [("kimi-init", "init.elf"), ("kimi-hello", "hello.elf")] {
+        let built = target_dir
+            .join("aarch64-unknown-none/release")
+            .join(binary);
+        let destination = out_dir.join(embedded);
+        fs::copy(&built, &destination)
+            .unwrap_or_else(|_| panic!("failed to copy {} into OUT_DIR", binary));
+    }
 }

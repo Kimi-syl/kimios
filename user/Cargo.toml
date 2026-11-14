@@ -1,13 +1,6 @@
-[package]
-name = "kimi-init"
-version = "0.1.0"
-edition = "2021"
-
-[[bin]]
-name = "kimi-init"
-path = "src/main.rs"
-
 [workspace]
+resolver = "2"
+members = ["libkimi", "kimi-init", "kimi-hello"]
 
 [profile.release]
 panic = "abort"

@@ -1,0 +1,11 @@
+[package]
+name = "kimi-hello"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+libkimi = { path = "../libkimi" }
+
+[[bin]]
+name = "kimi-hello"
+path = "src/main.rs"

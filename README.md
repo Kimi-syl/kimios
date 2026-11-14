@@ -36,15 +36,20 @@ No bootloader is used: QEMU loads the ELF directly with `-kernel`.
   `xmas-elf` loader that allocates PFA frames, copies `PT_LOAD` segments,
   zeroes BSS, and maps them with user permissions. `build.rs` builds the
   user program with a separate target directory.
+- **Phase 11 - User shell:** a `libkimi` user crate with syscall wrappers
+  (`write`, `exit`, `read`, `open`, `read_file`, `close`, `exec`, `list`),
+  a shell (`kimi-init`) with `ls`, `cat`, `exec`, `help` and `exit`, and a
+  second ELF (`kimi-hello`) that `exec` replaces the shell with. `build.rs`
+  builds the whole `user/` Cargo workspace and embeds both binaries.
 
 ## Layout
 
 ```text
 .cargo/config.toml   target + linker flags
 Cargo.toml           dependencies, panic=abort
-build.rs             builds user/kimi-init and copies the ELF into OUT_DIR
+build.rs             builds the user/ workspace, copies init.elf + hello.elf to OUT_DIR
 linker.ld            0x4008_0000, .text.boot first, vector table kept, 64 KiB stack
-user/                EL0 program (kimi-init), linked at 0x6000_0000
+user/                EL0 workspace: libkimi (syscalls), kimi-init (shell), kimi-hello
 src/boot.s           _start: EL1 entry, FP/SIMD enable, stack, .bss, kmain
 src/vectors.s        16-entry exception vector table + save/restore
 src/main.rs          kmain, panic handler, semihosting exit
@@ -123,18 +128,40 @@ ABABABABABABABABAB
 Scheduler stats: A=10 B=10 ticks=35
 Phases 1-8 complete.
 
-Phase 10: VFS + RamFS + ELF loader
-RamFS      : /init (70368 bytes)
+Phase 11: user shell + exec
+RamFS      : /init (72880 bytes)
 VFS read   : 4 bytes, magic [7f, 45, 4c, 46]
   PT_LOAD va=0x60000000 filesz=76 memsz=76 flags=X R
   PT_LOAD va=0x60001000 filesz=88 memsz=88 flags=  R
 ELF loaded : entry=0x60000000 stack_top=0x61001000 pages=3
 Dropping to EL0...
-Hello from an ELF binary loaded by KimiOS!
-RamFS + xmas-elf + EL0 syscalls all working.
+
+KimiOS user shell (libkimi)
+Commands: ls, cat <file>, exec <file>, help, exit
+$ ls
+/init
+/hello
+/motd
+$ cat /motd
+Welcome to KimiOS!
+This file lives in RamFS.
+$ exec /hello
+exec: loading /hello
+  PT_LOAD va=0x60000000 filesz=76 memsz=76 flags=X R
+  PT_LOAD va=0x60001000 filesz=53 memsz=53 flags=  R
+exec: /hello -> entry 0x60000000
+Hello from /hello, loaded by exec!
+Cheerio from EL0.
 
 [kernel] EL0 exit(0)
 ```
+
+The shell reads lines with the `read` syscall (echoing and handling backspace),
+`ls` returns NUL-separated names via the `list` syscall, and `cat` opens a file
+and copies it out in chunks with `read_file`. `exec` loads another embedded
+ELF into the same address space and rewrites the exception return frame
+(`ELR_EL1`) and `SP_EL0`, so the syscall returns directly into the new program
+at EL0.
 
 The kernel exits QEMU cleanly (`status 0`) through ARM semihosting
 (`SYS_EXIT_EXTENDED`, `HLT #0xF000`). This is temporary scaffolding until a
@@ -166,9 +193,13 @@ proper shutdown driver exists.
 - EL0 isolation uses 4 KiB L3 pages: the user region at `0x5000_0000` has
   AP=EL0/EL1 RW, code is EL0-executable (UXN=0, PXN=1), the stack is
   UXN=1. Kernel RAM stays EL1-only, and the UART/device MMIO is EL1-only.
-- SVC syscall ABI: `x8` = number (1 = write, 2 = exit), `x0..x2` = args,
-  result in `x0`. For SVC, `ELR_EL1` already points to the next instruction;
-  BRK is the exception that must advance ELR manually.
+- SVC syscall ABI: `x8` = number (1 write, 2 exit, 3 read, 4 open,
+  5 read_file, 6 close, 7 exec, 8 list), `x0..x3` = args, result in `x0`.
+  For SVC, `ELR_EL1` already points to the next instruction; BRK is the
+  exception that must advance ELR manually.
+- `exec` reuses the loader, so it remaps and zeroes the user stack page.
+  The kernel copies the path out of user memory first, because the user
+  path buffer usually lives on that stack.
 - The user ELF is linked at `0x6000_0000`; its stack page is mapped at
   `0x6100_0000`. `user/linker.ld` page-aligns each section so no two
   `PT_LOAD` segments share a page. The loader parses an aligned copy of the

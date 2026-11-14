@@ -48,16 +48,29 @@ pub extern "C" fn exception_handler(frame: &mut ExceptionFrame) {
     if ec == EC_SVC64 {
         // SVC is complete: ELR already points at the next instruction.
         let number = frame.x[8];
-        frame.x[0] = match number {
-            usermode::SYS_WRITE => {
-                usermode::sys_write(frame.x[0], frame.x[1], frame.x[2])
+        let arg0 = frame.x[0];
+        let arg1 = frame.x[1];
+        let arg2 = frame.x[2];
+        let arg3 = frame.x[3];
+
+        let result = match number {
+            usermode::SYS_WRITE => usermode::sys_write(arg0, arg1, arg2),
+            usermode::SYS_EXIT => usermode::sys_exit(arg0),
+            usermode::SYS_READ => usermode::sys_read(arg0, arg1, arg2),
+            usermode::SYS_OPEN => usermode::sys_open(arg0, arg1),
+            usermode::SYS_READ_FILE => {
+                usermode::sys_read_file(arg0, arg1, arg2, arg3)
             }
-            usermode::SYS_EXIT => usermode::sys_exit(frame.x[0]),
+            usermode::SYS_CLOSE => usermode::sys_close(arg0),
+            usermode::SYS_EXEC => usermode::sys_exec(frame, arg0, arg1),
+            usermode::SYS_LIST => usermode::sys_list(arg0, arg1),
             _ => {
-                println!("Unknown syscall {} (x0={:#x})", number, frame.x[0]);
+                println!("Unknown syscall {} (x0={:#x})", number, arg0);
                 u64::MAX
             }
         };
+
+        frame.x[0] = result;
         return;
     }
 
