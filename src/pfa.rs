@@ -16,7 +16,7 @@ use crate::dtb::MemoryRegion;
 pub const PAGE_SIZE: usize = 4096;
 
 /// Support up to 1 GiB of managed RAM: 262144 frames -> 32 KiB of bitmap.
-const MAX_PAGES: usize = (1024 * 1024 * 1024) / PAGE_SIZE;
+const MAX_PAGES: usize = (4 * 1024 * 1024 * 1024) / PAGE_SIZE;
 const BITMAP_WORDS: usize = MAX_PAGES / 64;
 
 extern "C" {

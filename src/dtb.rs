@@ -33,6 +33,7 @@ pub struct BootInfo {
     pub from_x0: bool,
     pub memory: MemoryRegion,
     pub memory_from_dtb: bool,
+    pub fb_resolution: Option<(u32, u32)>,
 }
 
 fn read_be32(address: u64) -> u32 {
@@ -115,12 +116,30 @@ fn parse_memory(dtb: &Dtb) -> Option<MemoryRegion> {
     best
 }
 
+/// Parse `kimios.fb=WIDTHxHEIGHT` from `/chosen/bootargs`.
+fn parse_fb_resolution(dtb: &Dtb) -> Option<(u32, u32)> {
+    let args = dtb.get_property("/chosen", "bootargs")?;
+    let text = core::str::from_utf8(args).ok()?.trim_matches('\0');
+    for token in text.split_whitespace() {
+        if let Some(value) = token.strip_prefix("kimios.fb=") {
+            let (w, h) = value.split_once('x')?;
+            let w: u32 = w.parse().ok()?;
+            let h: u32 = h.parse().ok()?;
+            if w >= 16 && h >= 16 {
+                return Some((w, h));
+            }
+        }
+    }
+    None
+}
+
 fn try_parse(address: u64, from_x0: bool) -> Option<BootInfo> {
     let size = dtb_size_at(address)?;
 
     // SAFETY: the header was validated and the blob lies in identity-mapped RAM.
     let dtb = unsafe { Dtb::from_raw(address as *const u8)? };
     let memory = parse_memory(&dtb)?;
+    let fb_resolution = parse_fb_resolution(&dtb);
 
     Some(BootInfo {
         dtb_addr: address,
@@ -128,6 +147,7 @@ fn try_parse(address: u64, from_x0: bool) -> Option<BootInfo> {
         from_x0,
         memory,
         memory_from_dtb: true,
+        fb_resolution,
     })
 }
 
@@ -163,5 +183,6 @@ pub fn probe(x0: usize) -> BootInfo {
             size: FALLBACK_SIZE,
         },
         memory_from_dtb: false,
+        fb_resolution: None,
     }
 }

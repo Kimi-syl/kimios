@@ -67,7 +67,8 @@ struct PageTable {
 
 static mut L0_TABLE: PageTable = PageTable { entries: [0; 512] };
 static mut L1_TABLE: PageTable = PageTable { entries: [0; 512] };
-static mut L2_TABLE: PageTable = PageTable { entries: [0; 512] };
+/// Four L2 tables identity-map up to 4 GiB of RAM (0x4000_0000..0x1_4000_0000).
+static mut L2_TABLES: [PageTable; 4] = [const { PageTable { entries: [0; 512] } }; 4];
 fn l1_device_block(base: u64) -> u64 {
     base | PTE_VALID | PTE_ATTR_DEVICE | PTE_AF | PTE_PXN | PTE_UXN
 }
@@ -87,13 +88,14 @@ pub fn init() {
         // First 1 GiB: peripherals, Device-nGnRnE, never executable.
         L1_TABLE.entries[0] = l1_device_block(0x0000_0000);
 
-        // Second 1 GiB: RAM, Normal WB, EL1-executable, via L2.
-        L1_TABLE.entries[1] =
-            (addr_of_mut!(L2_TABLE) as u64) | PTE_VALID | PTE_TABLE;
-
-        for i in 0..512 {
-            let pa = 0x4000_0000 + (i as u64) * 0x0020_0000;
-            L2_TABLE.entries[i] = l2_normal_block(pa);
+        // Up to 4 GiB of RAM: Normal WB, EL1-executable, via L2 tables.
+        for gig in 0..4u64 {
+            let table = addr_of_mut!(L2_TABLES[gig as usize]) as u64;
+            L1_TABLE.entries[1 + gig as usize] = table | PTE_VALID | PTE_TABLE;
+            for i in 0..512u64 {
+                let pa = 0x4000_0000 + gig * 0x4000_0000 + i * 0x0020_0000;
+            (*(((table) as *mut PageTable))).entries[i as usize] = l2_normal_block(pa);
+            }
         }
 
         let ttbr0 = addr_of_mut!(L0_TABLE) as u64;
@@ -178,30 +180,45 @@ impl AddressSpace {
     pub fn new() -> Option<Self> {
         let l0 = pfa::alloc_frame()?;
         let l1 = pfa::alloc_frame()?;
-        let l2 = pfa::alloc_frame()?;
+        let mut l2s = [0u64; 4];
+        for slot in l2s.iter_mut() {
+            let Some(frame) = pfa::alloc_frame() else {
+                pfa::free_frame(l0);
+                pfa::free_frame(l1);
+                for done in l2s.iter().take_while(|f| **f != 0) {
+                    pfa::free_frame(*done);
+                }
+                return None;
+            };
+            *slot = frame;
+        }
 
         let mut space = Self {
             ttbr0: l0,
             frames: [0; MAX_FRAMES],
-            frame_count: 3,
+            frame_count: 6,
         };
         space.frames[0] = l0;
         space.frames[1] = l1;
-        space.frames[2] = l2;
+        space.frames[2..6].copy_from_slice(&l2s);
 
         let kernel_l0 = addr_of_mut!(L0_TABLE) as u64;
         let kernel_l1 = addr_of_mut!(L1_TABLE) as u64;
-        let kernel_l2 = addr_of_mut!(L2_TABLE) as u64;
 
-        // SAFETY: all three frames are page-aligned and reserved by the PFA.
+        // SAFETY: all frames are page-aligned and reserved by the PFA.
         unsafe {
             copy_page(kernel_l0, l0);
             copy_page(kernel_l1, l1);
-            copy_page(kernel_l2, l2);
+            for gig in 0..4usize {
+                copy_page(addr_of_mut!(L2_TABLES[gig]) as u64, l2s[gig]);
+            }
 
-            // L0[0] -> this address space's L1; L1[1] -> its L2.
+            // L0[0] -> this address space's L1; L1[1..=4] -> its L2 tables.
             (*((l0) as *mut PageTable)).entries[0] = l1 | PTE_VALID | PTE_TABLE;
-            (*((l1) as *mut PageTable)).entries[1] = l2 | PTE_VALID | PTE_TABLE;
+            for gig in 0..4usize {
+                (*((l1) as *mut PageTable)).entries[1 + gig] =
+                    l2s[gig] | PTE_VALID | PTE_TABLE;
+            }
             asm!("dsb sy", "isb");
         }
 

@@ -25,8 +25,8 @@ const INODE_BLOCKS: u64 = (INODE_COUNT * INODE_SIZE / SECTOR_SIZE) as u64;
 const DATA_LBA: u64 = INODE_LBA + INODE_BLOCKS;
 const MAX_NAME: usize = 31;
 
-/// Bitmap capacity: 65_536 blocks (32 MiB). Larger disks are not mounted.
-const MAX_BLOCKS: u64 = 65_536;
+/// Bitmap capacity: 134_217_728 blocks (64 GiB). Larger disks are not mounted.
+const MAX_BLOCKS: u64 = 134_217_728;
 const BITMAP_WORDS: usize = (MAX_BLOCKS as usize) / 64;
 
 const INODE_USED: usize = 32;

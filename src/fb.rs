@@ -5,8 +5,9 @@
 //! pixel buffer lives and how it is laid out. The buffer is ordinary RAM, so
 //! drawing is just a store to memory; QEMU picks up the change on refresh.
 //!
-//! Once configured, every console byte written through the UART is mirrored
-//! here as an 8x8 glyph. The console scrolls one text row at a time.
+//! The resolution defaults to 1080x1920 and can be changed at boot with the
+//! `kimios.fb=WIDTHxHEIGHT` kernel argument (parsed from the DTB). The static
+//! buffer is sized for the maximum supported resolution.
 
 use crate::font::FONT8X8;
 use crate::fwcfg;
@@ -15,15 +16,8 @@ use core::ptr::addr_of;
 use core::sync::atomic::{AtomicBool, Ordering};
 use spin::Mutex;
 
-pub const WIDTH: usize = 1080;
-pub const HEIGHT: usize = 1920;
-pub const STRIDE: usize = WIDTH * 4;
-
-/// Console glyphs are drawn at 3x3 so text stays readable at 1080p.
-const GLYPH_SCALE: usize = 3;
-const CELL: usize = 8 * GLYPH_SCALE;
-const COLS: usize = WIDTH / CELL;
-const ROWS: usize = HEIGHT / CELL;
+pub const MAX_WIDTH: usize = 1440;
+pub const MAX_HEIGHT: usize = 2560;
 
 const COLOR_BG: u32 = 0x0010_141c;
 const COLOR_FG: u32 = 0x00d0_e4f0;
@@ -31,10 +25,45 @@ const COLOR_FG: u32 = 0x00d0_e4f0;
 /// DRM fourcc `XR24` (`DRM_FORMAT_XRGB8888`) in the endianness QEMU compares.
 const FOURCC_XRGB8888: u32 = 0x3432_5258;
 
-#[repr(align(4096))]
-struct Framebuffer([u32; WIDTH * HEIGHT]);
+#[derive(Clone, Copy)]
+struct Dims {
+    width: usize,
+    height: usize,
+    stride: usize,
+    scale: usize,
+    cell: usize,
+    cols: usize,
+    rows: usize,
+}
 
-static mut FRAMEBUFFER: Framebuffer = Framebuffer([COLOR_BG; WIDTH * HEIGHT]);
+impl Dims {
+    const fn new(width: usize, height: usize) -> Self {
+        let scale = if width / 360 < 1 {
+            1
+        } else if width / 360 > 3 {
+            3
+        } else {
+            width / 360
+        };
+        let cell = 8 * scale;
+        Self {
+            width,
+            height,
+            stride: width * 4,
+            scale,
+            cell,
+            cols: width / cell,
+            rows: height / cell,
+        }
+    }
+}
+
+static DIMS: Mutex<Dims> = Mutex::new(Dims::new(1080, 1920));
+
+#[repr(align(4096))]
+struct Framebuffer([u32; MAX_WIDTH * MAX_HEIGHT]);
+
+static mut FRAMEBUFFER: Framebuffer = Framebuffer([COLOR_BG; MAX_WIDTH * MAX_HEIGHT]);
 
 struct Screen {
     column: usize,
@@ -51,6 +80,24 @@ fn buffer() -> &'static mut [u32] {
     unsafe { &mut FRAMEBUFFER.0 }
 }
 
+fn dims() -> Dims {
+    *DIMS.lock()
+}
+
+/// Select the framebuffer resolution before `init`. Values are clamped to the
+/// supported range (16..=1440 x 16..=2560).
+pub fn configure(width: usize, height: usize) {
+    let width = width.clamp(16, MAX_WIDTH);
+    let height = height.clamp(16, MAX_HEIGHT);
+    *DIMS.lock() = Dims::new(width, height);
+}
+
+fn clear_active(fb: &mut [u32], d: &Dims) {
+    for row in 0..d.height {
+        fb[row * d.width..(row + 1) * d.width].fill(COLOR_BG);
+    }
+}
+
 /// Configure ramfb and start the text console.
 ///
 /// Returns `false` when the device is absent (no `-device ramfb`), leaving the
@@ -61,6 +108,7 @@ pub fn init() -> bool {
         return false;
     };
 
+    let d = dims();
     let address = addr_of!(FRAMEBUFFER) as u64;
 
     // QEMU_PACKED RAMFBCfg: addr, fourcc, flags, width, height, stride.
@@ -68,9 +116,9 @@ pub fn init() -> bool {
     config[0..8].copy_from_slice(&address.to_be_bytes());
     config[8..12].copy_from_slice(&FOURCC_XRGB8888.to_be_bytes());
     config[12..16].copy_from_slice(&0u32.to_be_bytes());
-    config[16..20].copy_from_slice(&(WIDTH as u32).to_be_bytes());
-    config[20..24].copy_from_slice(&(HEIGHT as u32).to_be_bytes());
-    config[24..28].copy_from_slice(&(STRIDE as u32).to_be_bytes());
+    config[16..20].copy_from_slice(&(d.width as u32).to_be_bytes());
+    config[20..24].copy_from_slice(&(d.height as u32).to_be_bytes());
+    config[24..28].copy_from_slice(&(d.stride as u32).to_be_bytes());
 
     if !fwcfg::write_file(selector, &config) {
         println!("ramfb       : fw_cfg DMA write failed");
@@ -81,31 +129,32 @@ pub fn init() -> bool {
         let mut screen = SCREEN.lock();
         screen.column = 0;
         screen.row = 0;
-        buffer().fill(COLOR_BG);
+        clear_active(buffer(), &d);
     }
     ENABLED.store(true, Ordering::Release);
 
     println!(
         "ramfb       : {}x{} XRGB8888 at {:#x} ({} KiB, {}x{} text)",
-        WIDTH,
-        HEIGHT,
+        d.width,
+        d.height,
         address,
-        (STRIDE * HEIGHT) / 1024,
-        COLS,
-        ROWS
+        (d.stride * d.height) / 1024,
+        d.cols,
+        d.rows
     );
     true
 }
 
 fn draw_glyph(fb: &mut [u32], column: usize, row: usize, byte: u8) {
+    let d = dims();
     let glyph = if (0x20..=0x7e).contains(&byte) {
         &FONT8X8[(byte - 0x20) as usize]
     } else {
         &FONT8X8[0]
     };
 
-    let x = column * CELL;
-    let y = row * CELL;
+    let x = column * d.cell;
+    let y = row * d.cell;
     for (dy, bits) in glyph.iter().enumerate() {
         for dx in 0..8 {
             let color = if bits & (1 << dx) != 0 {
@@ -113,9 +162,9 @@ fn draw_glyph(fb: &mut [u32], column: usize, row: usize, byte: u8) {
             } else {
                 COLOR_BG
             };
-            for sy in 0..GLYPH_SCALE {
-                let line = (y + dy * GLYPH_SCALE + sy) * WIDTH + x + dx * GLYPH_SCALE;
-                for sx in 0..GLYPH_SCALE {
+            for sy in 0..d.scale {
+                let line = (y + dy * d.scale + sy) * d.width + x + dx * d.scale;
+                for sx in 0..d.scale {
                     fb[line + sx] = color;
                 }
             }
@@ -124,14 +173,17 @@ fn draw_glyph(fb: &mut [u32], column: usize, row: usize, byte: u8) {
 }
 
 fn scroll(fb: &mut [u32]) {
-    fb.copy_within(CELL * WIDTH.., 0);
-    let last = (ROWS - 1) * CELL * WIDTH;
-    fb[last..].fill(COLOR_BG);
+    let d = dims();
+    let active = d.height * d.width;
+    fb.copy_within(d.cell * d.width..active, 0);
+    let last = (d.rows - 1) * d.cell * d.width;
+    fb[last..active].fill(COLOR_BG);
 }
 
 fn advance(screen: &mut Screen, fb: &mut [u32]) {
+    let d = dims();
     screen.column = 0;
-    if screen.row + 1 == ROWS {
+    if screen.row + 1 == d.rows {
         scroll(fb);
     } else {
         screen.row += 1;
@@ -139,6 +191,7 @@ fn advance(screen: &mut Screen, fb: &mut [u32]) {
 }
 
 fn putc_locked(screen: &mut Screen, fb: &mut [u32], byte: u8) {
+    let d = dims();
     match byte {
         b'\n' => advance(screen, fb),
         b'\r' => screen.column = 0,
@@ -151,7 +204,7 @@ fn putc_locked(screen: &mut Screen, fb: &mut [u32], byte: u8) {
         _ => {
             draw_glyph(fb, screen.column, screen.row, byte);
             screen.column += 1;
-            if screen.column == COLS {
+            if screen.column == d.cols {
                 advance(screen, fb);
             }
         }
@@ -172,7 +225,8 @@ pub fn info() -> Option<(usize, usize, usize, u32)> {
     if !ENABLED.load(Ordering::Acquire) {
         return None;
     }
-    Some((WIDTH, HEIGHT, STRIDE, FOURCC_XRGB8888))
+    let d = dims();
+    Some((d.width, d.height, d.stride, FOURCC_XRGB8888))
 }
 
 /// Whether a framebuffer was configured at boot.
@@ -185,7 +239,8 @@ pub fn mapping() -> Option<(u64, usize, usize)> {
     if !ENABLED.load(Ordering::Acquire) {
         return None;
     }
-    Some((addr_of!(FRAMEBUFFER) as u64, STRIDE, HEIGHT))
+    let d = dims();
+    Some((addr_of!(FRAMEBUFFER) as u64, d.stride, d.height))
 }
 
 /// Enable or disable mirroring console text (GUI mode). Re-enabling clears
@@ -194,9 +249,8 @@ pub fn set_console(enabled: bool) {
     CONSOLE.store(enabled, Ordering::Release);
     if enabled && ENABLED.load(Ordering::Acquire) {
         let mut screen = SCREEN.lock();
-        for pixel in buffer() {
-            *pixel = COLOR_BG;
-        }
+        let d = dims();
+        clear_active(buffer(), &d);
         screen.column = 0;
         screen.row = 0;
     }
@@ -217,9 +271,10 @@ pub fn fill_rect(x: usize, y: usize, width: usize, height: usize, color: u32) ->
         return false;
     }
     let _screen = SCREEN.lock();
+    let d = dims();
 
-    let x1 = x.saturating_add(width).min(WIDTH);
-    let y1 = y.saturating_add(height).min(HEIGHT);
+    let x1 = x.saturating_add(width).min(d.width);
+    let y1 = y.saturating_add(height).min(d.height);
     if x >= x1 || y >= y1 {
         return true;
     }
@@ -227,7 +282,7 @@ pub fn fill_rect(x: usize, y: usize, width: usize, height: usize, color: u32) ->
     let fb = buffer();
     let color = color & 0x00ff_ffff;
     for row in y..y1 {
-        fb[row * WIDTH + x..row * WIDTH + x1].fill(color);
+        fb[row * d.width + x..row * d.width + x1].fill(color);
     }
     true
 }

@@ -219,6 +219,9 @@ pub extern "C" fn kmain(dtb: usize) -> ! {
     // Phases 17-18: linear framebuffer and mirrored text console.
     println!();
     println!("Phases 17-18: framebuffer display and text console");
+    if let Some((width, height)) = boot.fb_resolution {
+        fb::configure(width as usize, height as usize);
+    }
     fb::init();
 
     // Phase 30: virtio-input keyboard (shares the UART line editor).
