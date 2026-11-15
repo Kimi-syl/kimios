@@ -7,23 +7,41 @@
 use crate::font_data::{self, Font};
 
 const LOGICAL_WIDTH: i64 = 480;
-const LOGICAL_HEIGHT: i64 = 800;
+const APP_HEIGHT: i64 = 800;
 
 pub struct Screen {
     pixels: *mut u32,
     physical_width: i64,
     physical_height: i64,
     stride: i64,
+    logical_height: i64,
+    app_space: core::cell::Cell<bool>,
 }
 
 impl Screen {
     pub fn new(base: u64, width: u64, height: u64, stride_bytes: u64) -> Self {
+        let physical_width = width as i64;
+        let physical_height = height as i64;
+        let logical_height = (LOGICAL_WIDTH * physical_height / physical_width).max(480);
         Self {
             pixels: base as *mut u32,
-            physical_width: width as i64,
-            physical_height: height as i64,
+            physical_width,
+            physical_height,
             stride: (stride_bytes / 4) as i64,
+            logical_height,
+            app_space: core::cell::Cell::new(false),
         }
+    }
+
+    /// Apps are laid out in a fixed 480x800 space; on shorter/wider screens
+    /// that space is mapped onto the full framebuffer (uniform compression).
+    pub fn set_app_space(&self, enabled: bool) {
+        self.app_space.set(enabled);
+    }
+
+    /// Compress a design-space y into the real logical height (home/lock).
+    pub fn sy(&self, y: i64) -> i64 {
+        y * self.height() / APP_HEIGHT
     }
 
     pub fn width(&self) -> i64 {
@@ -31,7 +49,7 @@ impl Screen {
     }
 
     pub fn height(&self) -> i64 {
-        LOGICAL_HEIGHT
+        if self.app_space.get() { APP_HEIGHT } else { self.logical_height }
     }
 
     pub fn pixel(&self, x: i64, y: i64) -> u32 {
@@ -45,7 +63,7 @@ impl Screen {
     }
 
     fn map_y(&self, y: i64) -> i64 {
-        y * self.physical_height / LOGICAL_HEIGHT
+        y * self.physical_height / self.height()
     }
 
     fn solid_run(&self, start: i64, length: i64, color: u32) {

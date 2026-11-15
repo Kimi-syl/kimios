@@ -327,8 +327,10 @@ fn handle(screen: &Screen, ui: &mut Ui, event: k::InputEvent, clock: [u64; 7]) -
 }
 
 fn tapped(screen: &Screen, ui: &mut Ui, point: (i64, i64), clock: [u64; 7]) {
+    let logical_height = screen.height();
+    let app_point = (point.0, point.1 * 800 / logical_height);
     if ui.shade {
-        shade_tap(screen, ui, point, clock);
+        shade_tap(screen, ui, app_point, clock);
         return;
     }
     if point.1 < 30 {
@@ -347,7 +349,7 @@ fn tapped(screen: &Screen, ui: &mut Ui, point: (i64, i64), clock: [u64; 7]) {
             }
         }
         Scene::App(app) => {
-            if back_hit(screen, point) {
+            if back_hit(screen, app_point) {
                 close_app(screen, ui, clock);
                 return;
             }
@@ -357,16 +359,16 @@ fn tapped(screen: &Screen, ui: &mut Ui, point: (i64, i64), clock: [u64; 7]) {
             }
             match app {
                 AppKind::Calculator => {
-                    if let Some(index) = calculator_hit(point) {
+                    if let Some(index) = calculator_hit(app_point) {
                         ui.calc.press(CALCULATOR_LABELS[index]);
                     }
                 }
                 AppKind::Settings => {
-                    if let Some(row) = settings_hit(screen, point) {
+                    if let Some(row) = settings_hit(screen, app_point) {
                         toggle_settings(&mut ui.settings, row);
                     }
                 }
-                _ => apps::tap(screen, &mut ui.apps, app, point, clock),
+                _ => apps::tap(screen, &mut ui.apps, app, app_point, clock),
             }
             render(screen, ui, clock);
         }
@@ -374,7 +376,7 @@ fn tapped(screen: &Screen, ui: &mut Ui, point: (i64, i64), clock: [u64; 7]) {
 }
 
 fn shade_tap(screen: &Screen, ui: &mut Ui, point: (i64, i64), clock: [u64; 7]) {
-    let height = screen.height();
+    let height = 800;
     if point.1 > 610 {
         toggle_shade(screen, ui, clock, false);
         return;
@@ -519,6 +521,7 @@ fn draw_wallpaper(screen: &Screen, y_offset: i64, dark: bool) {
 }
 
 fn draw_status_bar(screen: &Screen, clock: [u64; 7], ui: &Ui) {
+    screen.set_app_space(false);
     let width = screen.width();
     screen.fill(0, 0, width, 28, BLACK);
 
@@ -552,13 +555,14 @@ fn draw_status_bar(screen: &Screen, clock: [u64; 7], ui: &Ui) {
 }
 
 fn draw_lock(screen: &Screen, clock: [u64; 7], y_offset: i64) {
+    screen.set_app_space(false);
     let width = screen.width();
     let center = width / 2;
 
     let mut date = [0u8; 16];
     format_date(clock, &mut date);
-    screen.text(28, 58 + y_offset, str_of(&date), 2, MUTED);
-    screen.text(28, 82 + y_offset, "KIMIOS PREVIEW", 1, 0x0060_606c);
+    screen.text(28, screen.sy(58) + y_offset, str_of(&date), 2, MUTED);
+    screen.text(28, screen.sy(82) + y_offset, "KIMIOS PREVIEW", 1, 0x0060_606c);
 
     let mut time = [0u8; 5];
     format_time(clock[4], clock[5], &mut time);
@@ -566,7 +570,7 @@ fn draw_lock(screen: &Screen, clock: [u64; 7], y_offset: i64) {
     let clock_width = Screen::dots_text_width(str_of(&time), cells);
     screen.text_dots(
         center - clock_width / 2,
-        120 + y_offset,
+        screen.sy(120) + y_offset,
         str_of(&time),
         cells,
         3,
@@ -576,7 +580,7 @@ fn draw_lock(screen: &Screen, clock: [u64; 7], y_offset: i64) {
     notification_card(
         screen,
         28,
-        260 + y_offset,
+        screen.sy(260) + y_offset,
         RED,
         "Messages",
         "3 new messages",
@@ -585,7 +589,7 @@ fn draw_lock(screen: &Screen, clock: [u64; 7], y_offset: i64) {
     notification_card(
         screen,
         28,
-        366 + y_offset,
+        screen.sy(366) + y_offset,
         0x00b8_c4ff,
         "System",
         "KimiOS 0.1 is up to date",
@@ -594,10 +598,10 @@ fn draw_lock(screen: &Screen, clock: [u64; 7], y_offset: i64) {
 
     // Fingerprint target: three broken ridges opening at the bottom.
     for (radius, inner, outer) in [(33i64, 6usize, 54usize), (25, 9, 51), (17, 12, 48)] {
-        draw_arc(screen, center, 540 + y_offset, radius, inner, outer, 3, RED);
+        draw_arc(screen, center, screen.sy(540) + y_offset, radius, inner, outer, 3, RED);
     }
-    screen.text_centered(center, 590 + y_offset, "Touch to unlock", 2, TEXT);
-    screen.text_centered(center, 620 + y_offset, "tap / swipe up / enter", 1, 0x0060_606c);
+    screen.text_centered(center, screen.sy(590) + y_offset, "Touch to unlock", 2, TEXT);
+    screen.text_centered(center, screen.sy(620) + y_offset, "tap / swipe up / enter", 1, 0x0060_606c);
 
     draw_home_indicator(screen);
 }
@@ -612,12 +616,20 @@ fn notification_card(
     age: &str,
 ) {
     let width = screen.width() - 56;
-    screen.round_rect(x, y, width, 92, 26, SURFACE);
-    screen.circle(x + 38, y + 46, 16, accent);
-    screen.circle(x + 38, y + 46, 6, BLACK);
-    screen.text(x + 68, y + 20, title, 2, TEXT);
-    screen.text(x + 68, y + 48, body, 1, MUTED);
-    screen.text(x + width - 34, y + 22, age, 1, 0x0060_606c);
+    let height = screen.sy(92);
+    screen.round_rect(x, y, width, height, 26, SURFACE);
+    screen.circle(x + 38, y + height / 2, 16, accent);
+    screen.circle(x + 38, y + height / 2, 6, BLACK);
+    screen.text(x + 68, y + height * 22 / 100, title, 2, TEXT);
+    screen.text(x + 68, y + height * 52 / 100, body, 1, MUTED);
+    screen.text(x + width - 34, y + height * 24 / 100, age, 1, 0x0060_606c);
+}
+
+fn grid_metrics(height: i64) -> (i64, i64, i64) {
+    let top = if height < 720 { height * 140 / 800 } else { height * 330 / 800 };
+    let spacing = (height - 160 - top) / 3;
+    let icon = spacing.saturating_sub(34).min(60).max(30);
+    (top, spacing, icon)
 }
 
 fn draw_home(
@@ -628,48 +640,53 @@ fn draw_home(
     y_offset: i64,
     paint_bg: bool,
 ) {
+    screen.set_app_space(false);
     let (width, height) = (screen.width(), screen.height());
+    let compact = height < 720;
 
     if paint_bg {
         draw_wallpaper(screen, y_offset, ui.settings.dark);
     }
 
     // At-a-glance / clock widget.
-    screen.round_rect(24, 44 + y_offset, width - 48, 82, 26, SURFACE);
+    screen.round_rect(24, screen.sy(44) + y_offset, width - 48, screen.sy(82), 26, SURFACE);
     let mut time = [0u8; 5];
     format_time(clock[4], clock[5], &mut time);
-    screen.text(48, 56 + y_offset, str_of(&time), 3, TEXT);
+    screen.text(48, screen.sy(56) + y_offset, str_of(&time), 3, TEXT);
     let mut date = [0u8; 16];
     format_date(clock, &mut date);
-    screen.text(48, 94 + y_offset, str_of(&date), 1, MUTED);
-    screen.text(width - 48 - Screen::text_width("22", 3), 60 + y_offset, "22", 3, RED);
-    screen.text(width - 76, 96 + y_offset, "CLEAR", 1, MUTED);
+    screen.text(48, screen.sy(94) + y_offset, str_of(&date), 1, MUTED);
+    screen.text(width - 48 - Screen::text_width("22", 3), screen.sy(60) + y_offset, "22", 3, RED);
+    screen.text(width - 76, screen.sy(96) + y_offset, "CLEAR", 1, MUTED);
 
-    // Search pill.
-    screen.round_rect(24, 142 + y_offset, width - 48, 54, 27, SURFACE_HI);
-    screen.ring(54, 169 + y_offset, 8, 2, MUTED);
-    screen.line(60, 175 + y_offset, 66, 181 + y_offset, 2, MUTED);
-    screen.text(80, 162 + y_offset, "Search", 2, MUTED);
+    if !compact {
+        // Search pill.
+        screen.round_rect(24, screen.sy(142) + y_offset, width - 48, screen.sy(54), 27, SURFACE_HI);
+        screen.ring(54, screen.sy(169) + y_offset, 8, 2, MUTED);
+        screen.line(60, screen.sy(175) + y_offset, 66, screen.sy(181) + y_offset, 2, MUTED);
+        screen.text(80, screen.sy(162) + y_offset, "Search", 2, MUTED);
 
-    // Music widget.
-    let music_y = 212 + y_offset;
-    let (title, subtitle, playing, progress) = apps::home_music(&ui.apps.music);
-    screen.round_rect(24, music_y, width - 48, 100, 28, SURFACE);
-    screen.round_rect(42, music_y + 18, 64, 64, 20, SURFACE_HI);
-    screen.circle(74, music_y + 50, 18, RED_DIM);
-    screen.circle(74, music_y + 50, 7, RED);
-    screen.text(122, music_y + 20, title, 2, TEXT);
-    screen.text(122, music_y + 48, subtitle, 1, MUTED);
-    draw_play(screen, width - 76, music_y + 50, playing);
-    screen.round_rect(122, music_y + 76, width - 190, 4, 2, OUTLINE);
-    screen.round_rect(122, music_y + 76, (width - 190) * progress / 1000, 4, 2, RED);
+        // Music widget.
+        let music_y = screen.sy(212) + y_offset;
+        let (title, subtitle, playing, progress) = apps::home_music(&ui.apps.music);
+        screen.round_rect(24, music_y, width - 48, screen.sy(100), 28, SURFACE);
+        screen.round_rect(42, music_y + screen.sy(18), 64, 64, 20, SURFACE_HI);
+        screen.circle(74, music_y + screen.sy(50), 18, RED_DIM);
+        screen.circle(74, music_y + screen.sy(50), 7, RED);
+        screen.text(122, music_y + screen.sy(20), title, 2, TEXT);
+        screen.text(122, music_y + screen.sy(48), subtitle, 1, MUTED);
+        draw_play(screen, width - 76, music_y + screen.sy(50), playing);
+        screen.round_rect(122, music_y + screen.sy(76), width - 190, 4, 2, OUTLINE);
+        screen.round_rect(122, music_y + screen.sy(76), (width - 190) * progress / 1000, 4, 2, RED);
+    }
 
     // App grid.
+    let (_, _, icon) = grid_metrics(height);
     let pressed = pressed;
     for (index, app) in GRID.iter().enumerate() {
-        let (cx, cy) = grid_center(width, index);
-        draw_app_icon(screen, *app, cx, cy + y_offset, 60, pressed == Some(*app));
-        screen.text_centered(cx, cy + 40 + y_offset, app.label(), 1, MUTED);
+        let (cx, cy) = grid_center(width, height, index);
+        draw_app_icon(screen, *app, cx, cy + y_offset, icon, pressed == Some(*app));
+        screen.text_centered(cx, cy + icon / 2 + 12 + y_offset, app.label(), 1, MUTED);
     }
 
     // Material 3 page indicator.
@@ -916,6 +933,7 @@ fn draw_app(
     x_offset: i64,
     paint_bg: bool,
 ) {
+    screen.set_app_space(true);
     let x = x_offset;
     let width = screen.width();
     let height = screen.height();
@@ -1168,6 +1186,7 @@ fn draw_placeholder(screen: &Screen, app: AppKind, x_offset: i64) {
 }
 
 fn draw_shade(screen: &Screen, ui: &Ui, clock: [u64; 7], y_offset: i64) {
+    screen.set_app_space(true);
     let width = screen.width();
     let height = screen.height();
     let sheet = 610;
@@ -1303,31 +1322,38 @@ fn shade_toggle_hit(point: (i64, i64)) -> Option<usize> {
     None
 }
 
-fn back_hit(screen: &Screen, point: (i64, i64)) -> bool {
-    let bottom = screen.height() - 30;
+fn back_hit(_screen: &Screen, point: (i64, i64)) -> bool {
+    let bottom = 800 - 30;
     (point.0 < 76 && point.1 > 30 && point.1 < 96) || point.1 > bottom
 }
 
 fn music_hit(screen: &Screen, point: (i64, i64)) -> bool {
+    if screen.height() < 720 {
+        return false;
+    }
     point.0 >= screen.width() - 108
         && point.0 <= screen.width() - 44
         && point.1 >= 224
         && point.1 <= 300
 }
 
-fn grid_center(width: i64, index: usize) -> (i64, i64) {
+fn grid_center(width: i64, height: i64, index: usize) -> (i64, i64) {
+    let (top, spacing, _) = grid_metrics(height);
     let column = index % 4;
     let row = index / 4;
     let cx = width / 2 + (column as i64 - 1) * 112 - 56;
-    let cy = 356 + row as i64 * 114;
+    let cy = top + spacing / 2 + row as i64 * spacing;
     (cx, cy)
 }
 
 fn home_hit(screen: &Screen, point: (i64, i64)) -> Option<AppKind> {
     let width = screen.width();
+    let height = screen.height();
+    let (_, _, icon) = grid_metrics(height);
+    let reach = icon / 2 + 10;
     for (index, app) in GRID.iter().enumerate() {
-        let (cx, cy) = grid_center(width, index);
-        if (point.0 - cx).abs() <= 38 && (point.1 - cy).abs() <= 38 {
+        let (cx, cy) = grid_center(width, height, index);
+        if (point.0 - cx).abs() <= reach && (point.1 - cy).abs() <= reach {
             return Some(*app);
         }
     }
