@@ -138,6 +138,32 @@ impl Browser {
     }
 }
 
+pub struct ApkApp {
+    names: [[u8; 32]; 8],
+    name_lens: [usize; 8],
+    count: usize,
+    selected: Option<usize>,
+    info: k::apk::ApkInfo,
+}
+
+impl ApkApp {
+    fn refresh(&mut self) {
+        self.count = 0;
+        self.selected = None;
+        let mut buffer = [0u8; 512];
+        if let Some(n) = k::listdir("/disk", &mut buffer) {
+            for name in buffer[..n].split(|&b| b == 0) {
+                if name.len() > 4 && &name[name.len() - 4..] == b".apk" && self.count < 8 {
+                    let len = name.len().min(32);
+                    self.names[self.count][..len].copy_from_slice(&name[..len]);
+                    self.name_lens[self.count] = len;
+                    self.count += 1;
+                }
+            }
+        }
+    }
+}
+
 pub struct Apps {
     pub phone: Phone,
     pub messages: Messages,
@@ -150,6 +176,7 @@ pub struct Apps {
     pub weather: Weather,
     pub terminal: Terminal,
     pub browser: Browser,
+    pub apk: ApkApp,
 }
 
 const KEY_LABELS: [&str; 12] = [
@@ -532,6 +559,13 @@ impl Apps {
             },
             terminal,
             browser: Browser::new(),
+            apk: ApkApp {
+                names: [[0; 32]; 8],
+                name_lens: [0; 8],
+                count: 0,
+                selected: None,
+                info: k::apk::ApkInfo::new(),
+            },
         }
     }
 }
@@ -542,6 +576,7 @@ pub fn open(apps: &mut Apps, app: AppKind) {
         AppKind::Files => apps.files.refresh(),
         AppKind::Camera => apps.camera.status_len = 0,
         AppKind::Browser => apps.browser.editing = apps.browser.line_count == 0,
+        AppKind::Apk => apps.apk.refresh(),
         _ => {}
     }
 }
@@ -549,6 +584,13 @@ pub fn open(apps: &mut Apps, app: AppKind) {
 pub fn back(apps: &mut Apps, app: AppKind) -> bool {
     match app {
         AppKind::Browser => false,
+        AppKind::Apk => {
+            if apps.apk.selected.take().is_some() {
+                true
+            } else {
+                false
+            }
+        }
         AppKind::Messages => {
             if apps.messages.open.take().is_some() {
                 apps.messages.draft_len = 0;
@@ -981,6 +1023,7 @@ pub fn tap(screen: &Screen, apps: &mut Apps, app: AppKind, point: (i64, i64), _c
         AppKind::Files => files_tap(apps, point),
         AppKind::Weather => weather_tap(apps, point),
         AppKind::Browser => browser_tap(apps, point),
+        AppKind::Apk => apk_tap(apps, point),
         _ => {}
     }
 }
@@ -1227,6 +1270,7 @@ pub fn draw(screen: &Screen, apps: &Apps, app: AppKind, clock: [u64; 7]) {
         AppKind::Weather => draw_weather(screen, &apps.weather, clock),
         AppKind::Terminal => draw_terminal(screen, &apps.terminal),
         AppKind::Browser => draw_browser(screen, &apps.browser),
+        AppKind::Apk => draw_apk(screen, &apps.apk),
         _ => {}
     }
 }
@@ -2163,4 +2207,121 @@ fn draw_browser(screen: &Screen, browser: &Browser) {
     screen.round_rect(width - 60, 700, 44, 40, 12, SURFACE_HI);
     screen.text_centered(width - 38, 710, "dn", 1, TEXT);
     screen.text(20, 712, slice_str(&browser.status[..browser.status_len]), 1, MUTED);
+}
+
+fn apk_tap(apps: &mut Apps, point: (i64, i64)) {
+    if apps.apk.selected.is_some() {
+        apps.apk.selected = None;
+        return;
+    }
+    if point.1 >= 120 {
+        let index = ((point.1 - 120) / 56) as usize;
+        if index < apps.apk.count && point.0 >= 20 && point.0 < 460 {
+            let mut path = [0u8; 48];
+            let prefix = b"/disk/";
+            path[..prefix.len()].copy_from_slice(prefix);
+            let len = apps.apk.name_lens[index];
+            path[prefix.len()..prefix.len() + len]
+                .copy_from_slice(&apps.apk.names[index][..len]);
+            let path_str = slice_str(&path[..prefix.len() + len]);
+            apps.apk.info = k::apk::ApkInfo::new();
+            k::apk::inspect_apk(path_str, &mut apps.apk.info);
+            apps.apk.selected = Some(index);
+        }
+    }
+}
+
+fn draw_apk_field(screen: &Screen, x: i64, y: i64, label: &str, value: &[u8], len: usize) {
+    screen.text(x, y, label, 1, MUTED);
+    screen.text(x + 90, y, slice_str(&value[..len]), 1, TEXT);
+}
+
+fn draw_apk(screen: &Screen, apk: &ApkApp) {
+    let width = screen.width();
+    screen.fill(0, 93, width, screen.height() - 93, BLACK);
+
+    if let Some(index) = apk.selected {
+        let info = &apk.info;
+        screen.text(20, 104, slice_str(&apk.names[index][..apk.name_lens[index]]), 2, TEXT);
+        if !info.valid {
+            screen.text(20, 150, "Could not parse this APK", 1, RED);
+            screen.text(20, 700, "tap to go back", 1, MUTED);
+            return;
+        }
+        draw_apk_field(screen, 20, 140, "package", &info.package, info.package_len);
+        draw_apk_field(screen, 20, 162, "version", &info.version_name, info.version_name_len);
+        draw_apk_field(screen, 20, 184, "label", &info.label, info.label_len);
+        screen.text(20, 206, "sdk", 1, MUTED);
+        screen.text(110, 206, "min", 1, TEXT);
+        screen.text(140, 206, slice_str(&num_buf(info.min_sdk)), 1, TEXT);
+        screen.text(180, 206, "target", 1, TEXT);
+        screen.text(225, 206, slice_str(&num_buf(info.target_sdk)), 1, TEXT);
+
+        let mut y = 238i64;
+        screen.text(20, y, "PERMISSIONS", 1, RED);
+        y += 20;
+        for i in 0..info.permission_count {
+            if y > 560 {
+                break;
+            }
+            let full = &info.permissions[i][..info.permission_lens[i]];
+            let short = full.strip_prefix(b"android.permission.").unwrap_or(full);
+            screen.text(28, y, slice_str(short), 1, TEXT);
+            y += 17;
+        }
+        y += 8;
+        screen.text(20, y, "ACTIVITIES", 1, RED);
+        y += 20;
+        for i in 0..info.activity_count {
+            if y > 640 {
+                break;
+            }
+            screen.text(28, y, slice_str(&info.activities[i][..info.activity_lens[i]]), 1, TEXT);
+            y += 17;
+        }
+        if info.has_dex {
+            screen.text(20, 664, "DEX", 1, RED);
+            screen.text(60, 664, "classes", 1, MUTED);
+            screen.text(115, 664, slice_str(&num_buf(info.dex_classes)), 1, TEXT);
+            screen.text(150, 664, "methods", 1, MUTED);
+            screen.text(210, 664, slice_str(&num_buf(info.dex_methods)), 1, TEXT);
+        }
+        screen.text(20, 700, "inspection only — tap to go back", 1, MUTED);
+        return;
+    }
+
+    screen.text(20, 104, "APK files on /disk", 2, TEXT);
+    if apk.count == 0 {
+        screen.text_centered(width / 2, 380, "No .apk files found", 2, MUTED);
+        screen.text_centered(width / 2, 416, "Insert one via the Android app", 1, 0x0050_505a);
+        return;
+    }
+    for i in 0..apk.count {
+        let y = 120 + i as i64 * 56;
+        screen.round_rect(20, y, width - 40, 48, 16, SURFACE);
+        screen.text(36, y + 16, slice_str(&apk.names[i][..apk.name_lens[i]]), 2, TEXT);
+    }
+}
+
+fn num_buf(value: u32) -> [u8; 12] {
+    let mut buf = [0u8; 12];
+    let mut tmp = [0u8; 12];
+    let mut n = value;
+    let mut len = 0;
+    if n == 0 {
+        buf[0] = b'0';
+        return buf;
+    }
+    while n > 0 && len < 12 {
+        tmp[len] = b'0' + (n % 10) as u8;
+        n /= 10;
+        len += 1;
+    }
+    let mut i = 0;
+    while len > 0 {
+        len -= 1;
+        buf[i] = tmp[len];
+        i += 1;
+    }
+    buf
 }

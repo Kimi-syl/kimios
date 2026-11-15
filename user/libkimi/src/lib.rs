@@ -6,6 +6,8 @@
 
 #![no_std]
 
+pub mod apk;
+
 use core::arch::asm;
 
 pub const SYS_WRITE: u64 = 1;

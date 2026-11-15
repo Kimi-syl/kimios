@@ -124,6 +124,15 @@ Target-independent, implemented before display/device work:
     Notes, Maps, Photos, Files, Weather and Terminal are interactive; the GUI
     starts at boot and ESC returns to the shell. UI animations are now an
     experimental, default-off Settings toggle.
+30. ~~Real networking.~~ Done: virtio-net driver + smoltcp (Ethernet/ARP/IPv4/
+    ICMP/UDP/TCP), DHCP, DNS, and a TCP socket syscall API. Verified with a
+    live DNS lookup and HTTP fetch over QEMU user-mode NAT.
+31. ~~Mini web browser.~~ Done: a GUI browser (URL bar, DNS+TCP+HTTP/1.0,
+    HTML-to-text renderer with title/word-wrap/scroll). Renders live pages.
+32. ~~APK inspector.~~ Done: ZIP + DEFLATE + binary-AXML manifest + DEX header
+    parser in libkimi, exposed as a shell command and a GUI app. Inspects
+    package/version/permissions/activities/DEX. Execution of real APKs is out
+    of scope (needs the Android runtime) — see docs/android-feasibility.md.
 
 EL0 processes are preempted by the timer (50 ms quantum, round-robin among
 `Ready` processes), and a process blocked in `read` yields the CPU. Syscalls

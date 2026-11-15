@@ -113,7 +113,7 @@ pub extern "C" fn _start() -> ! {
     k::print("\nKimiOS user shell (libkimi), pid ");
     k::print_u64(k::getpid());
     k::print("\n");
-    k::print("Commands: ls, cat, write, rm, mv, mkdir, rmdir, df, net, dns, fetch, date, stat, time, sleep, spawn, run, wait, ps, kill, mem, exec, help, exit\n");
+    k::print("Commands: ls, cat, write, rm, mv, mkdir, rmdir, df, net, dns, fetch, apk, date, stat, time, sleep, spawn, run, wait, ps, kill, mem, exec, help, exit\n");
 
     let mut line = [0u8; 128];
     let mut path_buffer = [0u8; 96];
@@ -371,6 +371,58 @@ pub extern "C" fn _start() -> ! {
                 }
                 None => k::print("stat: not found\n"),
             }
+        } else if command == &b"apk"[..] {
+            let Some(path) = with_slash(argument, &mut path_buffer) else {
+                k::print("usage: apk <file.apk>\n");
+                continue;
+            };
+            let mut info = k::apk::ApkInfo::new();
+            if !k::apk::inspect_apk(path, &mut info) {
+                k::print("apk: not a readable APK\n");
+                continue;
+            }
+            k::print("package:    ");
+            k::print_bytes(&info.package[..info.package_len]);
+            k::print("\nversion:    ");
+            k::print_bytes(&info.version_name[..info.version_name_len]);
+            k::print(" (code ");
+            k::print_u64(info.version_code as u64);
+            k::print(")\nlabel:      ");
+            k::print_bytes(&info.label[..info.label_len]);
+            k::print("\nsdk:        min ");
+            k::print_u64(info.min_sdk as u64);
+            k::print(", target ");
+            k::print_u64(info.target_sdk as u64);
+            k::print("\nfiles:      ");
+            k::print_u64(info.file_count as u64);
+            k::print("\npermissions (");
+            k::print_u64(info.permission_count as u64);
+            k::print("):\n");
+            for i in 0..info.permission_count {
+                k::print("  ");
+                k::print_bytes(&info.permissions[i][..info.permission_lens[i]]);
+                k::print("\n");
+            }
+            k::print("activities (");
+            k::print_u64(info.activity_count as u64);
+            k::print("):\n");
+            for i in 0..info.activity_count {
+                k::print("  ");
+                k::print_bytes(&info.activities[i][..info.activity_lens[i]]);
+                k::print("\n");
+            }
+            if info.has_dex {
+                k::print("dex:        v");
+                k::print_bytes(&info.dex_version[..3]);
+                k::print(", classes ");
+                k::print_u64(info.dex_classes as u64);
+                k::print(", methods ");
+                k::print_u64(info.dex_methods as u64);
+                k::print(", size ");
+                k::print_u64(info.dex_size as u64);
+                k::print("\n");
+            }
+            k::print("(inspection only — running APKs needs the Android runtime)\n");
         } else if command == &b"net"[..] {
             let timeout = parse_u64(argument).unwrap_or(5000);
             k::net_status(timeout);
