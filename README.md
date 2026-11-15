@@ -1076,8 +1076,10 @@ run* above instead of `-display gtk`.
   24 px threshold.
 
 Everything is drawn by a small user-space renderer (`draw.rs`): clipped fills,
-rounded rectangles, circles, rings, Bresenham lines, vertical gradients,
-alpha-blended surfaces, dot-matrix glyphs and 8x8 text. The status bar and
+rounded rectangles, circles, rings, Bresenham lines, vertical gradients and
+alpha-blended surfaces. Text uses the official Nothing OS typefaces — NType82
+for the UI, Ndot-55 for clocks, NType82Mono for the terminal — rasterized to
+alpha atlases and rendered with bilinear sampling. The status bar and
 Clock redraw on the minute/second boundary; no cursor is drawn because the UI
 is touch-first.
 

@@ -7,7 +7,7 @@
 
 mod apps;
 mod draw;
-mod font;
+mod font_data;
 
 use core::panic::PanicInfo;
 

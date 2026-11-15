@@ -4,7 +4,7 @@
 //! maps to the 1080x1920 framebuffer with integer scaling. Text is sampled
 //! with 4x supersampling so glyph edges are anti-aliased instead of blocky.
 
-use crate::font::FONT8X8;
+use crate::font_data::{self, Font};
 
 const LOGICAL_WIDTH: i64 = 480;
 const LOGICAL_HEIGHT: i64 = 800;
@@ -295,75 +295,107 @@ impl Screen {
         }
     }
 
-    /// Anti-aliased ASCII text. Returns the logical x just past the text.
+    /// Nothing OS type (NType82), anti-aliased. `scale` keeps the old
+    /// 8px-cell layout units; the em size is 11 logical px per scale step.
     pub fn text(&self, x: i64, y: i64, text: &str, scale: i64, color: u32) -> i64 {
-        let origin_x = self.map_x(x);
-        let origin_y = self.map_y(y);
-        let advance = (self.map_x(x + 9 * scale) - origin_x).max(1);
-        let cell_width = (self.map_x(x + 8 * scale) - origin_x).max(1);
-        let cell_height = (self.map_x(x + 8 * scale) - origin_x).max(1);
-        let mut cursor = origin_x;
+        self.font_text(x, y, text, 11 * scale, color, &font_data::SANS)
+    }
 
-        if scale == 1 {
-            for byte in text.bytes() {
-                if byte < 0x20 || byte > 0x7e {
-                    cursor += advance;
-                    continue;
-                }
-                let glyph = &FONT8X8[(byte - 0x20) as usize];
-                for (sy, bits) in glyph.iter().enumerate() {
-                    for sx in 0..8 {
-                        if bits & (1 << sx) == 0 {
-                            continue;
-                        }
-                        let x0 = cursor + sx as i64 * cell_width / 8;
-                        let x1 = cursor + (sx as i64 + 1) * cell_width / 8;
-                        let y0 = origin_y + sy as i64 * cell_height / 8;
-                        let y1 = origin_y + (sy as i64 + 1) * cell_height / 8;
-                        self.phys_fill(x0, y0, (x1 - x0).max(1), (y1 - y0).max(1), color);
-                    }
-                }
-                cursor += advance;
-            }
-            return x + text.len() as i64 * 9 * scale - scale;
-        }
+    pub fn text_mono(&self, x: i64, y: i64, text: &str, scale: i64, color: u32) -> i64 {
+        self.font_text(x, y, text, 11 * scale, color, &font_data::MONO)
+    }
 
-        let step_u = ((8 << 8) << 8) / cell_width;
-        let step_v = ((8 << 8) << 8) / cell_height;
-
+    pub fn font_text(
+        &self,
+        x: i64,
+        y: i64,
+        text: &str,
+        size: i64,
+        color: u32,
+        font: &Font,
+    ) -> i64 {
+        let em = font.em as i64;
+        let mut pen = x;
         for byte in text.bytes() {
             if byte < 0x20 || byte > 0x7e {
-                cursor += advance;
+                pen += size * 4 / 10;
                 continue;
             }
-            let glyph = &FONT8X8[(byte - 0x20) as usize];
-            let mut v = 0i64;
-            for row in 0..cell_height {
-                let mut u = 0i64;
-                for column in 0..cell_width {
-                    let mut hits = 0;
-                    for (du, dv) in [(64, 64), (192, 64), (64, 192), (192, 192)] {
-                        let su = ((u + du * 256) >> 16).min(7) as usize;
-                        let sv = ((v + dv * 256) >> 16).min(7) as usize;
-                        if glyph[sv] & (1 << su) != 0 {
-                            hits += 1;
-                        }
-                    }
-                    if hits > 0 {
-                        let coverage = hits * 255 / 4;
-                        self.phys_blend(cursor + column, origin_y + row, color, coverage);
-                    }
-                    u += step_u;
-                }
-                v += step_v;
+            let glyph = &font.glyphs[(byte - 0x20) as usize];
+            if glyph.w > 0 && glyph.h > 0 {
+                self.draw_font_glyph(font, glyph, pen, y, size, color);
             }
-            cursor += advance;
+            pen += glyph.advance as i64 * size / em;
         }
-        x + text.len() as i64 * 9 * scale - scale
+        pen
+    }
+
+    fn draw_font_glyph(
+        &self,
+        font: &Font,
+        glyph: &font_data::Glyph,
+        pen_x: i64,
+        pen_y: i64,
+        size: i64,
+        color: u32,
+    ) {
+        let em = font.em as i64;
+        let gx = pen_x + glyph.x0 as i64 * size / em;
+        let gy = pen_y + glyph.y0 as i64 * size / em;
+        let gw = ((glyph.w as i64 * size + em - 1) / em).max(1);
+        let gh = ((glyph.h as i64 * size + em - 1) / em).max(1);
+        let ox = self.map_x(gx);
+        let oy = self.map_y(gy);
+        let pw = (self.map_x(gx + gw) - ox).max(1);
+        let ph = (self.map_y(gy + gh) - oy).max(1);
+
+        let w = glyph.w as i64;
+        let h = glyph.h as i64;
+        let step_u = (w << 16) / pw;
+        let step_v = (h << 16) / ph;
+        let base = glyph.offset as usize;
+
+        let mut v = step_v / 2;
+        for py in 0..ph {
+            let sv = (v >> 16).min(h - 1);
+            let sv1 = (sv + 1).min(h - 1);
+            let fv = v & 0xffff;
+            let mut u = step_u / 2;
+            for px in 0..pw {
+                let su = (u >> 16).min(w - 1);
+                let su1 = (su + 1).min(w - 1);
+                let fu = u & 0xffff;
+                let a00 = font.alpha[base + (sv * w + su) as usize] as i64;
+                let a10 = font.alpha[base + (sv * w + su1) as usize] as i64;
+                let a01 = font.alpha[base + (sv1 * w + su) as usize] as i64;
+                let a11 = font.alpha[base + (sv1 * w + su1) as usize] as i64;
+                let top = a00 + ((a10 - a00) * fu >> 16);
+                let bot = a01 + ((a11 - a01) * fu >> 16);
+                let alpha = top + ((bot - top) * fv >> 16);
+                if alpha > 0 {
+                    self.phys_blend(ox + px, oy + py, color, alpha as u32);
+                }
+                u += step_u;
+            }
+            v += step_v;
+        }
     }
 
     pub fn text_width(text: &str, scale: i64) -> i64 {
-        text.len() as i64 * 9 * scale - scale
+        Self::font_width(text, 11 * scale, &font_data::SANS)
+    }
+
+    pub fn font_width(text: &str, size: i64, font: &Font) -> i64 {
+        let em = font.em as i64;
+        let mut width = 0i64;
+        for byte in text.bytes() {
+            if byte < 0x20 || byte > 0x7e {
+                width += size * 4 / 10;
+                continue;
+            }
+            width += font.glyphs[(byte - 0x20) as usize].advance as i64 * size / em;
+        }
+        width
     }
 
     pub fn text_centered(&self, cx: i64, y: i64, text: &str, scale: i64, color: u32) {
@@ -371,39 +403,13 @@ impl Screen {
         self.text(x, y, text, scale, color);
     }
 
-    pub fn text_dots(&self, x: i64, y: i64, text: &str, cell: i64, radius: i64, color: u32) -> i64 {
-        let mut cursor = x;
-        for byte in text.bytes() {
-            if byte == b':' {
-                self.circle(cursor + 3 * cell, y + 2 * cell + cell / 2, radius, color);
-                self.circle(cursor + 3 * cell, y + 6 * cell + cell / 2, radius, color);
-                cursor += 9 * cell;
-                continue;
-            }
-            if byte < 0x20 || byte > 0x7e {
-                cursor += 8 * cell;
-                continue;
-            }
-            let glyph = &FONT8X8[(byte - 0x20) as usize];
-            for (row, bits) in glyph.iter().enumerate() {
-                for column in 0..8 {
-                    if bits & (1 << column) != 0 {
-                        self.circle(
-                            cursor + column as i64 * cell + cell / 2,
-                            y + row as i64 * cell + cell / 2,
-                            radius,
-                            color,
-                        );
-                    }
-                }
-            }
-            cursor += 9 * cell;
-        }
-        cursor
+    /// Nothing OS dot-matrix type (Ndot-55) for clocks.
+    pub fn text_dots(&self, x: i64, y: i64, text: &str, cell: i64, _radius: i64, color: u32) -> i64 {
+        self.font_text(x, y, text, cell * 8, color, &font_data::DOT)
     }
 
     pub fn dots_text_width(text: &str, cell: i64) -> i64 {
-        text.len() as i64 * 9 * cell - cell
+        Self::font_width(text, cell * 8, &font_data::DOT)
     }
 }
 

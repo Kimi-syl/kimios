@@ -1636,15 +1636,15 @@ fn draw_terminal(screen: &Screen, terminal: &Terminal) {
     let mut y = 108i64;
     for index in start..terminal.count {
         let length = terminal.line_len[index] as usize;
-        screen.text(20, y, slice_str(&terminal.lines[index][..length]), 1, TEXT);
+        screen.text_mono(20, y, slice_str(&terminal.lines[index][..length]), 1, TEXT);
         y += 13;
     }
     screen.fill(20, 684, width - 40, 1, OUTLINE);
-    screen.text(20, 700, "$", 2, RED);
+    screen.text_mono(20, 700, "$", 2, RED);
     let shown = terminal.input_len.min(52);
-    screen.text(44, 700, slice_str(&terminal.input[..shown]), 2, TEXT);
+    screen.text_mono(44, 700, slice_str(&terminal.input[..shown]), 2, TEXT);
     if terminal.input_len == 0 {
-        screen.text(44, 700, "type a command", 2, 0x0050_505a);
+        screen.text_mono(44, 700, "type a command", 2, 0x0050_505a);
     }
-    screen.text(20, 744, "help  ls  cat  date  df  mem  ps  uptime  clear", 1, MUTED);
+    screen.text_mono(20, 744, "help  ls  cat  date  df  mem  ps  uptime  clear", 1, MUTED);
 }

@@ -167,7 +167,7 @@ pub fn enable_secondary() {
 /// of the kernel L0/L1/L2 tables with only the user 2 MiB blocks replaced by
 /// private L3 tables. This keeps kernel code, stacks and physical memory
 /// reachable while TTBR0 points at a process.
-pub const MAX_FRAMES: usize = 256;
+pub const MAX_FRAMES: usize = 1024;
 
 pub struct AddressSpace {
     ttbr0: u64,

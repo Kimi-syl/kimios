@@ -1,4 +1,4 @@
-//! A small first-fit heap over a static 1 MiB region.
+//! A small first-fit heap over a static 4 MiB region.
 //!
 //! Blocks carry a 16-byte header (`size`, `next`) and the free list is kept
 //! sorted by address so neighbours can merge on `dealloc`. This replaced the
@@ -9,7 +9,7 @@ use core::alloc::Layout;
 use core::ptr::{addr_of_mut, NonNull};
 use spin::Mutex;
 
-const HEAP_SIZE: usize = 1024 * 1024; // 1 MiB
+const HEAP_SIZE: usize = 4 * 1024 * 1024; // 4 MiB
 const HEADER: usize = 16;
 const MIN_SPLIT: usize = HEADER + 16;
 
