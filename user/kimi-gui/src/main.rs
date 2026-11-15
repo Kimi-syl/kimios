@@ -55,6 +55,7 @@ enum AppKind {
     Files,
     Weather,
     Terminal,
+    Browser,
 }
 
 const GRID: [AppKind; 12] = [
@@ -71,6 +72,15 @@ const GRID: [AppKind; 12] = [
     AppKind::Weather,
     AppKind::Terminal,
 ];
+
+const GRID2: [AppKind; 1] = [AppKind::Browser];
+
+fn page_apps(page: usize) -> &'static [AppKind] {
+    match page {
+        1 => &GRID2,
+        _ => &GRID,
+    }
+}
 
 const DOCK: [AppKind; 4] = [
     AppKind::Phone,
@@ -198,6 +208,7 @@ struct Ui {
     shift: bool,
     shade: bool,
     paint_bg: bool,
+    home_page: usize,
 }
 
 impl Ui {
@@ -212,6 +223,7 @@ impl Ui {
             shift: false,
             shade: false,
             paint_bg: true,
+            home_page: 0,
         }
     }
 }
@@ -313,6 +325,13 @@ fn handle(screen: &Screen, ui: &mut Ui, event: k::InputEvent, clock: [u64; 7]) -
                         let dy = ui.touch.1 - start.1;
                         if dx * dx + dy * dy < 24 * 24 {
                             tapped(screen, ui, ui.touch, clock);
+                        } else if ui.scene == Scene::Home && dx.abs() > 60 && dx.abs() > dy.abs() * 2 {
+                            let next = if dx < 0 { 1 } else { 0 };
+                            if ui.home_page != next {
+                                ui.home_page = next;
+                                ui.paint_bg = true;
+                                render(screen, ui, clock);
+                            }
                         }
                     }
                 }
@@ -341,10 +360,16 @@ fn tapped(screen: &Screen, ui: &mut Ui, point: (i64, i64), clock: [u64; 7]) {
     match ui.scene {
         Scene::Lock => unlock(screen, ui, clock),
         Scene::Home => {
-            if music_hit(screen, point) {
+            if let Some(page) = home_page_hit(screen, point) {
+                if ui.home_page != page {
+                    ui.home_page = page;
+                    ui.paint_bg = true;
+                    render(screen, ui, clock);
+                }
+            } else if music_hit(screen, point) {
                 apps::home_music_toggle(&mut ui.apps);
                 render(screen, ui, clock);
-            } else if let Some(app) = home_hit(screen, point) {
+            } else if let Some(app) = home_hit(screen, point, ui.home_page) {
                 open_app(screen, ui, app, clock);
             }
         }
@@ -494,7 +519,7 @@ fn draw_scene(screen: &Screen, ui: &Ui, clock: [u64; 7], paint_bg: bool) {
             draw_lock(screen, clock, 0);
         }
         Scene::Home => {
-            let pressed = ui.press.and_then(|point| home_hit(screen, point));
+            let pressed = ui.press.and_then(|point| home_hit(screen, point, ui.home_page));
             draw_home(screen, clock, ui, pressed, 0, paint_bg);
         }
         Scene::App(app) => {
@@ -683,17 +708,21 @@ fn draw_home(
     // App grid.
     let (_, _, icon) = grid_metrics(height);
     let pressed = pressed;
-    for (index, app) in GRID.iter().enumerate() {
+    for (index, app) in page_apps(ui.home_page).iter().enumerate() {
         let (cx, cy) = grid_center(width, height, index);
         draw_app_icon(screen, *app, cx, cy + y_offset, icon, pressed == Some(*app));
         screen.text_centered(cx, cy + icon / 2 + 12 + y_offset, app.label(), 1, MUTED);
     }
 
-    // Material 3 page indicator.
+    // Page indicator (two pages).
     let dots_y = height - 152 + y_offset;
-    screen.round_rect(width / 2 - 28, dots_y - 3, 26, 6, 3, RED);
-    for index in 1..3 {
-        screen.circle(width / 2 - 2 + index as i64 * 18, dots_y, 3, OUTLINE);
+    for page in 0..2usize {
+        let dx = width / 2 - 12 + page as i64 * 24;
+        if page == ui.home_page {
+            screen.round_rect(dx - 10, dots_y - 3, 20, 6, 3, RED);
+        } else {
+            screen.circle(dx, dots_y, 3, OUTLINE);
+        }
     }
 
     // Dock.
@@ -878,6 +907,13 @@ fn draw_glyph(screen: &Screen, app: AppKind, cx: i64, cy: i64, size: i64, color:
             screen.line(cx - s / 6, cy - s / 6, cx, cy, 3, color);
             screen.line(cx, cy, cx - s / 6, cy + s / 6, 3, color);
             screen.line(cx + s / 12, cy + s / 6, cx + s / 5, cy + s / 6, 3, color);
+        }
+        AppKind::Browser => {
+            screen.ring(cx, cy, s / 3, thin + 1, color);
+            screen.ring(cx, cy, s / 3, thin + 1, color);
+            screen.line(cx - s / 3, cy, cx + s / 3, cy, thin, color);
+            screen.line(cx, cy - s / 3, cx, cy + s / 3, thin, color);
+            screen.ring(cx, cy, s / 6, thin, color);
         }
     }
 }
@@ -1346,12 +1382,27 @@ fn grid_center(width: i64, height: i64, index: usize) -> (i64, i64) {
     (cx, cy)
 }
 
-fn home_hit(screen: &Screen, point: (i64, i64)) -> Option<AppKind> {
+fn home_page_hit(screen: &Screen, point: (i64, i64)) -> Option<usize> {
+    let width = screen.width();
+    let dots_y = screen.height() - 152;
+    if (point.1 - dots_y).abs() > 16 {
+        return None;
+    }
+    for page in 0..2usize {
+        let dx = width / 2 - 12 + page as i64 * 24;
+        if (point.0 - dx).abs() <= 14 {
+            return Some(page);
+        }
+    }
+    None
+}
+
+fn home_hit(screen: &Screen, point: (i64, i64), page: usize) -> Option<AppKind> {
     let width = screen.width();
     let height = screen.height();
     let (_, _, icon) = grid_metrics(height);
     let reach = icon / 2 + 10;
-    for (index, app) in GRID.iter().enumerate() {
+    for (index, app) in page_apps(page).iter().enumerate() {
         let (cx, cy) = grid_center(width, height, index);
         if (point.0 - cx).abs() <= reach && (point.1 - cy).abs() <= reach {
             return Some(*app);
@@ -1383,6 +1434,7 @@ impl AppKind {
             AppKind::Files => "Files",
             AppKind::Weather => "Weather",
             AppKind::Terminal => "Terminal",
+            AppKind::Browser => "Browser",
         }
     }
 }

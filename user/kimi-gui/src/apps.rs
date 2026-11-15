@@ -92,6 +92,52 @@ pub struct Terminal {
     input_len: usize,
 }
 
+const BROWSER_WIDTH: usize = 50;
+const BROWSER_LINES: usize = 90;
+const BROWSER_BODY: usize = 8000;
+
+pub struct Browser {
+    url: [u8; 128],
+    url_len: usize,
+    editing: bool,
+    lines: [[u8; BROWSER_WIDTH]; BROWSER_LINES],
+    line_len: [u8; BROWSER_LINES],
+    line_count: usize,
+    scroll: usize,
+    status: [u8; 64],
+    status_len: usize,
+    title: [u8; 64],
+    title_len: usize,
+}
+
+impl Browser {
+    fn new() -> Self {
+        let mut browser = Browser {
+            url: [0u8; 128],
+            url_len: 0,
+            editing: true,
+            lines: [[0u8; BROWSER_WIDTH]; BROWSER_LINES],
+            line_len: [0u8; BROWSER_LINES],
+            line_count: 0,
+            scroll: 0,
+            status: [0u8; 64],
+            status_len: 0,
+            title: [0u8; 64],
+            title_len: 0,
+        };
+        let default = b"example.com";
+        browser.url[..default.len()].copy_from_slice(default);
+        browser.url_len = default.len();
+        browser
+    }
+
+    fn set_status(&mut self, text: &str) {
+        let length = text.len().min(self.status.len());
+        self.status[..length].copy_from_slice(&text.as_bytes()[..length]);
+        self.status_len = length;
+    }
+}
+
 pub struct Apps {
     pub phone: Phone,
     pub messages: Messages,
@@ -103,6 +149,7 @@ pub struct Apps {
     pub files: Files,
     pub weather: Weather,
     pub terminal: Terminal,
+    pub browser: Browser,
 }
 
 const KEY_LABELS: [&str; 12] = [
@@ -484,6 +531,7 @@ impl Apps {
                 day: 0,
             },
             terminal,
+            browser: Browser::new(),
         }
     }
 }
@@ -493,12 +541,14 @@ pub fn open(apps: &mut Apps, app: AppKind) {
         AppKind::Notes => apps.notes.load(),
         AppKind::Files => apps.files.refresh(),
         AppKind::Camera => apps.camera.status_len = 0,
+        AppKind::Browser => apps.browser.editing = apps.browser.line_count == 0,
         _ => {}
     }
 }
 
 pub fn back(apps: &mut Apps, app: AppKind) -> bool {
     match app {
+        AppKind::Browser => false,
         AppKind::Messages => {
             if apps.messages.open.take().is_some() {
                 apps.messages.draft_len = 0;
@@ -640,6 +690,44 @@ pub fn key(apps: &mut Apps, app: AppKind, code: u16, shift: bool) -> bool {
                     true
                 }
                 None => false,
+            }
+        }
+        AppKind::Browser => {
+            if !apps.browser.editing {
+                match code {
+                    103 => {
+                        apps.browser.scroll = apps.browser.scroll.saturating_sub(5);
+                        true
+                    }
+                    108 => {
+                        if apps.browser.scroll + 34 < apps.browser.line_count {
+                            apps.browser.scroll += 5;
+                        }
+                        true
+                    }
+                    _ => false,
+                }
+            } else {
+                match key_event(code, shift) {
+                    Some((0, true)) => {
+                        apps.browser.url_len = apps.browser.url_len.saturating_sub(1);
+                        true
+                    }
+                    Some((b'\n', _)) => {
+                        browser_go(apps);
+                        true
+                    }
+                    Some((byte, _)) => {
+                        let browser = &mut apps.browser;
+                        if browser.url_len < browser.url.len() {
+                            let index = browser.url_len;
+                            browser.url[index] = byte;
+                            browser.url_len += 1;
+                        }
+                        true
+                    }
+                    None => false,
+                }
             }
         }
         _ => false,
@@ -892,6 +980,7 @@ pub fn tap(screen: &Screen, apps: &mut Apps, app: AppKind, point: (i64, i64), _c
         AppKind::Photos => photos_tap(apps, point),
         AppKind::Files => files_tap(apps, point),
         AppKind::Weather => weather_tap(apps, point),
+        AppKind::Browser => browser_tap(apps, point),
         _ => {}
     }
 }
@@ -1137,6 +1226,7 @@ pub fn draw(screen: &Screen, apps: &Apps, app: AppKind, clock: [u64; 7]) {
         AppKind::Files => draw_files(screen, &apps.files),
         AppKind::Weather => draw_weather(screen, &apps.weather, clock),
         AppKind::Terminal => draw_terminal(screen, &apps.terminal),
+        AppKind::Browser => draw_browser(screen, &apps.browser),
         _ => {}
     }
 }
@@ -1647,4 +1737,430 @@ fn draw_terminal(screen: &Screen, terminal: &Terminal) {
         screen.text_mono(44, 700, "type a command", 2, 0x0050_505a);
     }
     screen.text_mono(20, 744, "help  ls  cat  date  df  mem  ps  uptime  clear", 1, MUTED);
+}
+
+fn browser_tap(apps: &mut Apps, point: (i64, i64)) {
+    let width = 480i64;
+    if point.0 >= width - 84 && point.0 <= width - 20 && point.1 >= 104 && point.1 <= 148 {
+        browser_go(apps);
+        return;
+    }
+    let browser = &mut apps.browser;
+    if point.0 >= 20 && point.0 < width - 90 && point.1 >= 104 && point.1 <= 148 {
+        browser.editing = true;
+        return;
+    }
+    if point.1 >= 700 && point.1 <= 740 {
+        if point.0 >= width - 110 && point.0 <= width - 66 {
+            browser.scroll = browser.scroll.saturating_sub(5);
+            return;
+        }
+        if point.0 >= width - 60 && point.0 <= width - 16 {
+            if browser.scroll + 34 < browser.line_count {
+                browser.scroll += 5;
+            }
+            return;
+        }
+    }
+    browser.editing = false;
+}
+
+fn browser_go(apps: &mut Apps) {
+    let browser = &mut apps.browser;
+    browser.editing = false;
+    browser.scroll = 0;
+    browser.line_count = 0;
+    browser.title_len = 0;
+
+    let mut url_buf = [0u8; 128];
+    let url_len = browser.url_len.min(128);
+    url_buf[..url_len].copy_from_slice(&browser.url[..url_len]);
+    let url = &url_buf[..url_len];
+    let url = if url.starts_with(b"http://") { &url[7..] } else { url };
+    let split = url.iter().position(|&b| b == b'/').unwrap_or(url.len());
+    let host = &url[..split];
+    let path = if split < url.len() { &url[split..] } else { &b"/"[..] };
+    if host.is_empty() {
+        browser.set_status("Enter a host");
+        return;
+    }
+    let Ok(host_str) = core::str::from_utf8(host) else {
+        browser.set_status("Bad host");
+        return;
+    };
+
+    browser.set_status("Resolving...");
+    k::net_status(5000);
+    let Some(ip) = k::net_resolve(host_str) else {
+        browser.set_status("DNS failed");
+        return;
+    };
+    browser.set_status("Connecting...");
+    let Some(slot) = k::net_tcp_connect(ip, 80, 5000) else {
+        browser.set_status("Connect failed");
+        return;
+    };
+
+    let mut request = [0u8; 320];
+    let mut used = 0usize;
+    for piece in [
+        &b"GET "[..],
+        path,
+        b" HTTP/1.0\r\nHost: ",
+        host,
+        b"\r\nUser-Agent: KimiOS-Browser\r\nConnection: close\r\n\r\n",
+    ] {
+        if used + piece.len() > request.len() {
+            break;
+        }
+        request[used..used + piece.len()].copy_from_slice(piece);
+        used += piece.len();
+    }
+    k::net_tcp_send(slot, &request[..used]);
+    browser.set_status("Downloading...");
+
+    let mut body = [0u8; BROWSER_BODY];
+    let mut body_len = 0usize;
+    loop {
+        let mut chunk = [0u8; 1024];
+        let count = k::net_tcp_recv(slot, &mut chunk, 4000);
+        if count == 0 {
+            break;
+        }
+        let take = count.min(BROWSER_BODY - body_len);
+        body[body_len..body_len + take].copy_from_slice(&chunk[..take]);
+        body_len += take;
+        if body_len >= BROWSER_BODY {
+            break;
+        }
+    }
+    k::net_tcp_close(slot);
+
+    let start = header_end(&body[..body_len]);
+    html_to_lines(&body[start..body_len], browser);
+    if browser.line_count == 0 {
+        browser.set_status("Empty page");
+    } else {
+        browser.set_status("Done");
+    }
+}
+
+fn header_end(data: &[u8]) -> usize {
+    let mut i = 0;
+    while i + 3 < data.len() {
+        if &data[i..i + 4] == b"\r\n\r\n" {
+            return i + 4;
+        }
+        if &data[i..i + 2] == b"\n\n" {
+            return i + 2;
+        }
+        i += 1;
+    }
+    0
+}
+
+fn eq_ci(a: &[u8], b: &[u8]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x.to_ascii_lowercase() == *y)
+}
+
+fn starts_ci(data: &[u8], prefix: &[u8]) -> bool {
+    data.len() >= prefix.len() && eq_ci(&data[..prefix.len()], prefix)
+}
+
+fn tag_base(tag: &[u8]) -> &[u8] {
+    let mut t = tag;
+    if t.first() == Some(&b'/') {
+        t = &t[1..];
+    }
+    if t.last() == Some(&b'/') {
+        t = &t[..t.len() - 1];
+    }
+    t
+}
+
+fn is_block_tag(tag: &[u8]) -> bool {
+    let t = tag_base(tag);
+    matches!(
+        t,
+        b"p" | b"div" | b"br" | b"li" | b"tr" | b"table" | b"ul" | b"ol"
+            | b"h1" | b"h2" | b"h3" | b"h4" | b"h5" | b"h6"
+            | b"section" | b"article" | b"header" | b"footer" | b"blockquote"
+            | b"pre" | b"hr" | b"head" | b"body" | b"html" | b"main" | b"nav"
+    )
+}
+
+fn decode_entity(entity: &[u8]) -> Option<u8> {
+    match entity {
+        b"amp" => Some(b'&'),
+        b"lt" => Some(b'<'),
+        b"gt" => Some(b'>'),
+        b"quot" => Some(b'"'),
+        b"apos" => Some(b'\''),
+        b"nbsp" => Some(b' '),
+        _ => {
+            if let Some(rest) = entity.strip_prefix(b"#") {
+                let (digits, radix) = if let Some(hex) = rest.strip_prefix(b"x") {
+                    (hex, 16)
+                } else {
+                    (rest, 10)
+                };
+                let mut value = 0u32;
+                for &d in digits {
+                    let digit = match d {
+                        b'0'..=b'9' => (d - b'0') as u32,
+                        b'a'..=b'f' => (d - b'a' + 10) as u32,
+                        b'A'..=b'F' => (d - b'A' + 10) as u32,
+                        _ => return None,
+                    };
+                    value = value * radix + digit;
+                    if value > 0x10FFFF {
+                        return None;
+                    }
+                }
+                if value < 128 {
+                    Some(value as u8)
+                } else {
+                    Some(b'?')
+                }
+            } else {
+                None
+            }
+        }
+    }
+}
+
+struct LineWriter<'a> {
+    browser: &'a mut Browser,
+    current: [u8; BROWSER_WIDTH],
+    length: usize,
+    pending_space: bool,
+}
+
+impl<'a> LineWriter<'a> {
+    fn new(browser: &'a mut Browser) -> Self {
+        Self { browser, current: [0u8; BROWSER_WIDTH], length: 0, pending_space: false }
+    }
+
+    fn flush(&mut self) {
+        if self.length > 0 && self.browser.line_count < BROWSER_LINES {
+            let index = self.browser.line_count;
+            self.browser.lines[index][..self.length].copy_from_slice(&self.current[..self.length]);
+            self.browser.line_len[index] = self.length as u8;
+            self.browser.line_count += 1;
+        }
+        self.length = 0;
+    }
+
+    fn newline(&mut self) {
+        if self.length > 0 {
+            self.flush();
+        } else if self.browser.line_count > 0
+            && self.browser.line_len[self.browser.line_count - 1] > 0
+            && self.browser.line_count < BROWSER_LINES
+        {
+            self.browser.line_len[self.browser.line_count] = 0;
+            self.browser.line_count += 1;
+        }
+        self.pending_space = false;
+    }
+
+    fn put(&mut self, byte: u8) {
+        if byte == b' ' || byte == b'\t' || byte == b'\n' || byte == b'\r' {
+            self.pending_space = true;
+            return;
+        }
+        if byte < 0x20 {
+            return;
+        }
+        if self.pending_space && self.length > 0 {
+            if self.length + 1 >= BROWSER_WIDTH {
+                self.flush();
+            } else {
+                self.current[self.length] = b' ';
+                self.length += 1;
+            }
+            self.pending_space = false;
+        }
+        if self.length >= BROWSER_WIDTH {
+            self.flush();
+        }
+        if self.length < BROWSER_WIDTH {
+            self.current[self.length] = byte;
+            self.length += 1;
+        }
+    }
+}
+
+fn html_to_lines(html: &[u8], browser: &mut Browser) {
+    let mut title_buf = [0u8; 64];
+    let mut title_len = 0usize;
+    let mut writer = LineWriter::new(browser);
+    let mut i = 0usize;
+    let n = html.len();
+    let mut in_tag = false;
+    let mut in_script = false;
+    let mut in_style = false;
+    let mut in_comment = false;
+    let mut in_title = false;
+    let mut in_entity = false;
+    let mut attr_started = false;
+    let mut tag = [0u8; 24];
+    let mut tag_len = 0usize;
+    let mut entity = [0u8; 12];
+    let mut entity_len = 0usize;
+
+    while i < n {
+        let c = html[i];
+        if in_comment {
+            if c == b'-' && starts_ci(&html[i..], b"-->") {
+                in_comment = false;
+                i += 3;
+                continue;
+            }
+            i += 1;
+            continue;
+        }
+        if in_script {
+            if c == b'<' && starts_ci(&html[i..], b"</script") {
+                in_script = false;
+                i += 8;
+                continue;
+            }
+            i += 1;
+            continue;
+        }
+        if in_style {
+            if c == b'<' && starts_ci(&html[i..], b"</style") {
+                in_style = false;
+                i += 7;
+                continue;
+            }
+            i += 1;
+            continue;
+        }
+        if in_entity {
+            if c == b';' {
+                if let Some(decoded) = decode_entity(&entity[..entity_len]) {
+                    if in_title {
+                        if title_len < title_buf.len() {
+                            title_buf[title_len] = decoded;
+                            title_len += 1;
+                        }
+                    } else {
+                        writer.put(decoded);
+                    }
+                }
+                in_entity = false;
+                entity_len = 0;
+                i += 1;
+                continue;
+            }
+            if entity_len < entity.len() && (c.is_ascii_alphanumeric() || c == b'#') {
+                entity[entity_len] = c;
+                entity_len += 1;
+                i += 1;
+                continue;
+            }
+            in_entity = false;
+            entity_len = 0;
+            writer.put(b'&');
+        }
+        if in_tag {
+            if c == b'>' {
+                in_tag = false;
+                let t = &tag[..tag_len];
+                if eq_ci(t, b"script") {
+                    in_script = true;
+                } else if eq_ci(t, b"style") {
+                    in_style = true;
+                } else if eq_ci(t, b"title") {
+                    in_title = true;
+                } else if eq_ci(t, b"/title") {
+                    in_title = false;
+                } else if is_block_tag(t) {
+                    writer.newline();
+                }
+                tag_len = 0;
+                i += 1;
+                continue;
+            }
+            if c == b' ' || c == b'\t' || c == b'\n' || c == b'\r' {
+                attr_started = true;
+            } else if !attr_started && tag_len < tag.len() {
+                tag[tag_len] = c.to_ascii_lowercase();
+                tag_len += 1;
+            }
+            i += 1;
+            continue;
+        }
+        if c == b'<' {
+            if starts_ci(&html[i..], b"<!--") {
+                in_comment = true;
+                i += 4;
+                continue;
+            }
+            in_tag = true;
+            tag_len = 0;
+            attr_started = false;
+            i += 1;
+            continue;
+        }
+        if c == b'&' {
+            in_entity = true;
+            entity_len = 0;
+            i += 1;
+            continue;
+        }
+        if in_title {
+            if title_len < title_buf.len() && c >= 0x20 {
+                title_buf[title_len] = c;
+                title_len += 1;
+            }
+            i += 1;
+            continue;
+        }
+        writer.put(c);
+        i += 1;
+    }
+    writer.flush();
+    browser.title[..title_len].copy_from_slice(&title_buf[..title_len]);
+    browser.title_len = title_len;
+}
+
+fn draw_browser(screen: &Screen, browser: &Browser) {
+    let width = screen.width();
+    screen.fill(0, 93, width, screen.height() - 93, BLACK);
+
+    screen.round_rect(20, 104, width - 110, 44, 22, SURFACE_HI);
+    if browser.url_len == 0 {
+        screen.text(36, 118, "enter address", 1, 0x0050_505a);
+    } else {
+        let shown = browser.url_len.min(40);
+        screen.text(36, 118, slice_str(&browser.url[..shown]), 1, if browser.editing { TEXT } else { MUTED });
+    }
+    screen.round_rect(width - 84, 104, 64, 44, 22, RED);
+    screen.text_centered(width - 52, 116, "GO", 2, TEXT);
+
+    if browser.title_len > 0 {
+        let shown = browser.title_len.min(44);
+        screen.text(20, 162, slice_str(&browser.title[..shown]), 2, TEXT);
+    }
+
+    let mut y = 196i64;
+    let end = (browser.scroll + 34).min(browser.line_count);
+    for index in browser.scroll..end {
+        let length = browser.line_len[index] as usize;
+        screen.text(20, y, slice_str(&browser.lines[index][..length]), 1, TEXT);
+        y += 14;
+    }
+    if browser.line_count == 0 {
+        screen.text_centered(width / 2, 380, "Type a host and press GO", 2, MUTED);
+        screen.text_centered(width / 2, 416, "e.g. example.com", 1, 0x0050_505a);
+    }
+
+    screen.round_rect(width - 110, 700, 44, 40, 12, SURFACE_HI);
+    screen.text_centered(width - 88, 710, "up", 1, TEXT);
+    screen.round_rect(width - 60, 700, 44, 40, 12, SURFACE_HI);
+    screen.text_centered(width - 38, 710, "dn", 1, TEXT);
+    screen.text(20, 712, slice_str(&browser.status[..browser.status_len]), 1, MUTED);
 }
