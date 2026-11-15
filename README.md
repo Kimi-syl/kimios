@@ -16,7 +16,8 @@ No bootloader is used: QEMU loads the ELF directly with `-kernel`.
 | ![Calculator](docs/screenshot-calculator.png) | ![Clock](docs/screenshot-clock.png) | ![Settings](docs/screenshot-settings.png) |
 
 Run it with `-display none -device ramfb -device virtio-tablet-device` and
-`run /gui`; ESC returns to the text console.
+`run /gui`; tap or swipe up to unlock, or press Enter. ESC returns to the
+text console.
 
 ## Current features
 
@@ -1015,7 +1016,7 @@ badptr: PASS: syscall rejected the buffer
 framebuffer and a tablet:
 
 ```text
--display none -device ramfb -device virtio-tablet-device
+-display gtk -device ramfb -device virtio-keyboard-device -device virtio-tablet-device
 $ run /gui
 ```
 

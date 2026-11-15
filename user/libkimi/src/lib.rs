@@ -50,6 +50,11 @@ pub const ABS_Y: u16 = 1;
 pub const BTN_LEFT: u16 = 0x110;
 pub const BTN_TOUCH: u16 = 0x14a;
 
+pub const KEY_ESC: u16 = 1;
+pub const KEY_ENTER: u16 = 28;
+pub const KEY_SPACE: u16 = 57;
+pub const KEY_UP: u16 = 103;
+
 #[derive(Clone, Copy)]
 pub struct InputEvent {
     pub kind: u16,

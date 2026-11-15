@@ -222,6 +222,7 @@ pub extern "C" fn _start() -> ! {
     };
 
     let screen = Screen::new(base, width, height, stride);
+    while k::input_poll().is_some() {}
     let mut ui = Ui::new(screen.width(), screen.height());
     let mut last_minute = u64::MAX;
     let mut last_second = u64::MAX;
@@ -269,20 +270,28 @@ fn handle(screen: &Screen, ui: &mut Ui, event: k::InputEvent, clock: [u64; 7]) -
             ui.touch.1 = scale(event.value, height);
             false
         }
-        (k::EV_KEY, 1) if event.value != 0 => {
+        (k::EV_KEY, k::KEY_ESC) if event.value != 0 => {
             k::exit(0);
+        }
+        (k::EV_KEY, k::KEY_ENTER) | (k::EV_KEY, k::KEY_SPACE) | (k::EV_KEY, k::KEY_UP)
+            if event.value != 0 && ui.scene == Scene::Lock =>
+        {
+            unlock(screen, ui, clock);
+            true
         }
         (k::EV_KEY, k::BTN_LEFT) | (k::EV_KEY, k::BTN_TOUCH) => {
             if event.value == 0 {
                 let released = ui.press.take();
                 render(screen, ui, clock);
                 if let Some(start) = released {
-                    let dx = ui.touch.0 - start.0;
-                    let dy = ui.touch.1 - start.1;
-                    if dx * dx + dy * dy < 24 * 24 {
-                        tapped(screen, ui, ui.touch, clock);
-                    } else if !ui.shade && ui.scene == Scene::Lock && start.1 - ui.touch.1 > 70 {
+                    if ui.scene == Scene::Lock {
                         unlock(screen, ui, clock);
+                    } else {
+                        let dx = ui.touch.0 - start.0;
+                        let dy = ui.touch.1 - start.1;
+                        if dx * dx + dy * dy < 24 * 24 {
+                            tapped(screen, ui, ui.touch, clock);
+                        }
                     }
                 }
                 true
@@ -553,7 +562,7 @@ fn draw_lock(screen: &Screen, clock: [u64; 7], y_offset: i64) {
         draw_arc(screen, center, 540 + y_offset, radius, inner, outer, 3, RED);
     }
     screen.text_centered(center, 590 + y_offset, "Touch to unlock", 2, TEXT);
-    screen.text_centered(center, 620 + y_offset, "or swipe up", 1, 0x0060_606c);
+    screen.text_centered(center, 620 + y_offset, "tap / swipe up / enter", 1, 0x0060_606c);
 
     draw_home_indicator(screen);
 }
