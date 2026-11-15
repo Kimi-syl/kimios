@@ -120,6 +120,10 @@ Target-independent, implemented before display/device work:
 28. ~~1080p rendering.~~ Done: 1080x1920 ramfb, logical 480x800 layout mapped
     to native pixels, anti-aliased text, uniform circles, dirty-background
     repaints and a 3x3 kernel console font.
+29. ~~Real apps and boot-to-GUI.~~ Done: Phone, Messages, Camera, Music,
+    Notes, Maps, Photos, Files, Weather and Terminal are interactive; the GUI
+    starts at boot and ESC returns to the shell. UI animations are now an
+    experimental, default-off Settings toggle.
 
 EL0 processes are preempted by the timer (50 ms quantum, round-robin among
 `Ready` processes), and a process blocked in `read` yields the CPU. Syscalls

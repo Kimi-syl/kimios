@@ -15,9 +15,14 @@ No bootloader is used: QEMU loads the ELF directly with `-kernel`.
 |:---:|:---:|:---:|
 | ![Calculator](docs/screenshot-calculator.png) | ![Clock](docs/screenshot-clock.png) | ![Settings](docs/screenshot-settings.png) |
 
-Run it with `-display none -device ramfb -device virtio-tablet-device` and
-`run /gui`; tap anywhere, swipe up, or press Enter/Space/Up to unlock. ESC returns to the
-text console.
+| Terminal | Photos | Files |
+|:---:|:---:|:---:|
+| ![Terminal](docs/screenshot-terminal.png) | ![Photos](docs/screenshot-photos.png) | ![Files](docs/screenshot-files.png) |
+
+The GUI starts automatically at boot. Tap anywhere, swipe up, or press
+Enter/Space/Up to unlock. ESC exits the GUI and returns to the text shell;
+`run /gui` starts it again. Every launcher app is interactive, including the
+in-phone Terminal.
 
 ## Current features
 
@@ -203,6 +208,10 @@ qemu-system-aarch64 \
   -kernel target/aarch64-unknown-none/debug/kimios
 ```
 
+`init` tries to start `/gui` at boot. Without a framebuffer it prints
+`gui: no framebuffer` and drops straight to the text shell, so the command
+above still works for headless kernel work. Add `-device ramfb` for the GUI.
+
 QEMU 11 defaults virtio-mmio to the legacy (v1) transport, which the driver
 supports. Add `-global virtio-mmio.force-legacy=false` to exercise the modern
 (v2) path.
@@ -275,7 +284,7 @@ RamFS      : /init (72880 bytes)
 VFS read   : 4 bytes, magic [7f, 45, 4c, 46]
   PT_LOAD va=0x60000000 filesz=76 memsz=76 flags=X R
   PT_LOAD va=0x60001000 filesz=88 memsz=88 flags=  R
-ELF loaded : entry=0x60000000 stack_top=0x61001000 pages=3
+ELF loaded : entry=0x60000000 stack_top=0x61010000 pages=18
 Dropping to EL0...
 
 KimiOS user shell (libkimi)
@@ -1014,14 +1023,14 @@ pointer returns `u64::MAX` instead of faulting in EL1.
 
 ```text
 $ run /stress
-stress: free frames 31666
+stress: free frames 29929
 stress: children 6
 stress: file cycles done
 stress: alloc cycles done
-stress: free frames 31632 (high-water while running)
+stress: free frames 29895 (high-water while running)
 stress: PASS
 $ mem
-free frames: 31675
+free frames: 29929
 
 $ run /faulttest
 faulttest: reading unmapped memory
@@ -1047,15 +1056,24 @@ run* above instead of `-display gtk`.
 - **Lock screen:** large live clock, date, padlock, "swipe up to unlock";
   a tap or an upward drag slides the home screen into place.
 - **Status bar:** HH:MM from the PL031, signal bars, battery.
-- **Home:** gradient wallpaper with soft halos, a 4x2 grid of rounded icons
-  with hand-drawn glyphs and labels, a Messages notification dot, page dots,
-  a dock and a home indicator. Icons shrink while pressed.
+- **Home:** dot-grid wallpaper, a 4x3 launcher grid with hand-drawn glyphs
+  and labels, a Messages notification dot, page dots, a dock and a home
+  indicator. Terminal lives in the launcher; Settings stays in the dock.
 - **Apps:** Calculator works with AC, sign, backspace, + - * / and equals;
   Clock shows a second-accurate analog face plus digital time and date;
   Settings has Wi-Fi/Bluetooth/Dark-mode switches (dark mode repaints the
-  wallpaper) and an About card. Phone/Messages/Camera/Music/Notes are stubs.
-- **Transitions:** apps slide in from the right and back out; the lock screen
-  slides up. Taps are distinguished from drags by a 24 px threshold.
+  wallpaper), an experimental-animation toggle and an About card.
+- **Apps:** Phone dials and starts a call with a live timer; Messages lists
+  threads and accepts typed messages; Camera saves a real PPM capture to the
+  disk; Music plays through a track list with progress; Notes persists to
+  `/disk/notes.txt`; Maps drops a pin with coordinates; Photos opens a
+  generated gallery; Files browses RamFS and the disk with sizes and text
+  previews; Weather converts C/F and selects forecast days; Terminal runs
+  `help`, `ls`, `cat`, `date`, `df`, `mem`, `ps`, `uname`, `uptime` and
+  `clear`.
+- **Motion:** app and unlock transitions are opt-in and marked experimental;
+  the default is an instant switch. Taps are distinguished from drags by a
+  24 px threshold.
 
 Everything is drawn by a small user-space renderer (`draw.rs`): clipped fills,
 rounded rectangles, circles, rings, Bresenham lines, vertical gradients,
@@ -1090,6 +1108,36 @@ set, shade-to-Settings, calculator (`7 * 8 = 56`), live Clock and back
 navigation. The renderer's alpha blending makes the shade, dock and cards sit
 over the wallpaper without a compositor.
 
+### Phase 39 - real apps, boot-to-GUI and experimental motion
+
+The launcher no longer has "coming soon" screens. Each app has state and does
+something real:
+
+- **Phone** has a working keypad, recent number, call screen, mute/speaker
+  toggles and a live call timer.
+- **Messages** opens three threads, accepts typed text and appends sent
+  bubbles with word wrapping.
+- **Camera** renders a viewfinder and captures the framebuffer to
+  `/disk/camera-N.ppm` in 8 KiB chunks (the syscall transfer limit).
+- **Music** tracks elapsed time, cycles tracks, and drives the home widget.
+- **Notes** edits a 512-byte buffer and saves it to `/disk/notes.txt`.
+- **Maps**, **Photos** and **Weather** have interactive pins, a generated
+  gallery and C/F forecasts.
+- **Files** browses RamFS and the KimiFS disk with real sizes and text
+  previews.
+- **Terminal** is an in-GUI shell with a line editor, scrollback and real
+  filesystem/RTC/process commands.
+
+`kimi-init` now spawns `/gui` immediately, waits for it, then drops to the
+text shell when the GUI exits, so the phone UI is the default boot experience
+and the shell remains the fallback terminal. The process loader now provides a
+64 KiB ELF stack (up from 4 KiB) because the UI state and app buffers do not
+fit in one page.
+
+Motion is now opt-in. Settings has an **Experimental** row for UI animations,
+off by default; unlock, app-open and app-close switch instantly unless it is
+enabled. App icons and the Quick Settings sheet no longer animate.
+
 ### Phase 38 - native 1080p
 
 The panel is now 1080x1920 (8.1 MiB XRGB8888). All layout stays in the
@@ -1101,9 +1149,9 @@ be rewritten. Two changes made this practical under TCG:
   scales and rendered as nearest blocks at scale 1, which matches the
   dot-matrix look while cutting cost.
 - **Dirty backgrounds.** Taps redraw only content; the 8.3 MB wallpaper fill
-  happens on scene changes and animations. A full home repaint is ~35 ms on
-  this emulated CPU; partial repaints are around half that. Animations use
-  six eased steps and the Quick Settings sheet opens instantly.
+  happens on scene changes. A full home repaint is ~35 ms on this emulated
+  CPU; partial repaints are around half that. The experimental animation
+  toggle uses six eased steps; by default every screen switch is instant.
 
 Circles use a uniform radius (not the 9:16 vertical scale) so icons and
 notification dots stay perfectly round, and the console glyph scale was
@@ -1113,7 +1161,7 @@ raised to 3x3 (45x80 cells).
 |:---:|
 | ![Lock 1080p](docs/screenshot-lock.png) |
 
-Running `/stress` twice returns exactly 31675 free frames after each exit:
+Running `/stress` twice returns exactly 29929 free frames after each exit:
 ten spawn/wait cycles, twenty create/stat/unlink/rmdir cycles and a hundred
 allocator rounds no longer leak physical frames or kernel heap.
 
@@ -1175,7 +1223,7 @@ callers even though `stat` does not print them.
   result in `x0`.
   For SVC, `ELR_EL1` already points to the next instruction; BRK is the
   exception that must advance ELR manually.
-- `exec` reuses the ELF loader, so it remaps and zeroes the user stack page.
+- `exec` reuses the ELF loader, so it remaps and zeroes the 64 KiB user stack.
   The kernel copies the path out of user memory first, because the user
   path buffer usually lives on that stack.
 - Process switching is synchronous: `spawn`/`wait`/`exit` save the current
@@ -1211,7 +1259,7 @@ callers even though `stat` does not print them.
   PE stack at `0x6400_0000`; all are inside the identity-mapped 1-2 GiB
   region, where L2 entries can be replaced with L3 user tables. The L3 pool
   holds eight 2 MiB blocks (ELF shell, helper and PE process).
-- The user ELF is linked at `0x6000_0000`; its stack page is mapped at
+- The user ELF is linked at `0x6000_0000`; its stack is 64 KiB mapped at
   `0x6100_0000`. `user/linker.ld` page-aligns each section so no two
   `PT_LOAD` segments share a page. The loader parses an aligned copy of the
   embedded bytes because `xmas-elf` requires natural alignment.

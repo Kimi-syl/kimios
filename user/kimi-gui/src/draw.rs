@@ -34,6 +34,12 @@ impl Screen {
         LOGICAL_HEIGHT
     }
 
+    pub fn pixel(&self, x: i64, y: i64) -> u32 {
+        let px = self.map_x(x).clamp(0, self.physical_width - 1);
+        let py = self.map_y(y).clamp(0, self.physical_height - 1);
+        unsafe { self.pixels.add((py * self.stride + px) as usize).read() }
+    }
+
     fn map_x(&self, x: i64) -> i64 {
         x * self.physical_width / LOGICAL_WIDTH
     }

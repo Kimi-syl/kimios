@@ -5,6 +5,7 @@
 //! monochrome surfaces, dot-matrix clock, red accent, tonal cards, and a
 //! Quick Settings shade. Runs entirely in user space.
 
+mod apps;
 mod draw;
 mod font;
 
@@ -53,6 +54,7 @@ enum AppKind {
     Photos,
     Files,
     Weather,
+    Terminal,
 }
 
 const GRID: [AppKind; 12] = [
@@ -61,13 +63,13 @@ const GRID: [AppKind; 12] = [
     AppKind::Camera,
     AppKind::Music,
     AppKind::Clock,
-    AppKind::Settings,
     AppKind::Calculator,
     AppKind::Notes,
     AppKind::Maps,
     AppKind::Photos,
     AppKind::Files,
     AppKind::Weather,
+    AppKind::Terminal,
 ];
 
 const DOCK: [AppKind; 4] = [
@@ -169,7 +171,7 @@ struct Settings {
     dnd: bool,
     torch: bool,
     brightness: i64,
-    playing: bool,
+    animations: bool,
 }
 
 impl Settings {
@@ -181,7 +183,7 @@ impl Settings {
             dnd: false,
             torch: false,
             brightness: 70,
-            playing: true,
+            animations: false,
         }
     }
 }
@@ -192,6 +194,8 @@ struct Ui {
     press: Option<(i64, i64)>,
     calc: Calculator,
     settings: Settings,
+    apps: apps::Apps,
+    shift: bool,
     shade: bool,
     paint_bg: bool,
 }
@@ -204,6 +208,8 @@ impl Ui {
             press: None,
             calc: Calculator::new(),
             settings: Settings::new(),
+            apps: apps::Apps::new(),
+            shift: false,
             shade: false,
             paint_bg: true,
         }
@@ -273,11 +279,27 @@ fn handle(screen: &Screen, ui: &mut Ui, event: k::InputEvent, clock: [u64; 7]) -
         (k::EV_KEY, k::KEY_ESC) if event.value != 0 => {
             k::exit(0);
         }
-        (k::EV_KEY, k::KEY_ENTER) | (k::EV_KEY, k::KEY_SPACE) | (k::EV_KEY, k::KEY_UP)
-            if event.value != 0 && ui.scene == Scene::Lock =>
+        (k::EV_KEY, 42) | (k::EV_KEY, 54) => {
+            ui.shift = event.value != 0;
+            false
+        }
+        (k::EV_KEY, code)
+            if event.value != 0 && code != k::BTN_LEFT && code != k::BTN_TOUCH =>
         {
-            unlock(screen, ui, clock);
-            true
+            if ui.scene == Scene::Lock {
+                if code == k::KEY_ENTER || code == k::KEY_SPACE || code == k::KEY_UP {
+                    unlock(screen, ui, clock);
+                    return true;
+                }
+                return false;
+            }
+            if let Scene::App(app) = ui.scene {
+                if apps::key(&mut ui.apps, app, code, ui.shift) {
+                    render(screen, ui, clock);
+                    return true;
+                }
+            }
+            false
         }
         (k::EV_KEY, k::BTN_LEFT) | (k::EV_KEY, k::BTN_TOUCH) => {
             if event.value == 0 {
@@ -318,7 +340,7 @@ fn tapped(screen: &Screen, ui: &mut Ui, point: (i64, i64), clock: [u64; 7]) {
         Scene::Lock => unlock(screen, ui, clock),
         Scene::Home => {
             if music_hit(screen, point) {
-                ui.settings.playing = !ui.settings.playing;
+                apps::home_music_toggle(&mut ui.apps);
                 render(screen, ui, clock);
             } else if let Some(app) = home_hit(screen, point) {
                 open_app(screen, ui, app, clock);
@@ -329,21 +351,24 @@ fn tapped(screen: &Screen, ui: &mut Ui, point: (i64, i64), clock: [u64; 7]) {
                 close_app(screen, ui, clock);
                 return;
             }
+            if apps::back(&mut ui.apps, app) {
+                render(screen, ui, clock);
+                return;
+            }
             match app {
                 AppKind::Calculator => {
                     if let Some(index) = calculator_hit(point) {
                         ui.calc.press(CALCULATOR_LABELS[index]);
-                        render(screen, ui, clock);
                     }
                 }
                 AppKind::Settings => {
                     if let Some(row) = settings_hit(screen, point) {
                         toggle_settings(&mut ui.settings, row);
-                        render(screen, ui, clock);
                     }
                 }
-                _ => {}
+                _ => apps::tap(screen, &mut ui.apps, app, point, clock),
             }
+            render(screen, ui, clock);
         }
     }
 }
@@ -393,37 +418,27 @@ fn toggle_shade(screen: &Screen, ui: &mut Ui, clock: [u64; 7], open: bool) {
 
 fn unlock(screen: &Screen, ui: &mut Ui, clock: [u64; 7]) {
     let height = screen.height();
-    for step in 0..=6 {
-        let offset = height * (100 - ease(step, 6)) / 100;
-        draw_wallpaper(screen, 0, true);
-        draw_lock(screen, clock, 0);
-        draw_home(screen, clock, ui, None, offset, true);
-        draw_status_bar(screen, clock, ui);
-        k::sleep_ms(12);
+    if ui.settings.animations {
+        for step in 0..=6 {
+            let offset = height * (100 - ease(step, 6)) / 100;
+            draw_wallpaper(screen, 0, true);
+            draw_lock(screen, clock, 0);
+            draw_home(screen, clock, ui, None, offset, true);
+            draw_status_bar(screen, clock, ui);
+            k::sleep_ms(12);
+        }
     }
     ui.scene = Scene::Home;
+    ui.paint_bg = true;
     render(screen, ui, clock);
 }
 
 fn open_app(screen: &Screen, ui: &mut Ui, app: AppKind, clock: [u64; 7]) {
     let width = screen.width();
-    for step in 0..=6 {
-        let offset = width * (100 - ease(step, 6)) / 100;
-        draw_wallpaper(screen, 0, true);
-        draw_home(screen, clock, ui, None, 0, true);
-        draw_app(screen, ui, app, clock, offset, true);
-        draw_status_bar(screen, clock, ui);
-        k::sleep_ms(12);
-    }
-    ui.scene = Scene::App(app);
-    render(screen, ui, clock);
-}
-
-fn close_app(screen: &Screen, ui: &mut Ui, clock: [u64; 7]) {
-    let width = screen.width();
-    if let Scene::App(app) = ui.scene {
+    apps::open(&mut ui.apps, app);
+    if ui.settings.animations {
         for step in 0..=6 {
-            let offset = width * ease(step, 6) / 100;
+            let offset = width * (100 - ease(step, 6)) / 100;
             draw_wallpaper(screen, 0, true);
             draw_home(screen, clock, ui, None, 0, true);
             draw_app(screen, ui, app, clock, offset, true);
@@ -431,7 +446,27 @@ fn close_app(screen: &Screen, ui: &mut Ui, clock: [u64; 7]) {
             k::sleep_ms(12);
         }
     }
+    ui.scene = Scene::App(app);
+    ui.paint_bg = true;
+    render(screen, ui, clock);
+}
+
+fn close_app(screen: &Screen, ui: &mut Ui, clock: [u64; 7]) {
+    let width = screen.width();
+    if let Scene::App(app) = ui.scene {
+        if ui.settings.animations {
+            for step in 0..=6 {
+                let offset = width * ease(step, 6) / 100;
+                draw_wallpaper(screen, 0, true);
+                draw_home(screen, clock, ui, None, 0, true);
+                draw_app(screen, ui, app, clock, offset, true);
+                draw_status_bar(screen, clock, ui);
+                k::sleep_ms(12);
+            }
+        }
+    }
     ui.scene = Scene::Home;
+    ui.paint_bg = true;
     render(screen, ui, clock);
 }
 
@@ -618,15 +653,16 @@ fn draw_home(
 
     // Music widget.
     let music_y = 212 + y_offset;
+    let (title, subtitle, playing, progress) = apps::home_music(&ui.apps.music);
     screen.round_rect(24, music_y, width - 48, 100, 28, SURFACE);
     screen.round_rect(42, music_y + 18, 64, 64, 20, SURFACE_HI);
     screen.circle(74, music_y + 50, 18, RED_DIM);
     screen.circle(74, music_y + 50, 7, RED);
-    screen.text(122, music_y + 20, "KimiOS Sessions", 2, TEXT);
-    screen.text(122, music_y + 48, "Nothing OS / Ambient", 1, MUTED);
-    draw_play(screen, width - 76, music_y + 50, ui.settings.playing);
+    screen.text(122, music_y + 20, title, 2, TEXT);
+    screen.text(122, music_y + 48, subtitle, 1, MUTED);
+    draw_play(screen, width - 76, music_y + 50, playing);
     screen.round_rect(122, music_y + 76, width - 190, 4, 2, OUTLINE);
-    screen.round_rect(122, music_y + 76, (width - 190) * 2 / 5, 4, 2, RED);
+    screen.round_rect(122, music_y + 76, (width - 190) * progress / 1000, 4, 2, RED);
 
     // App grid.
     let pressed = pressed;
@@ -812,6 +848,20 @@ fn draw_glyph(screen: &Screen, app: AppKind, cx: i64, cy: i64, size: i64, color:
             }
             screen.round_rect(cx - s / 6, cy + s / 12, s / 2, s / 5, s / 18, color);
         }
+        AppKind::Terminal => {
+            screen.round_rect(cx - s / 3, cy - s / 3, s * 2 / 3, s * 2 / 3, s / 16, color);
+            screen.round_rect(
+                cx - s / 3 + 2,
+                cy - s / 3 + 2,
+                s * 2 / 3 - 4,
+                s * 2 / 3 - 4,
+                s / 18,
+                SURFACE_HI,
+            );
+            screen.line(cx - s / 6, cy - s / 6, cx, cy, 3, color);
+            screen.line(cx, cy, cx - s / 6, cy + s / 6, 3, color);
+            screen.line(cx + s / 12, cy + s / 6, cx + s / 5, cy + s / 6, 3, color);
+        }
     }
 }
 
@@ -882,7 +932,7 @@ fn draw_app(
         AppKind::Calculator => draw_calculator(screen, ui, x),
         AppKind::Clock => draw_clock_app(screen, clock, x),
         AppKind::Settings => draw_settings(screen, &ui.settings, x),
-        _ => draw_placeholder(screen, app, x),
+        _ => apps::draw(screen, &ui.apps, app, clock),
     }
     draw_home_indicator(screen);
 }
@@ -1047,17 +1097,21 @@ fn draw_settings(screen: &Screen, settings: &Settings, x_offset: i64) {
     }
 
     screen.text(x + 24, 456, "APPEARANCE", 1, MUTED);
-    screen.round_rect(x + 20, 480, width - 40, 88, 28, SURFACE);
+    screen.round_rect(x + 20, 480, width - 40, 168, 28, SURFACE);
     screen.circle(x + 58, 524, 18, 0x009c_74e8);
     screen.text(x + 88, 504, "Dark mode", 2, TEXT);
     screen.text(x + 88, 532, "Nothing palette", 1, MUTED);
     draw_switch(screen, x + width - 92, 508, settings.dark);
+    screen.fill(x + 40, 560, width - 80, 1, OUTLINE);
+    screen.circle(x + 58, 604, 18, 0x00d8_9040);
+    screen.text(x + 88, 584, "UI animations", 2, TEXT);
+    screen.text(x + 88, 612, "Experimental - disabled by default", 1, 0x00d8_9040);
+    draw_switch(screen, x + width - 92, 588, settings.animations);
 
-    screen.round_rect(x + 20, 596, width - 40, 120, 28, SURFACE);
-    screen.text(x + 44, 618, "About KimiOS", 2, TEXT);
-    screen.text(x + 44, 650, "ARM64 bare metal", 1, MUTED);
-    screen.text(x + 44, 672, "480x800 - Material 3 / Nothing", 1, MUTED);
-    screen.text(x + 44, 694, "Build 0.1", 1, 0x0060_606c);
+    screen.round_rect(x + 20, 660, width - 40, 96, 28, SURFACE);
+    screen.text(x + 44, 680, "About KimiOS", 2, TEXT);
+    screen.text(x + 44, 710, "ARM64 bare metal", 1, MUTED);
+    screen.text(x + 44, 730, "1080x1920 - Material 3 / Nothing", 1, MUTED);
 }
 
 fn draw_switch(screen: &Screen, x: i64, y: i64, on: bool) {
@@ -1081,8 +1135,11 @@ fn settings_hit(screen: &Screen, point: (i64, i64)) -> Option<usize> {
             return Some(index);
         }
     }
-    if point.0 >= 20 && point.1 >= 480 && point.1 < 568 {
+    if point.0 >= 20 && point.0 < screen.width() - 20 && point.1 >= 480 && point.1 < 568 {
         return Some(3);
+    }
+    if point.0 >= 20 && point.0 < screen.width() - 20 && point.1 >= 584 && point.1 < 648 {
+        return Some(4);
     }
     None
 }
@@ -1092,7 +1149,8 @@ fn toggle_settings(settings: &mut Settings, row: usize) {
         0 => settings.wifi = !settings.wifi,
         1 => settings.bluetooth = !settings.bluetooth,
         2 => settings.dnd = !settings.dnd,
-        _ => settings.dark = !settings.dark,
+        3 => settings.dark = !settings.dark,
+        _ => settings.animations = !settings.animations,
     }
 }
 
@@ -1298,6 +1356,7 @@ impl AppKind {
             AppKind::Photos => "Photos",
             AppKind::Files => "Files",
             AppKind::Weather => "Weather",
+            AppKind::Terminal => "Terminal",
         }
     }
 }

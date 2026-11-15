@@ -21,6 +21,7 @@ const PAGE_SIZE: u64 = 4096;
 pub const THUNK_VA: u64 = 0x6300_0000;
 /// User stack for PE processes.
 const PE_STACK_VA: u64 = 0x6400_0000;
+const PE_STACK_PAGES: u64 = 16;
 
 pub const SYS_PE_GET_STD_HANDLE: u64 = 100;
 pub const SYS_PE_WRITE_FILE: u64 = 101;
@@ -334,14 +335,16 @@ pub fn load(
     space.map_page(THUNK_VA, thunk_frame, true);
     pages += 1;
 
-    let stack_frame = space
-        .alloc_frame()
-        .ok_or("out of memory for PE stack")?;
-    unsafe {
-        core::ptr::write_bytes(stack_frame as *mut u8, 0, PAGE_SIZE as usize);
+    for index in 0..PE_STACK_PAGES {
+        let stack_frame = space
+            .alloc_frame()
+            .ok_or("out of memory for PE stack")?;
+        unsafe {
+            core::ptr::write_bytes(stack_frame as *mut u8, 0, PAGE_SIZE as usize);
+        }
+        space.map_page(PE_STACK_VA + index * PAGE_SIZE, stack_frame, false);
+        pages += 1;
     }
-    space.map_page(PE_STACK_VA, stack_frame, false);
-    pages += 1;
 
     let entry = image_base + entry_rva as u64;
     println!(
@@ -351,6 +354,6 @@ pub fn load(
 
     Ok(LoadedImage {
         entry,
-        stack_top: PE_STACK_VA + PAGE_SIZE,
+        stack_top: PE_STACK_VA + PE_STACK_PAGES * PAGE_SIZE,
     })
 }

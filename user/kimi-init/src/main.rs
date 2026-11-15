@@ -102,6 +102,14 @@ fn report_status(pid: u64, status: Option<u64>) {
 
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
+    if let Some(pid) = k::spawn("/gui") {
+        k::print("\n[init] launching GUI, pid ");
+        k::print_u64(pid);
+        k::print(" (ESC returns to this shell)\n");
+        let _ = k::wait(pid);
+        k::print("[init] GUI closed, terminal ready\n");
+    }
+
     k::print("\nKimiOS user shell (libkimi), pid ");
     k::print_u64(k::getpid());
     k::print("\n");

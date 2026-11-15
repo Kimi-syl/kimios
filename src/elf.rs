@@ -15,6 +15,7 @@ const PAGE_SIZE: u64 = 4096;
 
 /// User stack lives in its own 2 MiB block above the image.
 const USER_STACK_VA: u64 = 0x6100_0000;
+const USER_STACK_PAGES: u64 = 16;
 
 pub struct LoadedImage {
     pub entry: u64,
@@ -115,16 +116,18 @@ fn load_aligned(
         }
     }
 
-    let stack_frame = space
-        .alloc_frame()
-        .ok_or("out of physical memory for stack")?;
-    unsafe {
-        core::ptr::write_bytes(stack_frame as *mut u8, 0, PAGE_SIZE as usize);
+    for index in 0..USER_STACK_PAGES {
+        let stack_frame = space
+            .alloc_frame()
+            .ok_or("out of physical memory for stack")?;
+        unsafe {
+            core::ptr::write_bytes(stack_frame as *mut u8, 0, PAGE_SIZE as usize);
+        }
+        space.map_page(USER_STACK_VA + index * PAGE_SIZE, stack_frame, false);
     }
-    space.map_page(USER_STACK_VA, stack_frame, false);
 
     Ok(LoadedImage {
         entry,
-        stack_top: USER_STACK_VA + PAGE_SIZE,
+        stack_top: USER_STACK_VA + USER_STACK_PAGES * PAGE_SIZE,
     })
 }
