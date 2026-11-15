@@ -5,9 +5,31 @@
 //! original monotonic bump allocator, which leaked every ELF image copy on
 //! `spawn` and eventually failed after a dozen process creations.
 
-use core::alloc::Layout;
+use core::alloc::{GlobalAlloc, Layout};
 use core::ptr::{addr_of_mut, NonNull};
 use spin::Mutex;
+
+/// Global allocator backed by the free-list heap below, so kernel code (and
+/// dependencies such as smoltcp) can use `alloc` collections.
+struct KernelAlloc;
+
+unsafe impl GlobalAlloc for KernelAlloc {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        match alloc(layout) {
+            Some(pointer) => pointer.as_ptr(),
+            None => core::ptr::null_mut(),
+        }
+    }
+
+    unsafe fn dealloc(&self, pointer: *mut u8, _layout: Layout) {
+        if let Some(pointer) = NonNull::new(pointer) {
+            dealloc(pointer);
+        }
+    }
+}
+
+#[global_allocator]
+static GLOBAL: KernelAlloc = KernelAlloc;
 
 const HEAP_SIZE: usize = 4 * 1024 * 1024; // 4 MiB
 const HEADER: usize = 16;

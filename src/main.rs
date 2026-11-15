@@ -1,6 +1,8 @@
 #![no_std]
 #![no_main]
 
+extern crate alloc;
+
 mod allocator;
 mod block;
 mod diskfs;
@@ -14,6 +16,7 @@ mod gic;
 mod input;
 mod irq;
 mod mmu;
+mod net;
 mod pe;
 mod pfa;
 mod process;
@@ -26,6 +29,7 @@ mod usermode;
 mod uart;
 mod virtio_blk;
 mod virtio_input;
+mod virtio_net;
 
 use core::alloc::Layout;
 use core::arch::{asm, global_asm};
@@ -229,6 +233,13 @@ pub extern "C" fn kmain(dtb: usize) -> ! {
     println!("Phase 30: virtio keyboard");
     if virtio_input::init() == 0 {
         println!("virtio-input: no devices");
+    }
+
+    // Phase 43: virtio-net + smoltcp TCP/IP (DHCP).
+    println!();
+    println!("Phase 43: networking");
+    if !net::init() {
+        println!("virtio-net  : not present");
     }
 
     // Phase 13: create the init process and enter EL0.

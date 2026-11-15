@@ -113,7 +113,7 @@ pub extern "C" fn _start() -> ! {
     k::print("\nKimiOS user shell (libkimi), pid ");
     k::print_u64(k::getpid());
     k::print("\n");
-    k::print("Commands: ls, cat, write, rm, mv, mkdir, rmdir, df, date, stat, time, sleep, spawn, run, wait, ps, kill, mem, exec, help, exit\n");
+    k::print("Commands: ls, cat, write, rm, mv, mkdir, rmdir, df, net, dns, fetch, date, stat, time, sleep, spawn, run, wait, ps, kill, mem, exec, help, exit\n");
 
     let mut line = [0u8; 128];
     let mut path_buffer = [0u8; 96];
@@ -140,6 +140,9 @@ pub extern "C" fn _start() -> ! {
             k::print("  rmdir <dir>    remove an empty /disk directory\n");
             k::print("  mv <old> <new> rename a /disk file\n");
             k::print("  stat <file>    show kind, size and blocks\n");
+            k::print("  net [timeout]  bring up networking (DHCP) and show status\n");
+            k::print("  dns <host>     resolve a hostname\n");
+            k::print("  fetch <host> [path]  HTTP GET over TCP\n");
             k::print("  date           show UTC wall-clock time\n");
             k::print("  df             show disk geometry, files and free blocks\n");
             k::print("  time           show milliseconds since boot\n");
@@ -368,6 +371,79 @@ pub extern "C" fn _start() -> ! {
                 }
                 None => k::print("stat: not found\n"),
             }
+        } else if command == &b"net"[..] {
+            let timeout = parse_u64(argument).unwrap_or(5000);
+            k::net_status(timeout);
+        } else if command == &b"dns"[..] {
+            let Ok(host) = core::str::from_utf8(argument) else {
+                k::print("usage: dns <hostname>\n");
+                continue;
+            };
+            k::net_status(5000);
+            match k::net_resolve(host) {
+                Some(ip) => {
+                    k::print(host);
+                    k::print(" -> ");
+                    let b = ip.to_be_bytes();
+                    k::print_u64(b[0] as u64);
+                    k::print(".");
+                    k::print_u64(b[1] as u64);
+                    k::print(".");
+                    k::print_u64(b[2] as u64);
+                    k::print(".");
+                    k::print_u64(b[3] as u64);
+                    k::print("\n");
+                }
+                None => k::print("dns: resolution failed\n"),
+            }
+        } else if command == &b"fetch"[..] {
+            let (host_word, path_word) = split_word(argument);
+            let Ok(host) = core::str::from_utf8(host_word) else {
+                k::print("usage: fetch <host> [path]\n");
+                continue;
+            };
+            let path: &[u8] = if path_word.is_empty() { b"/" } else { path_word };
+            k::net_status(5000);
+            let Some(ip) = k::net_resolve(host) else {
+                k::print("fetch: dns failed\n");
+                continue;
+            };
+            let Some(slot) = k::net_tcp_connect(ip, 80, 5000) else {
+                k::print("fetch: connect failed\n");
+                continue;
+            };
+            let mut request = [0u8; 320];
+            let mut used = 0usize;
+            for piece in [
+                &b"GET "[..],
+                path,
+                b" HTTP/1.0\r\nHost: ",
+                host_word,
+                b"\r\nConnection: close\r\n\r\n",
+            ] {
+                if used + piece.len() > request.len() {
+                    break;
+                }
+                request[used..used + piece.len()].copy_from_slice(piece);
+                used += piece.len();
+            }
+            k::net_tcp_send(slot, &request[..used]);
+            let mut buffer = [0u8; 512];
+            let mut total = 0usize;
+            loop {
+                let count = k::net_tcp_recv(slot, &mut buffer, 3000);
+                if count == 0 {
+                    break;
+                }
+                k::print_bytes(&buffer[..count]);
+                total += count;
+                if total > 4096 {
+                    k::print("\n[truncated]\n");
+                    break;
+                }
+            }
+            k::net_tcp_close(slot);
+            k::print("\n");
         } else if command == &b"date"[..] {
             match k::rtc() {
                 Some(clock) => {

@@ -11,6 +11,16 @@ path = "src/main.rs"
 hermit-dtb = "0.1.1"
 xmas-elf = "0.10.0"
 spin = { version = "0.12.3", default-features = false, features = ["mutex", "spin_mutex"] }
+smoltcp = { version = "0.12.0", default-features = false, features = [
+    "medium-ethernet",
+    "proto-ipv4",
+    "socket-dhcpv4",
+    "socket-udp",
+    "socket-tcp",
+    "socket-dns",
+    "socket-icmp",
+    "alloc",
+] }
 
 [profile.dev]
 panic = "abort"

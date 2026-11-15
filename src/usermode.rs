@@ -41,6 +41,7 @@ pub const SYS_RMDIR: u64 = 30;
 pub const SYS_FB_MAP: u64 = 31;
 pub const SYS_INPUT_POLL: u64 = 32;
 pub const SYS_INPUT_WAIT: u64 = 33;
+pub const SYS_NET: u64 = 34;
 
 /// Coarse user-accessible window: ELF, stack, PE image/thunks/stack.
 const USER_SPACE_START: u64 = 0x6000_0000;
@@ -320,6 +321,82 @@ pub fn sys_unlink(pointer: u64, length: u64) -> u64 {
 /// Milliseconds since boot (generic counter).
 pub fn sys_uptime() -> u64 {
     crate::timer::uptime_ms()
+}
+
+/// net(op, ...): networking operations.
+///   0 status(timeout)                 -> 0 if an IPv4 lease is configured
+///   1 resolve(name_ptr,len,out_ptr)   -> 0, writes 4-byte IPv4 to out_ptr
+///   2 tcp_connect(ip_u32,port,timeout)-> slot index, or ERROR
+///   3 tcp_send(slot,buf,len)          -> bytes accepted
+///   4 tcp_recv(slot,buf,len,timeout)  -> bytes read (0 = timeout/close)
+///   5 tcp_close(slot)                 -> 0
+pub fn sys_net(op: u64, a0: u64, a1: u64, a2: u64, a3: u64) -> u64 {
+    match op {
+        0 => {
+            if !crate::net::present() {
+                println!("net: no interface");
+                return 1;
+            }
+            let timeout = if a0 == 0 { 5000 } else { a0 };
+            crate::net::wait_for_ip(timeout);
+            crate::net::print_status();
+            if crate::net::ipv4().is_some() {
+                0
+            } else {
+                1
+            }
+        }
+        1 => {
+            let Some(bytes) = user_bytes(a0, a1) else {
+                return ERROR;
+            };
+            let Ok(name) = core::str::from_utf8(bytes) else {
+                return ERROR;
+            };
+            let Some(out) = user_buffer(a2, 4) else {
+                return ERROR;
+            };
+            let timeout = if a3 == 0 { 5000 } else { a3 };
+            match crate::net::resolve(name, timeout) {
+                Some(ip) => {
+                    out.copy_from_slice(&ip.octets());
+                    0
+                }
+                None => ERROR,
+            }
+        }
+        2 => {
+            let ip = smoltcp::wire::Ipv4Address::new(
+                (a0 >> 24) as u8,
+                (a0 >> 16) as u8,
+                (a0 >> 8) as u8,
+                a0 as u8,
+            );
+            let timeout = if a2 == 0 { 5000 } else { a2 };
+            match crate::net::tcp_connect(ip, a1 as u16, timeout) {
+                Some(slot) => slot as u64,
+                None => ERROR,
+            }
+        }
+        3 => {
+            let Some(data) = user_bytes(a1, a2) else {
+                return ERROR;
+            };
+            crate::net::tcp_send(a0 as usize, data) as u64
+        }
+        4 => {
+            let Some(out) = user_buffer(a1, a2) else {
+                return ERROR;
+            };
+            let timeout = if a3 == 0 { 5000 } else { a3 };
+            crate::net::tcp_recv(a0 as usize, out, timeout) as u64
+        }
+        5 => {
+            crate::net::tcp_close(a0 as usize);
+            0
+        }
+        _ => ERROR,
+    }
 }
 
 /// sleep(ms): block until the deadline; dispatching is handled by the caller.

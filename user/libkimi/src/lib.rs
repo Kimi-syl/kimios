@@ -41,6 +41,7 @@ pub const SYS_RMDIR: u64 = 30;
 pub const SYS_FB_MAP: u64 = 31;
 pub const SYS_INPUT_POLL: u64 = 32;
 pub const SYS_INPUT_WAIT: u64 = 33;
+pub const SYS_NET: u64 = 34;
 
 pub const EV_KEY: u16 = 1;
 pub const EV_REL: u16 = 2;
@@ -289,6 +290,40 @@ pub fn diskinfo() -> Option<u64> {
 /// Milliseconds since boot.
 pub fn uptime_ms() -> u64 {
     syscall3(SYS_UPTIME, 0, 0, 0)
+}
+
+/// Bring up networking (DHCP) and print status. Returns 0 if configured.
+pub fn net_status(timeout_ms: u64) -> u64 {
+    syscall5(SYS_NET, 0, timeout_ms, 0, 0, 0)
+}
+
+/// Resolve a hostname to a big-endian IPv4 address.
+pub fn net_resolve(name: &str) -> Option<u32> {
+    let mut out = [0u8; 4];
+    let result = syscall5(
+        SYS_NET, 1,
+        name.as_ptr() as u64, name.len() as u64,
+        out.as_mut_ptr() as u64, 5000,
+    );
+    if result == ERROR { None } else { Some(u32::from_be_bytes(out)) }
+}
+
+/// Open a TCP connection; returns a slot index.
+pub fn net_tcp_connect(ip: u32, port: u16, timeout_ms: u64) -> Option<u64> {
+    let result = syscall5(SYS_NET, 2, ip as u64, port as u64, timeout_ms, 0);
+    if result == ERROR { None } else { Some(result) }
+}
+
+pub fn net_tcp_send(slot: u64, data: &[u8]) -> usize {
+    syscall5(SYS_NET, 3, slot, data.as_ptr() as u64, data.len() as u64, 0) as usize
+}
+
+pub fn net_tcp_recv(slot: u64, buffer: &mut [u8], timeout_ms: u64) -> usize {
+    syscall5(SYS_NET, 4, slot, buffer.as_mut_ptr() as u64, buffer.len() as u64, timeout_ms) as usize
+}
+
+pub fn net_tcp_close(slot: u64) {
+    syscall5(SYS_NET, 5, slot, 0, 0, 0);
 }
 
 /// Sleep for at least `ms` milliseconds (other processes keep running).

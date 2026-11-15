@@ -157,6 +157,7 @@ pub extern "C" fn exception_handler(frame: &mut ExceptionFrame) {
             usermode::SYS_RMDIR => usermode::sys_rmdir(arg0, arg1),
             usermode::SYS_FB_MAP => usermode::sys_fb_map(),
             usermode::SYS_INPUT_POLL => usermode::sys_input_poll(),
+            usermode::SYS_NET => usermode::sys_net(arg0, arg1, arg2, arg3, arg4),
             crate::pe::SYS_PE_GET_STD_HANDLE => {
                 usermode::pe_get_std_handle(arg0)
             }

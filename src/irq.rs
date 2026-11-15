@@ -37,6 +37,11 @@ pub extern "C" fn irq_handler(frame: *mut ExceptionFrame) {
         // or the trigger level was not reached (single-character input).
         line_ready = uart::rx_interrupt();
 
+        // Drive the network stack (DHCP renew, TCP timers, ingress/egress).
+        if crate::net::present() {
+            crate::net::poll();
+        }
+
     } else if intid == gic::UART_INTID {
         line_ready = uart::rx_interrupt();
     } else if crate::virtio_input::handles(intid) {
