@@ -16,7 +16,7 @@ No bootloader is used: QEMU loads the ELF directly with `-kernel`.
 | ![Calculator](docs/screenshot-calculator.png) | ![Clock](docs/screenshot-clock.png) | ![Settings](docs/screenshot-settings.png) |
 
 Run it with `-display none -device ramfb -device virtio-tablet-device` and
-`run /gui`; tap or swipe up to unlock, or press Enter. ESC returns to the
+`run /gui`; tap anywhere, swipe up, or press Enter/Space/Up to unlock. ESC returns to the
 text console.
 
 ## Current features
@@ -207,11 +207,31 @@ QEMU 11 defaults virtio-mmio to the legacy (v1) transport, which the driver
 supports. Add `-global virtio-mmio.force-legacy=false` to exercise the modern
 (v2) path.
 
-For display output add `-display none -device ramfb` to the command line (or
-keep the default window). Add `-device virtio-keyboard-device` for keyboard
-input and `-device virtio-tablet-device` for the touch pointer; QEMU routes
-monitor/QMP input events to them even without a graphical window. `-display none` is convenient in headless shells;
-`screendump` on the monitor still captures the framebuffer.
+For display output add `-device ramfb` to the command line (or keep the
+default window). Add `-device virtio-keyboard-device` for keyboard input and
+`-device virtio-tablet-device` for the touch pointer; QEMU routes monitor/QMP
+input events to them even without a graphical window. `-display none` is
+convenient in headless shells; `screendump` on the monitor still captures the
+framebuffer.
+
+If there is no X/Wayland session (for example inside proot on a phone), GTK
+cannot start (`gtk initialization failed`). Use QEMU's built-in VNC server
+instead and connect a VNC viewer to `127.0.0.1:5900`:
+
+```bash
+qemu-system-aarch64 \
+  -machine virt,gic-version=3 -cpu cortex-a53 -m 128M \
+  -semihosting-config enable=on,target=native -dtb virt.dtb \
+  -drive if=none,format=raw,file=disk.img,id=hd0 \
+  -device virtio-blk-device,drive=hd0 \
+  -device ramfb -device virtio-keyboard-device -device virtio-tablet-device \
+  -display none -vnc 127.0.0.1:0 -serial stdio \
+  -kernel target/aarch64-unknown-none/release/kimios
+```
+
+VNC clients running on the same phone can usually reach `127.0.0.1:5900`; if
+not, use `-vnc 0.0.0.0:0` and connect to the phone's LAN address. Release
+builds are much faster at 1080p than debug builds.
 
 Add `-smp 4` to exercise the Phase 20 PSCI bring-up (CPU 1-3). The default
 single CPU boot prints `not present` for the missing cores and continues.
@@ -1016,9 +1036,13 @@ badptr: PASS: syscall rejected the buffer
 framebuffer and a tablet:
 
 ```text
--display gtk -device ramfb -device virtio-keyboard-device -device virtio-tablet-device
+-display none -vnc 127.0.0.1:0 -device ramfb \
+  -device virtio-keyboard-device -device virtio-tablet-device
 $ run /gui
 ```
+
+Inside proot there is no X display, so use the VNC command from *Build and
+run* above instead of `-display gtk`.
 
 - **Lock screen:** large live clock, date, padlock, "swipe up to unlock";
   a tap or an upward drag slides the home screen into place.
