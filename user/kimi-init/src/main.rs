@@ -113,7 +113,7 @@ pub extern "C" fn _start() -> ! {
     k::print("\nKimiOS user shell (libkimi), pid ");
     k::print_u64(k::getpid());
     k::print("\n");
-    k::print("Commands: ls, cat, write, rm, mv, mkdir, rmdir, df, net, dns, fetch, apk, date, stat, time, sleep, spawn, run, wait, ps, kill, mem, exec, help, exit\n");
+    k::print("Commands: ls, cat, write, rm, mv, mkdir, rmdir, df, net, dns, fetch, apk, dvm, date, stat, time, sleep, spawn, run, wait, ps, kill, mem, exec, help, exit\n");
 
     let mut line = [0u8; 128];
     let mut path_buffer = [0u8; 96];
@@ -423,6 +423,23 @@ pub extern "C" fn _start() -> ! {
                 k::print("\n");
             }
             k::print("(inspection only — running APKs needs the Android runtime)\n");
+        } else if command == &b"dvm"[..] {
+            let Some(path) = with_slash(argument, &mut path_buffer) else {
+                k::print("usage: dvm <file.dex>\n");
+                continue;
+            };
+            let ok = k::dvm_run_file(path);
+            let mut out = [0u8; 2048];
+            let n = k::dvm::take_output(&mut out);
+            if n > 0 {
+                k::print_bytes(&out[..n]);
+            }
+            if !ok {
+                let e = k::dvm::last_error();
+                k::print("dvm: ");
+                k::print(if e.is_empty() { "cannot read DEX file" } else { e });
+                k::print("\n");
+            }
         } else if command == &b"net"[..] {
             let timeout = parse_u64(argument).unwrap_or(5000);
             k::net_status(timeout);

@@ -7,6 +7,7 @@
 #![no_std]
 
 pub mod apk;
+pub mod dvm;
 
 use core::arch::asm;
 
@@ -417,6 +418,27 @@ pub fn stat(path: &str) -> Option<(u64, u64)> {
     } else {
         Some((fields[0], fields[1]))
     }
+}
+
+static mut DEXFILE: [u8; 65536] = [0; 65536];
+
+/// Load a DEX file from the filesystem and execute its `main` with the
+/// mini-Dalvik VM. Output is retrieved with `dvm::take_output`.
+pub fn dvm_run_file(path: &str) -> bool {
+    let Some((_, size)) = stat(path) else {
+        return false;
+    };
+    let Some(handle) = open(path) else {
+        return false;
+    };
+    let want = (size as usize).min(65536);
+    let buf = unsafe { &mut *core::ptr::addr_of_mut!(DEXFILE) };
+    let got = read_file(handle, 0, &mut buf[..want]);
+    close(handle);
+    if got < want {
+        return false;
+    }
+    dvm::run(&buf[..got])
 }
 
 /// Read the UTC clock: `[epoch, year, month, day, hour, minute, second]`.

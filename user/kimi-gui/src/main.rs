@@ -57,6 +57,7 @@ enum AppKind {
     Terminal,
     Browser,
     Apk,
+    Dvm,
 }
 
 const GRID: [AppKind; 12] = [
@@ -74,7 +75,7 @@ const GRID: [AppKind; 12] = [
     AppKind::Terminal,
 ];
 
-const GRID2: [AppKind; 2] = [AppKind::Browser, AppKind::Apk];
+const GRID2: [AppKind; 3] = [AppKind::Browser, AppKind::Apk, AppKind::Dvm];
 
 fn page_apps(page: usize) -> &'static [AppKind] {
     match page {
@@ -922,6 +923,13 @@ fn draw_glyph(screen: &Screen, app: AppKind, cx: i64, cy: i64, size: i64, color:
             screen.line(cx + s / 8, cy - s / 6, cx + s / 8, cy + s / 6, 2, color);
             screen.line(cx - s / 8, cy, cx + s / 8, cy, 2, color);
         }
+        AppKind::Dvm => {
+            screen.round_rect(cx - s / 3, cy - s / 3, s * 2 / 3, s * 2 / 3, s / 12, color);
+            screen.round_rect(cx - s / 3 + 2, cy - s / 3 + 2, s * 2 / 3 - 4, s * 2 / 3 - 4, s / 16, SURFACE_HI);
+            screen.line(cx - s / 10, cy - s / 6, cx - s / 10, cy + s / 6, 3, color);
+            screen.line(cx - s / 10, cy - s / 6, cx + s / 6, cy, 3, color);
+            screen.line(cx - s / 10, cy + s / 6, cx + s / 6, cy, 3, color);
+        }
     }
 }
 
@@ -1443,6 +1451,7 @@ impl AppKind {
             AppKind::Terminal => "Terminal",
             AppKind::Browser => "Browser",
             AppKind::Apk => "APK",
+            AppKind::Dvm => "DEX",
         }
     }
 }

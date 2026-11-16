@@ -133,6 +133,15 @@ Target-independent, implemented before display/device work:
     parser in libkimi, exposed as a shell command and a GUI app. Inspects
     package/version/permissions/activities/DEX. Execution of real APKs is out
     of scope (needs the Android runtime) — see docs/android-feasibility.md.
+33. ~~Mini-Dalvik (DEX execution).~~ Done: a bounded register-based DEX
+    interpreter (`libkimi/src/dvm.rs`) with a hand-written micro core library
+    (Object/String/StringBuilder/System.out/PrintStream). Executes
+    purpose-built DEX (javac + d8) — arithmetic, branches/loops, arrays,
+    strings, instance fields and virtual/static user methods. Exposed as the
+    shell `dvm <file.dex>` command and a GUI "DEX" runner (home page 2).
+    Verified host-side (8/8 conformance) and on the guest (shell + GUI). This
+    is Stage 2 / layer L2 of docs/android-feasibility.md: it runs *your own*
+    bytecode, NOT Play-Store APKs (those still need the full Android runtime).
 
 EL0 processes are preempted by the timer (50 ms quantum, round-robin among
 `Ready` processes), and a process blocked in `read` yields the CPU. Syscalls

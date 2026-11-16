@@ -164,6 +164,39 @@ impl ApkApp {
     }
 }
 
+pub struct DvmApp {
+    names: [[u8; 32]; 8],
+    name_lens: [usize; 8],
+    count: usize,
+    selected: Option<usize>,
+    output: [u8; 1024],
+    out_len: usize,
+    ok: bool,
+    err: [u8; 48],
+    err_len: usize,
+}
+
+impl DvmApp {
+    fn refresh(&mut self) {
+        self.count = 0;
+        self.selected = None;
+        self.out_len = 0;
+        self.ok = false;
+        self.err_len = 0;
+        let mut buffer = [0u8; 512];
+        if let Some(n) = k::listdir("/disk", &mut buffer) {
+            for name in buffer[..n].split(|&b| b == 0) {
+                if name.len() > 4 && &name[name.len() - 4..] == b".dex" && self.count < 8 {
+                    let len = name.len().min(32);
+                    self.names[self.count][..len].copy_from_slice(&name[..len]);
+                    self.name_lens[self.count] = len;
+                    self.count += 1;
+                }
+            }
+        }
+    }
+}
+
 pub struct Apps {
     pub phone: Phone,
     pub messages: Messages,
@@ -177,6 +210,7 @@ pub struct Apps {
     pub terminal: Terminal,
     pub browser: Browser,
     pub apk: ApkApp,
+    pub dvm: DvmApp,
 }
 
 const KEY_LABELS: [&str; 12] = [
@@ -566,6 +600,17 @@ impl Apps {
                 selected: None,
                 info: k::apk::ApkInfo::new(),
             },
+            dvm: DvmApp {
+                names: [[0; 32]; 8],
+                name_lens: [0; 8],
+                count: 0,
+                selected: None,
+                output: [0; 1024],
+                out_len: 0,
+                ok: false,
+                err: [0; 48],
+                err_len: 0,
+            },
         }
     }
 }
@@ -577,6 +622,7 @@ pub fn open(apps: &mut Apps, app: AppKind) {
         AppKind::Camera => apps.camera.status_len = 0,
         AppKind::Browser => apps.browser.editing = apps.browser.line_count == 0,
         AppKind::Apk => apps.apk.refresh(),
+        AppKind::Dvm => apps.dvm.refresh(),
         _ => {}
     }
 }
@@ -586,6 +632,13 @@ pub fn back(apps: &mut Apps, app: AppKind) -> bool {
         AppKind::Browser => false,
         AppKind::Apk => {
             if apps.apk.selected.take().is_some() {
+                true
+            } else {
+                false
+            }
+        }
+        AppKind::Dvm => {
+            if apps.dvm.selected.take().is_some() {
                 true
             } else {
                 false
@@ -1024,6 +1077,7 @@ pub fn tap(screen: &Screen, apps: &mut Apps, app: AppKind, point: (i64, i64), _c
         AppKind::Weather => weather_tap(apps, point),
         AppKind::Browser => browser_tap(apps, point),
         AppKind::Apk => apk_tap(apps, point),
+        AppKind::Dvm => dvm_tap(apps, point),
         _ => {}
     }
 }
@@ -1271,6 +1325,7 @@ pub fn draw(screen: &Screen, apps: &Apps, app: AppKind, clock: [u64; 7]) {
         AppKind::Terminal => draw_terminal(screen, &apps.terminal),
         AppKind::Browser => draw_browser(screen, &apps.browser),
         AppKind::Apk => draw_apk(screen, &apps.apk),
+        AppKind::Dvm => draw_dvm(screen, &apps.dvm),
         _ => {}
     }
 }
@@ -2300,6 +2355,72 @@ fn draw_apk(screen: &Screen, apk: &ApkApp) {
         let y = 120 + i as i64 * 56;
         screen.round_rect(20, y, width - 40, 48, 16, SURFACE);
         screen.text(36, y + 16, slice_str(&apk.names[i][..apk.name_lens[i]]), 2, TEXT);
+    }
+}
+
+fn dvm_tap(apps: &mut Apps, point: (i64, i64)) {
+    if apps.dvm.selected.is_some() {
+        apps.dvm.selected = None;
+        return;
+    }
+    if point.1 >= 120 {
+        let index = ((point.1 - 120) / 56) as usize;
+        if index < apps.dvm.count && point.0 >= 20 && point.0 < 460 {
+            let mut path = [0u8; 48];
+            let prefix = b"/disk/";
+            path[..prefix.len()].copy_from_slice(prefix);
+            let len = apps.dvm.name_lens[index];
+            path[prefix.len()..prefix.len() + len]
+                .copy_from_slice(&apps.dvm.names[index][..len]);
+            let path_str = slice_str(&path[..prefix.len() + len]);
+            apps.dvm.ok = k::dvm_run_file(path_str);
+            apps.dvm.out_len = k::dvm::take_output(&mut apps.dvm.output);
+            k::print_bytes(&apps.dvm.output[..apps.dvm.out_len]);
+            let e = k::dvm::last_error().as_bytes();
+            let el = e.len().min(48);
+            apps.dvm.err[..el].copy_from_slice(&e[..el]);
+            apps.dvm.err_len = el;
+            apps.dvm.selected = Some(index);
+        }
+    }
+}
+
+fn draw_dvm(screen: &Screen, dvm: &DvmApp) {
+    let width = screen.width();
+    screen.fill(0, 93, width, screen.height() - 93, BLACK);
+
+    if let Some(index) = dvm.selected {
+        screen.text(20, 104, slice_str(&dvm.names[index][..dvm.name_lens[index]]), 2, TEXT);
+        screen.text(20, 140, "OUTPUT", 1, RED);
+        let mut y = 162i64;
+        for line in dvm.output[..dvm.out_len].split(|&b| b == b'\n') {
+            if y > 660 {
+                break;
+            }
+            if !line.is_empty() {
+                screen.text(28, y, slice_str(line), 1, TEXT);
+            }
+            y += 20;
+        }
+        if dvm.ok {
+            screen.text(20, 684, "executed on mini-Dalvik", 1, MUTED);
+        } else {
+            screen.text(20, 684, slice_str(&dvm.err[..dvm.err_len]), 1, RED);
+        }
+        screen.text(20, 704, "tap to go back", 1, MUTED);
+        return;
+    }
+
+    screen.text(20, 104, "DEX files on /disk", 2, TEXT);
+    if dvm.count == 0 {
+        screen.text_centered(width / 2, 380, "No .dex files found", 2, MUTED);
+        screen.text_centered(width / 2, 416, "Compile Java with javac + d8", 1, 0x0050_505a);
+        return;
+    }
+    for i in 0..dvm.count {
+        let y = 120 + i as i64 * 56;
+        screen.round_rect(20, y, width - 40, 48, 16, SURFACE);
+        screen.text(36, y + 16, slice_str(&dvm.names[i][..dvm.name_lens[i]]), 2, TEXT);
     }
 }
 

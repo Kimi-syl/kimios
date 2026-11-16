@@ -7,6 +7,37 @@ branch `main` as fetched on the date above; they drift between releases.
 
 ---
 
+## 0. Implementation status (updated 2026-11-16)
+
+Since this study was written, the bounded path has been built and verified:
+
+- **Stage 0 (L0, APK inspector)** — shipped (`libkimi/src/apk.rs`): ZIP+inflate,
+  AXML manifest, DEX header; shell `apk` + GUI app.
+- **Stage 2 (L2, mini-Dalvik VM)** — shipped (`libkimi/src/dvm.rs`): a
+  register-based interpreter for a frozen opcode subset (const/move/result,
+  arithmetic in 23x/2addr/lit8/lit16 forms, branches/goto, arrays, iget/iput/
+  sget/sput, new-instance/new-array, all five invoke kinds + range) with a
+  hand-written micro-libcore (Object, String, StringBuilder, System.out,
+  PrintStream). Single-threaded, bump arenas (no GC), no-op monitors, no
+  verifier (trusted DEX). Unimplemented opcodes trap with an error.
+  - Exposed as shell `dvm <file.dex>` and a GUI "DEX" runner (home page 2).
+  - **Verified host-side**: 8/8 conformance (hello, arithmetic, loop, string
+    concat, user static method + 3-register math, negatives, int arrays, a user
+    class with an instance field + virtual method) — same `dvm.rs` compiled for
+    the host.
+  - **Verified on the guest** (QEMU bare-metal): all 8 run via the shell, and
+    the GUI runner executes `hello.dex` → "Hello from KimiOS!".
+  - Test DEX is purpose-built (`javac --release 8` + `d8 --debug`). The
+    `method_idx_diff` resets to absolute at the start of the virtual-method list
+    (matches libdex), which the parser handles.
+
+**The verdict below is unchanged:** this executes *purpose-built* bytecode. It
+does **not** run Play-Store APKs — those still require the full Android runtime
+(L3–L6). Stage 2's success criterion (a fixed self-written corpus runs correctly
+on-device) is met; "any arbitrary APK launches" remains an explicit non-goal.
+
+---
+
 ## 1. Executive verdict
 
 **KimiOS cannot run real Play-Store APKs, and no realistic amount of hobby effort will
