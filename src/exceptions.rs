@@ -68,6 +68,15 @@ pub extern "C" fn exception_handler(frame: &mut ExceptionFrame) {
         let arg3 = frame.x[3];
         let arg4 = frame.x[4];
 
+        // Linux ABI: a static Linux ELF uses Linux syscall numbers. Route to
+        // the translation layer instead of the native KimiOS ABI.
+        if process::current_is_linux() {
+            if let Some(result) = crate::linux::dispatch(frame, number) {
+                frame.x[0] = result;
+            }
+            return;
+        }
+
         // These may switch to another process; the frame then belongs to the
         // next process, so do not write a result into it.
         match number {

@@ -8,6 +8,7 @@
 
 pub mod apk;
 pub mod dvm;
+pub mod kpkg;
 
 use core::arch::asm;
 

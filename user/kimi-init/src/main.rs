@@ -113,7 +113,7 @@ pub extern "C" fn _start() -> ! {
     k::print("\nKimiOS user shell (libkimi), pid ");
     k::print_u64(k::getpid());
     k::print("\n");
-    k::print("Commands: ls, cat, write, rm, mv, mkdir, rmdir, df, net, dns, fetch, apk, dvm, date, stat, time, sleep, spawn, run, wait, ps, kill, mem, exec, help, exit\n");
+    k::print("Commands: ls, cat, write, rm, mv, mkdir, rmdir, df, net, dns, fetch, apk, dvm, kpkg, date, stat, time, sleep, spawn, run, wait, ps, kill, mem, exec, help, exit\n");
 
     let mut line = [0u8; 128];
     let mut path_buffer = [0u8; 96];
@@ -439,6 +439,22 @@ pub extern "C" fn _start() -> ! {
                 k::print("dvm: ");
                 k::print(if e.is_empty() { "cannot read DEX file" } else { e });
                 k::print("\n");
+            }
+        } else if command == &b"kpkg"[..] {
+            let (sub, rest) = split_word(argument);
+            let rest = trim(rest);
+            match sub {
+                b"update" => k::kpkg::update(core::str::from_utf8(rest).unwrap_or("")),
+                b"list" => k::kpkg::list(),
+                b"install" => match core::str::from_utf8(rest) {
+                    Ok(name) if !name.is_empty() => k::kpkg::install(name),
+                    _ => k::print("usage: kpkg install <name>\n"),
+                },
+                b"run" => match core::str::from_utf8(rest) {
+                    Ok(name) if !name.is_empty() => k::kpkg::run(name),
+                    _ => k::print("usage: kpkg run <name>\n"),
+                },
+                _ => k::kpkg::help(),
             }
         } else if command == &b"net"[..] {
             let timeout = parse_u64(argument).unwrap_or(5000);

@@ -15,6 +15,7 @@ mod fwcfg;
 mod gic;
 mod input;
 mod irq;
+mod linux;
 mod mmu;
 mod net;
 mod pe;
@@ -153,15 +154,15 @@ pub extern "C" fn kmain(dtb: usize) -> ! {
 
     gic::init();
     let frequency = timer::frequency();
-    let interval = frequency / 2; // 500 ms
+    let interval = frequency / 20; // 50 ms
     timer::start_periodic(interval);
 
     println!("CNTFRQ_EL0  : {} Hz", frequency);
-    println!("Timer       : PPI 30, {} ticks per tick (500 ms)", interval);
+    println!("Timer       : PPI 30, {} ticks per tick (50 ms)", interval);
     println!("Unmasking IRQs...");
     gic::enable_irqs();
 
-    while irq::ticks() < 5 {
+    while irq::ticks() < 2 {
         unsafe { asm!("wfe") };
     }
 
@@ -180,10 +181,10 @@ pub extern "C" fn kmain(dtb: usize) -> ! {
     sched::spawn(thread_b, 0).expect("no free thread slot");
     sched::spawn(thread_once, 0).expect("no free thread slot");
     println!("Spawned A, B and one-shot C (64 KiB stacks)");
-    println!("Quantum: 100 ms; running for 30 ticks...");
+    println!("Quantum: 20 ms; running for 6 ticks...");
 
-    let target = irq::ticks() + 30;
-    timer::start_periodic(timer::frequency() / 10);
+    let target = irq::ticks() + 6;
+    timer::start_periodic(timer::frequency() / 50);
     gic::enable_irqs();
 
     while irq::ticks() < target {
@@ -243,6 +244,8 @@ pub extern "C" fn kmain(dtb: usize) -> ! {
     }
 
     // Phase 13: create the init process and enter EL0.
+    println!();
+    println!("[boot] kernel ready in {} ms", timer::uptime_ms());
     process::start_init();
 }
 

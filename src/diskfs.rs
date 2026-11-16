@@ -747,6 +747,20 @@ pub fn stat(path: &str) -> Option<(u64, u64, u64)> {
     ))
 }
 
+/// Size of an open inode (for Linux fstat). Returns None if unused/unmounted.
+pub fn inode_size(index: usize) -> Option<u64> {
+    let fs = FS.lock();
+    if !fs.mounted {
+        return None;
+    }
+    let mut inode = [0u8; INODE_SIZE];
+    read_inode(index, &mut inode).ok()?;
+    if inode[INODE_USED] == 0 {
+        return None;
+    }
+    Some(read_u64(&inode, INODE_SIZE_OFF))
+}
+
 /// Rename or move a file or directory.
 pub fn rename(old: &str, new: &str) -> bool {
     if old == new {

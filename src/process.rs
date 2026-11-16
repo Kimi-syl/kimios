@@ -12,13 +12,18 @@ use core::arch::asm;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use crate::exceptions::ExceptionFrame;
-use crate::{elf, mmu, pe, println, ramfs};
+use crate::ramfs::Vfs;
+use crate::{diskfs, elf, mmu, pe, println, ramfs};
 
 pub const MAX_PROCESSES: usize = 16;
 pub const MAX_FDS: usize = 8;
 /// User heap window: `brk` grows page by page from here.
 pub const USER_HEAP_START: u64 = 0x6080_0000;
 pub const USER_HEAP_LIMIT: u64 = 0x60C0_0000;
+/// Anonymous `mmap` region for Linux processes (grows upward).
+pub const LINUX_MMAP_START: u64 = 0x5000_0000;
+const LINUX_MMAP_LIMIT: u64 = 0x6000_0000;
+const LINUX_BRK_LIMIT: u64 = 0x2000_0000;
 /// Fixed user mapping for the framebuffer (read/write, no execute).
 pub const USER_FB_VA: u64 = 0x6600_0000;
 pub const SYS_ERROR: u64 = u64::MAX;
@@ -48,12 +53,15 @@ pub struct Descriptor {
     pub used: bool,
     pub kind: u8,
     pub index: usize,
+    /// Current file position (Linux read/write).
+    pub pos: u64,
 }
 
 const EMPTY_DESCRIPTOR: Descriptor = Descriptor {
     used: false,
     kind: FD_RAM,
     index: 0,
+    pos: 0,
 };
 
 pub struct Process {
@@ -72,6 +80,12 @@ pub struct Process {
     sleep_done: bool,
     /// Current program break (one past the last byte of the user heap).
     brk: u64,
+    /// True when this process uses the Linux syscall ABI (static Linux ELF).
+    pub linux: bool,
+    /// Linux program break (grows from the end of the data segment).
+    linux_brk: u64,
+    /// Next anonymous `mmap` address for a Linux process.
+    linux_mmap: u64,
     /// True when the framebuffer has been mapped into this process.
     fb_mapped: bool,
     space: Option<mmu::AddressSpace>,
@@ -91,6 +105,9 @@ const EMPTY_PROCESS: Process = Process {
     sleep_at: 0,
     sleep_done: false,
     brk: 0,
+    linux: false,
+    linux_brk: 0,
+    linux_mmap: 0,
     fb_mapped: false,
     space: None,
     frame: ExceptionFrame::EMPTY,
@@ -204,26 +221,51 @@ fn release_dead(slot: usize) {
 fn load_image(
     space: &mut mmu::AddressSpace,
     image: &[u8],
-) -> Result<(u64, u64), &'static str> {
+) -> Result<(u64, u64, u64, bool), &'static str> {
     if pe::is_pe(image) {
         let loaded = pe::load(image, space)?;
-        Ok((loaded.entry, loaded.stack_top))
+        Ok((loaded.entry, loaded.stack_top, USER_HEAP_START, false))
+    } else if elf::is_linux(image) {
+        let loaded = elf::load_linux(image, space)?;
+        Ok((loaded.entry, loaded.sp, loaded.brk, true))
     } else {
         let loaded = elf::load(image, space)?;
-        Ok((loaded.entry, loaded.stack_top))
+        Ok((loaded.entry, loaded.stack_top, USER_HEAP_START, false))
+    }
+}
+
+/// Load an executable image from RamFS (`/name`) or KimiFS (`/disk/name`).
+fn load_path(
+    space: &mut mmu::AddressSpace,
+    path: &str,
+) -> Result<(u64, u64, u64, bool), &'static str> {
+    if let Some(name) = path.strip_prefix("/disk/") {
+        let inode = diskfs::lookup(name).ok_or("executable not found")?;
+        let size = diskfs::inode_size(inode).ok_or("cannot stat executable")? as usize;
+        if size == 0 || size > 3 * 1024 * 1024 {
+            return Err("executable too large");
+        }
+        let layout = core::alloc::Layout::from_size_align(size, 16).map_err(|_| "bad size")?;
+        let buf = crate::allocator::alloc(layout).ok_or("out of memory for executable")?;
+        let slice = unsafe { core::slice::from_raw_parts_mut(buf.as_ptr(), size) };
+        let n = diskfs::read(inode, 0, slice);
+        let result = load_image(space, &slice[..n]);
+        crate::allocator::dealloc(buf);
+        result
+    } else {
+        let file = ramfs::index_of(path)
+            .and_then(ramfs::file_at)
+            .ok_or("executable not found")?;
+        load_image(space, file.data)
     }
 }
 
 /// Create a process from an embedded file. Returns its process slot.
 #[allow(static_mut_refs)]
 fn create(parent: u64, path: &str) -> Result<usize, &'static str> {
-    let file = ramfs::index_of(path)
-        .and_then(ramfs::file_at)
-        .ok_or("executable not found")?;
-
     let slot = free_slot().ok_or("process table full")?;
     let mut space = mmu::AddressSpace::new().ok_or("out of memory for page tables")?;
-    let (entry, stack_top) = load_image(&mut space, file.data)?;
+    let (entry, sp, brk, linux) = load_path(&mut space, path)?;
 
     let pid = NEXT_PID.fetch_add(1, Ordering::AcqRel);
     unsafe {
@@ -238,6 +280,9 @@ fn create(parent: u64, path: &str) -> Result<usize, &'static str> {
             sleep_at: 0,
             sleep_done: false,
             brk: USER_HEAP_START,
+            linux,
+            linux_brk: brk,
+            linux_mmap: LINUX_MMAP_START,
             fb_mapped: false,
             space: Some(space),
             frame: ExceptionFrame {
@@ -245,7 +290,7 @@ fn create(parent: u64, path: &str) -> Result<usize, &'static str> {
                 elr: entry,
                 spsr: 0, // EL0t, IRQs enabled (timer preemption)
             },
-            sp_el0: stack_top,
+            sp_el0: sp,
             fds: [EMPTY_DESCRIPTOR; MAX_FDS],
         };
     }
@@ -679,16 +724,12 @@ pub fn sys_exec(frame: &mut ExceptionFrame, path: &str) -> u64 {
     let Some(slot) = current_slot() else {
         return SYS_ERROR;
     };
-    let Some(file) = ramfs::index_of(path).and_then(ramfs::file_at) else {
-        println!("exec: {} not found", path);
-        return SYS_ERROR;
-    };
 
     let mut space = match mmu::AddressSpace::new() {
         Some(space) => space,
         None => return SYS_ERROR,
     };
-    let (entry, stack_top) = match load_image(&mut space, file.data) {
+    let (entry, sp, brk, linux) = match load_path(&mut space, path) {
         Ok(image) => image,
         Err(error) => {
             println!("exec: {}", error);
@@ -698,8 +739,11 @@ pub fn sys_exec(frame: &mut ExceptionFrame, path: &str) -> u64 {
 
     unsafe {
         let old = PROCESSES[slot].space.replace(space);
-        PROCESSES[slot].sp_el0 = stack_top;
+        PROCESSES[slot].sp_el0 = sp;
         PROCESSES[slot].brk = USER_HEAP_START;
+        PROCESSES[slot].linux = linux;
+        PROCESSES[slot].linux_brk = brk;
+        PROCESSES[slot].linux_mmap = LINUX_MMAP_START;
         if PROCESSES[slot].fb_mapped {
             crate::fb::set_console(true);
             PROCESSES[slot].fb_mapped = false;
@@ -718,7 +762,7 @@ pub fn sys_exec(frame: &mut ExceptionFrame, path: &str) -> u64 {
 
         asm!(
             "msr sp_el0, {sp}",
-            sp = in(reg) stack_top,
+            sp = in(reg) sp,
             options(nomem, nostack),
         );
     }
@@ -884,6 +928,119 @@ pub fn sys_brk(request: u64) -> u64 {
     new_end
 }
 
+/// Whether the current process uses the Linux syscall ABI.
+pub fn current_is_linux() -> bool {
+    current_slot()
+        .map(|slot| unsafe { PROCESSES[slot].linux })
+        .unwrap_or(false)
+}
+
+/// Linux brk(2): grow the heap from the end of the data segment.
+#[allow(static_mut_refs)]
+pub fn linux_brk(request: u64) -> u64 {
+    let Some(slot) = current_slot() else {
+        return 0;
+    };
+    let process = unsafe { &mut PROCESSES[slot] };
+    let current = process.linux_brk;
+    if request == 0 || request <= current {
+        return current;
+    }
+    if request > LINUX_BRK_LIMIT {
+        return current;
+    }
+    let new_end = (request + 0xfff) & !0xfff;
+    let pages = ((new_end - current) / 4096) as usize;
+    let Some(space) = process.space.as_mut() else {
+        return current;
+    };
+    if space.spare_frames() < pages + 2 {
+        return current;
+    }
+    for page in 0..pages {
+        let address = current + (page as u64) * 4096;
+        let Some(frame) = space.alloc_frame() else {
+            return current;
+        };
+        unsafe {
+            core::ptr::write_bytes(frame as *mut u8, 0, 4096);
+        }
+        space.map_page(address, frame, false);
+    }
+    process.linux_brk = new_end;
+    new_end
+}
+
+/// Linux anonymous mmap(2): hand out pages from the mmap region.
+#[allow(static_mut_refs)]
+pub fn linux_mmap(length: u64, executable: bool) -> Option<u64> {
+    let slot = current_slot()?;
+    let process = unsafe { &mut PROCESSES[slot] };
+    let length = (length + 0xfff) & !0xfff;
+    let address = process.linux_mmap;
+    if length == 0 || address + length > LINUX_MMAP_LIMIT {
+        return None;
+    }
+    let pages = (length / 4096) as usize;
+    let space = process.space.as_mut()?;
+    if space.spare_frames() < pages + 2 {
+        return None;
+    }
+    for page in 0..pages {
+        let a = address + (page as u64) * 4096;
+        let frame = space.alloc_frame()?;
+        unsafe {
+            core::ptr::write_bytes(frame as *mut u8, 0, 4096);
+        }
+        space.map_page(a, frame, executable);
+    }
+    process.linux_mmap = address + length;
+    Some(address)
+}
+
+/// Positional read for a Linux file descriptor; advances the file position.
+#[allow(static_mut_refs)]
+pub fn fd_read(fd: u64, buffer: &mut [u8]) -> Option<usize> {
+    let slot = current_slot()?;
+    let index = fd as usize;
+    if index >= MAX_FDS {
+        return None;
+    }
+    let descriptor = unsafe { PROCESSES[slot].fds[index] };
+    if !descriptor.used {
+        return None;
+    }
+    let n = if descriptor.kind == FD_DISK {
+        diskfs::read(descriptor.index, descriptor.pos, buffer)
+    } else {
+        let file = ramfs::file_at(descriptor.index)?;
+        ramfs::RAMFS.read(file, descriptor.pos as usize, buffer)
+    };
+    unsafe {
+        PROCESSES[slot].fds[index].pos += n as u64;
+    }
+    Some(n)
+}
+
+/// Positional write for a Linux file descriptor; advances the file position.
+#[allow(static_mut_refs)]
+pub fn fd_write(fd: u64, bytes: &[u8]) -> Option<usize> {
+    let slot = current_slot()?;
+    let index = fd as usize;
+    if index >= MAX_FDS {
+        return None;
+    }
+    let descriptor = unsafe { PROCESSES[slot].fds[index] };
+    if !descriptor.used || descriptor.kind != FD_DISK {
+        return None;
+    }
+    let n = diskfs::write(descriptor.index, descriptor.pos, bytes).ok()?;
+    unsafe {
+        PROCESSES[slot].fds[index].pos += n as u64;
+    }
+    Some(n)
+}
+
 /// Whether `[pointer, pointer + length)` is fully mapped in the calling
 /// process. Syscalls use this before touching user memory so a bad pointer
 /// kills the caller instead of faulting the kernel.
@@ -949,6 +1106,7 @@ pub fn open_fd(kind: u8, index: usize) -> Option<u64> {
                     used: true,
                     kind,
                     index,
+                    pos: 0,
                 };
                 return Some(slot_index as u64);
             }

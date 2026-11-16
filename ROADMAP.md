@@ -143,6 +143,31 @@ Target-independent, implemented before display/device work:
     is Stage 2 / layer L2 of docs/android-feasibility.md: it runs *your own*
     bytecode, NOT Play-Store APKs (those still need the full Android runtime).
 
+> **The Pivot (Phase 47+).** Android APK compatibility is officially abandoned
+> — the Bionic/ART/framework wall is team-scale. KimiOS is now a "Desktop Lite"
+> environment (the WSL1 model): a Linux syscall translation layer runs standard
+> statically-linked Linux binaries (musl/glibc) and native Rust apps, with a
+> sub-5-second boot.
+
+34. ~~Linux ABI (syscall translation layer).~~ Done: the SVC handler detects a
+    static Linux ELF (linked below the KimiOS user base) and routes its Linux
+    syscall numbers (x8) to a translation layer (`src/linux.rs`): write→UART,
+    exit→kill, brk/mmap→frame allocator, openat/read/close→KimiFS, plus
+    getpid/uname/clock_gettime/getrandom/fstat and signal no-ops. The MMU maps
+    low link addresses (0x40_0000) by splitting device blocks into tables, and
+    the loader builds a real Linux initial stack (argc/argv/envp/auxv).
+    Verified on the guest: asm, musl C, musl Rust and glibc static hello all
+    print and exit 0; malloc/brk (fib) and uname work. `run /disk/<binary>`.
+35. ~~Kimi package manager (kpkg).~~ Done: apt-like shell command. `kpkg
+    update [url]` fetches repo.json over HTTP (smoltcp) and caches it; `kpkg
+    list` shows packages; `kpkg install <name>` downloads a static binary to
+    /disk/bin; `kpkg run <name>` executes it via the Linux ABI. Verified
+    end-to-end on the guest (update→install hello/fib→run). Honest scope:
+    npm/Node, pip/CPython and TLS curl need a far larger ABI (threads/futex/
+    epoll/dlopen/sockets/TLS) and are marked not-runnable in the repo.
+36. ~~Fast boot.~~ Done: trimmed the legacy timer/scheduler boot demos; kernel
+    reaches init in ~0.4 s (was ~7-8 s), well under the 5 s Desktop Lite goal.
+
 EL0 processes are preempted by the timer (50 ms quantum, round-robin among
 `Ready` processes), and a process blocked in `read` yields the CPU. Syscalls
 still execute with interrupts masked, which is acceptable until blocking I/O

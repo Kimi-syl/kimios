@@ -44,6 +44,9 @@ const PTE_UXN: u64 = 1 << 54;
 const PTE_PAGE_ADDR: u64 = 0x0000_ffff_ffff_f000;
 /// Physical address bits [47:21] of a 2 MiB block descriptor.
 const PTE_BLOCK_ADDR: u64 = 0x0000_ffff_ffe0_0000;
+/// Attribute bits preserved when splitting a block into a finer table:
+/// AttrIndx/AP/SH/AF/nG (bits 2..11) and contiguous/PXN/UXN (bits 52..54).
+const PTE_ATTR_MASK: u64 = 0xffc | (0b111 << 52);
 
 // MAIR_EL1: Attr0 = Normal write-back RW-allocate (0xFF),
 //           Attr1 = Device-nGnRnE (0x00).
@@ -258,10 +261,15 @@ impl AddressSpace {
     }
 
     fn map_entry(&mut self, virtual_address: u64, physical_address: u64, executable: bool) {
+        let l1_index = ((virtual_address >> 30) & 0x1ff) as usize;
         let l2_index = ((virtual_address >> 21) & 0x1ff) as usize;
         let l3_index = ((virtual_address >> 12) & 0x1ff) as usize;
-        let table = self.l3_table(l2_index);
-        let table = table.expect("user page-table frame pool exhausted");
+        let l2 = self
+            .l2_table_for(l1_index)
+            .expect("user page-table frame pool exhausted");
+        let table = self
+            .l3_table_for(l2, l1_index, l2_index)
+            .expect("user page-table frame pool exhausted");
 
         let mut flags = PTE_VALID
             | PTE_PAGE
@@ -277,20 +285,52 @@ impl AddressSpace {
         unsafe {
             (*(table as *mut PageTable)).entries[l3_index] =
                 (physical_address & PTE_PAGE_ADDR) | flags;
+            asm!("dsb sy", "isb");
         }
     }
 
-    fn l3_table(&mut self, l2_index: usize) -> Option<u64> {
-        let l2 = self.l2_table();
-        let entry = unsafe { (*(l2 as *const PageTable)).entries[l2_index] };
-
+    /// Return the L2 table for an L1 slot, splitting a 1 GiB block into 512
+    /// 2 MiB blocks (preserving its attributes) if it is not already a table.
+    /// This lets user pages be mapped anywhere, including the low addresses
+    /// (e.g. 0x40_0000) where standard static Linux binaries are linked.
+    fn l2_table_for(&mut self, l1_index: usize) -> Option<u64> {
+        let l1 = self.l1_table();
+        let entry = unsafe { (*(l1 as *const PageTable)).entries[l1_index] };
         if entry & PTE_VALID != 0 && entry & PTE_TABLE != 0 {
             return Some(entry & PTE_PAGE_ADDR);
         }
 
         let frame = self.alloc_frame()?;
+        let base = (l1_index as u64) << 30;
+        let attrs = entry & PTE_ATTR_MASK;
         unsafe {
-            core::ptr::write_bytes(frame as *mut u8, 0, 4096);
+            for i in 0..512u64 {
+                let pa = base + i * 0x0020_0000;
+                (*(frame as *mut PageTable)).entries[i as usize] = pa | attrs | PTE_VALID;
+            }
+            (*(l1 as *mut PageTable)).entries[l1_index] = frame | PTE_VALID | PTE_TABLE;
+            asm!("dsb sy", "isb");
+        }
+        Some(frame)
+    }
+
+    /// Return the L3 table for an L2 slot, splitting a 2 MiB block into 512
+    /// 4 KiB pages (preserving its attributes) if it is not already a table.
+    fn l3_table_for(&mut self, l2: u64, l1_index: usize, l2_index: usize) -> Option<u64> {
+        let entry = unsafe { (*(l2 as *const PageTable)).entries[l2_index] };
+        if entry & PTE_VALID != 0 && entry & PTE_TABLE != 0 {
+            return Some(entry & PTE_PAGE_ADDR);
+        }
+
+        let frame = self.alloc_frame()?;
+        let base = ((l1_index as u64) << 30) | ((l2_index as u64) << 21);
+        let attrs = entry & PTE_ATTR_MASK;
+        unsafe {
+            for i in 0..512u64 {
+                let pa = base + i * 0x1000;
+                (*(frame as *mut PageTable)).entries[i as usize] =
+                    pa | attrs | PTE_VALID | PTE_PAGE;
+            }
             (*(l2 as *mut PageTable)).entries[l2_index] = frame | PTE_VALID | PTE_TABLE;
             asm!("dsb sy", "isb");
         }
@@ -300,12 +340,6 @@ impl AddressSpace {
     fn l1_table(&self) -> u64 {
         unsafe {
             (*(self.ttbr0 as *const PageTable)).entries[0] & PTE_PAGE_ADDR
-        }
-    }
-
-    fn l2_table(&self) -> u64 {
-        unsafe {
-            (*(self.l1_table() as *const PageTable)).entries[1] & PTE_PAGE_ADDR
         }
     }
 
@@ -353,6 +387,25 @@ impl AddressSpace {
         };
         unsafe {
             core::ptr::write_volatile(physical as *mut u64, value);
+        }
+        true
+    }
+
+    /// Write a byte slice into this (possibly inactive) address space,
+    /// translating each page. Used to build the Linux initial stack.
+    pub fn write_bytes(&mut self, virtual_address: u64, data: &[u8]) -> bool {
+        let mut off = 0usize;
+        while off < data.len() {
+            let va = virtual_address + off as u64;
+            let Some(physical) = self.translate(va) else {
+                return false;
+            };
+            let page_off = (va & 0xfff) as usize;
+            let n = (4096 - page_off).min(data.len() - off);
+            unsafe {
+                core::ptr::copy_nonoverlapping(data.as_ptr().add(off), physical as *mut u8, n);
+            }
+            off += n;
         }
         true
     }
