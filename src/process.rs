@@ -1256,13 +1256,23 @@ pub fn user_range_ok(pointer: u64, length: u64) -> bool {
 
 /// Map the framebuffer into the current process and hand drawing to user
 /// space by silencing the text console. Returns the fixed user address.
-#[allow(static_mut_refs)]
 pub fn map_framebuffer() -> Option<u64> {
+    let (physical, stride, height) = crate::fb::mapping()?;
+    map_fb_at(physical, stride, height)
+}
+
+/// Map the offscreen back buffer for double-buffered GUI rendering.
+pub fn map_backbuffer() -> Option<u64> {
+    let (physical, stride, height) = crate::fb::back_mapping()?;
+    map_fb_at(physical, stride, height)
+}
+
+#[allow(static_mut_refs)]
+fn map_fb_at(physical: u64, stride: usize, height: usize) -> Option<u64> {
     let slot = current_slot()?;
     if unsafe { PROCESSES[slot].fb_mapped } {
         return Some(USER_FB_VA);
     }
-    let (physical, stride, height) = crate::fb::mapping()?;
     let bytes = (stride * height) as u64;
     let pages = (bytes + 0xfff) / 0x1000;
 

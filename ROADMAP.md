@@ -177,6 +177,13 @@ Target-independent, implemented before display/device work:
     `run /disk/busybox <applet> [args]` or via `kpkg run busybox <applet>`.
     Honest limit: interactive `busybox sh` needs fork/execve (not implemented);
     individual applets work. Kernel heap grown to 8 MiB for large binaries.
+38. ~~GUI flicker fix (double buffering).~~ Done: the GUI now renders to an
+    offscreen back buffer and publishes each finished frame with a single
+    `fb_present` copy (new SYS_FB_BACK/SYS_FB_PRESENT), so the display never
+    shows a half-drawn frame (the black flicker on scroll). The Android RFB
+    client forces opaque alpha (VNC's 32bpp padding byte was 0 → transparent
+    pixels) and handles DesktopSize/Cursor pseudo-encodings without dropping
+    the connection (which had caused constant reconnect/reload).
 
 EL0 processes are preempted by the timer (50 ms quantum, round-robin among
 `Ready` processes), and a process blocked in `read` yields the CPU. Syscalls

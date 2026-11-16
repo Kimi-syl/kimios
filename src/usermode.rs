@@ -43,6 +43,8 @@ pub const SYS_INPUT_POLL: u64 = 32;
 pub const SYS_INPUT_WAIT: u64 = 33;
 pub const SYS_NET: u64 = 34;
 pub const SYS_SPAWN_ARGS: u64 = 35;
+pub const SYS_FB_BACK: u64 = 36;
+pub const SYS_FB_PRESENT: u64 = 37;
 
 /// Coarse user-accessible window: ELF, stack, PE image/thunks/stack.
 const USER_SPACE_START: u64 = 0x6000_0000;
@@ -639,6 +641,20 @@ pub fn sys_fb_map() -> u64 {
         return ERROR;
     }
     process::map_framebuffer().unwrap_or(ERROR)
+}
+
+/// Map the offscreen back buffer (double-buffered GUI). Returns its address.
+pub fn sys_fb_back() -> u64 {
+    if !crate::fb::ready() {
+        return ERROR;
+    }
+    process::map_backbuffer().unwrap_or(ERROR)
+}
+
+/// Present the back buffer to the live framebuffer (one fast copy).
+pub fn sys_fb_present() -> u64 {
+    crate::fb::present();
+    0
 }
 
 /// Number of free data blocks, or u64::MAX without a mounted disk.

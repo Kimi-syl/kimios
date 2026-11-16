@@ -47,6 +47,8 @@ pub const SYS_INPUT_POLL: u64 = 32;
 pub const SYS_INPUT_WAIT: u64 = 33;
 pub const SYS_NET: u64 = 34;
 pub const SYS_SPAWN_ARGS: u64 = 35;
+pub const SYS_FB_BACK: u64 = 36;
+pub const SYS_FB_PRESENT: u64 = 37;
 
 pub const EV_KEY: u16 = 1;
 pub const EV_REL: u16 = 2;
@@ -492,6 +494,22 @@ pub fn fb_map() -> Option<u64> {
     } else {
         Some(result)
     }
+}
+
+/// Map the offscreen back buffer for double-buffered rendering. Render here,
+/// then call `fb_present()` to publish the finished frame without tearing.
+pub fn fb_back() -> Option<u64> {
+    let result = syscall3(SYS_FB_BACK, 0, 0, 0);
+    if result == ERROR {
+        None
+    } else {
+        Some(result)
+    }
+}
+
+/// Publish the back buffer to the display (one fast copy, no partial frames).
+pub fn fb_present() {
+    syscall3(SYS_FB_PRESENT, 0, 0, 0);
 }
 
 /// Current program break (one past the last heap byte).

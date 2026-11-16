@@ -65,6 +65,11 @@ struct Framebuffer([u32; MAX_WIDTH * MAX_HEIGHT]);
 
 static mut FRAMEBUFFER: Framebuffer = Framebuffer([COLOR_BG; MAX_WIDTH * MAX_HEIGHT]);
 
+/// Offscreen back buffer. A GUI renders here, then `present()` copies the
+/// finished frame to FRAMEBUFFER in one fast pass, so the display never shows
+/// a half-drawn frame (which otherwise appears as black flicker on scroll).
+static mut BACK: Framebuffer = Framebuffer([COLOR_BG; MAX_WIDTH * MAX_HEIGHT]);
+
 struct Screen {
     column: usize,
     row: usize,
@@ -241,6 +246,32 @@ pub fn mapping() -> Option<(u64, usize, usize)> {
     }
     let d = dims();
     Some((addr_of!(FRAMEBUFFER) as u64, d.stride, d.height))
+}
+
+/// Physical address of the offscreen back buffer (same layout as the front).
+pub fn back_mapping() -> Option<(u64, usize, usize)> {
+    if !ENABLED.load(Ordering::Acquire) {
+        return None;
+    }
+    let d = dims();
+    Some((addr_of!(BACK) as u64, d.stride, d.height))
+}
+
+/// Copy the finished back buffer to the live framebuffer in one pass.
+pub fn present() {
+    if !ENABLED.load(Ordering::Acquire) {
+        return;
+    }
+    let d = dims();
+    // stride == width pixels, so the active region is contiguous.
+    let pixels = d.width * d.height;
+    unsafe {
+        core::ptr::copy_nonoverlapping(
+            addr_of!(BACK) as *const u32,
+            addr_of!(FRAMEBUFFER) as *mut u32,
+            pixels,
+        );
+    }
 }
 
 /// Enable or disable mirroring console text (GUI mode). Re-enabling clears

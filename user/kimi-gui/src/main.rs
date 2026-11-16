@@ -236,8 +236,8 @@ pub extern "C" fn _start() -> ! {
         k::print("gui: no framebuffer\n");
         k::exit(1);
     };
-    let Some(base) = k::fb_map() else {
-        k::print("gui: fb_map failed\n");
+    let Some(base) = k::fb_back() else {
+        k::print("gui: fb_back failed\n");
         k::exit(1);
     };
 
@@ -454,6 +454,7 @@ fn unlock(screen: &Screen, ui: &mut Ui, clock: [u64; 7]) {
             draw_lock(screen, clock, 0);
             draw_home(screen, clock, ui, None, offset, true);
             draw_status_bar(screen, clock, ui);
+            k::fb_present();
             k::sleep_ms(12);
         }
     }
@@ -472,6 +473,7 @@ fn open_app(screen: &Screen, ui: &mut Ui, app: AppKind, clock: [u64; 7]) {
             draw_home(screen, clock, ui, None, 0, true);
             draw_app(screen, ui, app, clock, offset, true);
             draw_status_bar(screen, clock, ui);
+            k::fb_present();
             k::sleep_ms(12);
         }
     }
@@ -490,7 +492,8 @@ fn close_app(screen: &Screen, ui: &mut Ui, clock: [u64; 7]) {
                 draw_home(screen, clock, ui, None, 0, true);
                 draw_app(screen, ui, app, clock, offset, true);
                 draw_status_bar(screen, clock, ui);
-                k::sleep_ms(12);
+                k::fb_present();
+            k::sleep_ms(12);
             }
         }
     }
@@ -512,6 +515,7 @@ fn render(screen: &Screen, ui: &mut Ui, clock: [u64; 7]) {
         screen.circle(point.0, point.1, 3, TEXT);
     }
     ui.paint_bg = false;
+    k::fb_present();
 }
 
 fn draw_scene(screen: &Screen, ui: &Ui, clock: [u64; 7], paint_bg: bool) {
