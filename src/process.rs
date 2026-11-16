@@ -47,6 +47,8 @@ enum State {
 
 pub const FD_RAM: u8 = 0;
 pub const FD_DISK: u8 = 1;
+pub const FD_DIR: u8 = 2;
+pub const FD_CONSOLE: u8 = 3;
 
 #[derive(Clone, Copy)]
 pub struct Descriptor {
@@ -86,6 +88,12 @@ pub struct Process {
     linux_brk: u64,
     /// Next anonymous `mmap` address for a Linux process.
     linux_mmap: u64,
+    /// Linux current working directory (NUL-free, e.g. "/disk").
+    cwd: [u8; 64],
+    cwd_len: usize,
+    /// Resolved path for each directory descriptor (FD_DIR).
+    dir_path: [[u8; 64]; MAX_FDS],
+    dir_len: [usize; MAX_FDS],
     /// True when the framebuffer has been mapped into this process.
     fb_mapped: bool,
     space: Option<mmu::AddressSpace>,
@@ -108,6 +116,10 @@ const EMPTY_PROCESS: Process = Process {
     linux: false,
     linux_brk: 0,
     linux_mmap: 0,
+    cwd: [0; 64],
+    cwd_len: 0,
+    dir_path: [[0; 64]; MAX_FDS],
+    dir_len: [0; MAX_FDS],
     fb_mapped: false,
     space: None,
     frame: ExceptionFrame::EMPTY,
@@ -221,12 +233,13 @@ fn release_dead(slot: usize) {
 fn load_image(
     space: &mut mmu::AddressSpace,
     image: &[u8],
+    argv: &[&str],
 ) -> Result<(u64, u64, u64, bool), &'static str> {
     if pe::is_pe(image) {
         let loaded = pe::load(image, space)?;
         Ok((loaded.entry, loaded.stack_top, USER_HEAP_START, false))
     } else if elf::is_linux(image) {
-        let loaded = elf::load_linux(image, space)?;
+        let loaded = elf::load_linux(image, space, argv)?;
         Ok((loaded.entry, loaded.sp, loaded.brk, true))
     } else {
         let loaded = elf::load(image, space)?;
@@ -238,6 +251,7 @@ fn load_image(
 fn load_path(
     space: &mut mmu::AddressSpace,
     path: &str,
+    argv: &[&str],
 ) -> Result<(u64, u64, u64, bool), &'static str> {
     if let Some(name) = path.strip_prefix("/disk/") {
         let inode = diskfs::lookup(name).ok_or("executable not found")?;
@@ -249,23 +263,42 @@ fn load_path(
         let buf = crate::allocator::alloc(layout).ok_or("out of memory for executable")?;
         let slice = unsafe { core::slice::from_raw_parts_mut(buf.as_ptr(), size) };
         let n = diskfs::read(inode, 0, slice);
-        let result = load_image(space, &slice[..n]);
+        let result = load_image(space, &slice[..n], argv);
         crate::allocator::dealloc(buf);
         result
     } else {
         let file = ramfs::index_of(path)
             .and_then(ramfs::file_at)
             .ok_or("executable not found")?;
-        load_image(space, file.data)
+        load_image(space, file.data, argv)
+    }
+}
+
+fn basename(path: &str) -> &str {
+    match path.rfind('/') {
+        Some(i) => &path[i + 1..],
+        None => path,
     }
 }
 
 /// Create a process from an embedded file. Returns its process slot.
-#[allow(static_mut_refs)]
 fn create(parent: u64, path: &str) -> Result<usize, &'static str> {
+    create_args(parent, path, &[])
+}
+
+/// Create a process with extra command-line arguments (Linux argv[1..]).
+#[allow(static_mut_refs)]
+fn create_args(parent: u64, path: &str, extra: &[&str]) -> Result<usize, &'static str> {
     let slot = free_slot().ok_or("process table full")?;
     let mut space = mmu::AddressSpace::new().ok_or("out of memory for page tables")?;
-    let (entry, sp, brk, linux) = load_path(&mut space, path)?;
+
+    let mut argv: [&str; 17] = [""; 17];
+    argv[0] = basename(path);
+    let n = extra.len().min(16);
+    for i in 0..n {
+        argv[i + 1] = extra[i];
+    }
+    let (entry, sp, brk, linux) = load_path(&mut space, path, &argv[..1 + n])?;
 
     let pid = NEXT_PID.fetch_add(1, Ordering::AcqRel);
     unsafe {
@@ -283,6 +316,16 @@ fn create(parent: u64, path: &str) -> Result<usize, &'static str> {
             linux,
             linux_brk: brk,
             linux_mmap: LINUX_MMAP_START,
+            cwd: {
+                let mut c = [0u8; 64];
+                if linux {
+                    c[..5].copy_from_slice(b"/disk");
+                }
+                c
+            },
+            cwd_len: if linux { 5 } else { 0 },
+            dir_path: [[0; 64]; MAX_FDS],
+            dir_len: [0; MAX_FDS],
             fb_mapped: false,
             space: Some(space),
             frame: ExceptionFrame {
@@ -293,6 +336,17 @@ fn create(parent: u64, path: &str) -> Result<usize, &'static str> {
             sp_el0: sp,
             fds: [EMPTY_DESCRIPTOR; MAX_FDS],
         };
+        if linux {
+            // Reserve stdin/stdout/stderr so file/dir fds start at 3.
+            for i in 0..3 {
+                PROCESSES[slot].fds[i] = Descriptor {
+                    used: true,
+                    kind: FD_CONSOLE,
+                    index: 0,
+                    pos: 0,
+                };
+            }
+        }
     }
 
     println!(
@@ -729,7 +783,7 @@ pub fn sys_exec(frame: &mut ExceptionFrame, path: &str) -> u64 {
         Some(space) => space,
         None => return SYS_ERROR,
     };
-    let (entry, sp, brk, linux) = match load_path(&mut space, path) {
+    let (entry, sp, brk, linux) = match load_path(&mut space, path, &[basename(path)]) {
         Ok(image) => image,
         Err(error) => {
             println!("exec: {}", error);
@@ -780,6 +834,138 @@ pub fn sys_spawn(path: &str) -> u64 {
             println!("spawn: {}", error);
             SYS_ERROR
         }
+    }
+}
+
+/// Create a child process with command-line arguments (Linux argv[1..]).
+pub fn sys_spawn_args(path: &str, args: &[&str]) -> u64 {
+    let parent = current_pid();
+    match create_args(parent, path, args) {
+        Ok(slot) => unsafe { PROCESSES[slot].pid },
+        Err(error) => {
+            println!("spawn: {}", error);
+            SYS_ERROR
+        }
+    }
+}
+
+/// Current working directory of the calling Linux process.
+pub fn linux_cwd() -> &'static str {
+    let Some(slot) = current_slot() else {
+        return "/disk";
+    };
+    let p = unsafe { &PROCESSES[slot] };
+    core::str::from_utf8(&p.cwd[..p.cwd_len]).unwrap_or("/disk")
+}
+
+/// Set the calling process's working directory.
+#[allow(static_mut_refs)]
+pub fn set_cwd(path: &str) -> bool {
+    let Some(slot) = current_slot() else {
+        return false;
+    };
+    let p = unsafe { &mut PROCESSES[slot] };
+    let n = path.len().min(63);
+    p.cwd[..n].copy_from_slice(path.as_bytes());
+    p.cwd_len = n;
+    true
+}
+
+/// Open a directory descriptor, remembering its resolved path for getdents64.
+#[allow(static_mut_refs)]
+pub fn open_dir(path: &str) -> Option<u64> {
+    let slot = current_slot()?;
+    unsafe {
+        for i in 0..MAX_FDS {
+            if !PROCESSES[slot].fds[i].used {
+                PROCESSES[slot].fds[i] = Descriptor {
+                    used: true,
+                    kind: FD_DIR,
+                    index: 0,
+                    pos: 0,
+                };
+                let n = path.len().min(63);
+                PROCESSES[slot].dir_path[i][..n].copy_from_slice(path.as_bytes());
+                PROCESSES[slot].dir_len[i] = n;
+                return Some(i as u64);
+            }
+        }
+    }
+    None
+}
+
+/// Resolved path of a directory descriptor.
+pub fn dir_path(fd: u64) -> Option<&'static str> {
+    let slot = current_slot()?;
+    let i = fd as usize;
+    if i >= MAX_FDS {
+        return None;
+    }
+    let p = unsafe { &PROCESSES[slot] };
+    if !p.fds[i].used || p.fds[i].kind != FD_DIR {
+        return None;
+    }
+    core::str::from_utf8(&p.dir_path[i][..p.dir_len[i]]).ok()
+}
+
+/// Current position of a descriptor (file offset or directory entry index).
+pub fn fd_pos(fd: u64) -> Option<u64> {
+    let slot = current_slot()?;
+    let i = fd as usize;
+    if i >= MAX_FDS {
+        return None;
+    }
+    let p = unsafe { &PROCESSES[slot] };
+    p.fds[i].used.then_some(p.fds[i].pos)
+}
+
+/// Set a descriptor's position (lseek / getdents64 cursor).
+#[allow(static_mut_refs)]
+pub fn fd_set_pos(fd: u64, pos: u64) -> bool {
+    let Some(slot) = current_slot() else {
+        return false;
+    };
+    let i = fd as usize;
+    if i >= MAX_FDS {
+        return false;
+    }
+    let p = unsafe { &mut PROCESSES[slot] };
+    if !p.fds[i].used {
+        return false;
+    }
+    p.fds[i].pos = pos;
+    true
+}
+
+/// Duplicate a descriptor onto a new (or specific) fd index.
+#[allow(static_mut_refs)]
+pub fn fd_dup(oldfd: u64, newfd: Option<u64>) -> Option<u64> {
+    let slot = current_slot()?;
+    let old = oldfd as usize;
+    if old >= MAX_FDS {
+        return None;
+    }
+    unsafe {
+        let desc = PROCESSES[slot].fds[old];
+        if !desc.used {
+            return None;
+        }
+        let target = match newfd {
+            Some(n) => {
+                let n = n as usize;
+                if n >= MAX_FDS {
+                    return None;
+                }
+                n
+            }
+            None => (0..MAX_FDS).find(|&i| !PROCESSES[slot].fds[i].used)?,
+        };
+        PROCESSES[slot].fds[target] = desc;
+        if desc.kind == FD_DIR {
+            PROCESSES[slot].dir_path[target] = PROCESSES[slot].dir_path[old];
+            PROCESSES[slot].dir_len[target] = PROCESSES[slot].dir_len[old];
+        }
+        Some(target as u64)
     }
 }
 

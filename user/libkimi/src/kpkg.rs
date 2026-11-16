@@ -408,7 +408,7 @@ pub fn install(name: &str) {
     }
 }
 
-pub fn run(name: &str) {
+pub fn run(name: &str, args: &[&str]) {
     let mut path = [0u8; 96];
     let mut plen = 0usize;
     for piece in [b"/disk/bin/", name.as_bytes()] {
@@ -428,7 +428,12 @@ pub fn run(name: &str) {
         print("` first\n");
         return;
     }
-    match spawn(path_str) {
+    let spawned = if args.is_empty() {
+        spawn(path_str)
+    } else {
+        crate::spawn_args(path_str, args)
+    };
+    match spawned {
         Some(pid) => {
             let _ = wait(pid);
         }

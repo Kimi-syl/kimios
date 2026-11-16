@@ -167,6 +167,16 @@ Target-independent, implemented before display/device work:
     epoll/dlopen/sockets/TLS) and are marked not-runnable in the repo.
 36. ~~Fast boot.~~ Done: trimmed the legacy timer/scheduler boot demos; kernel
     reaches init in ~0.4 s (was ~7-8 s), well under the 5 s Desktop Lite goal.
+37. ~~BusyBox + expanded Linux ABI.~~ Done: real argv passing (spawn_args
+    syscall + a proper argc/argv/envp/auxv stack), cwd + directory descriptors,
+    and many more syscalls (getdents64, newfstatat/fstat, lseek, fcntl, ioctl/
+    TIOCGWINSZ, getcwd/chdir, mkdirat/unlinkat/renameat, dup/dup3, sendfile,
+    getuid/gettimeofday/sysinfo/sched_getaffinity, reserved stdin/out/err fds).
+    A statically-built BusyBox (402 applets) runs on the guest: `ls -l`, `cat`,
+    `echo`, `pwd`, `uname -a`, `wc`, `mkdir`, `cp`, `date` all verified. Run as
+    `run /disk/busybox <applet> [args]` or via `kpkg run busybox <applet>`.
+    Honest limit: interactive `busybox sh` needs fork/execve (not implemented);
+    individual applets work. Kernel heap grown to 8 MiB for large binaries.
 
 EL0 processes are preempted by the timer (50 ms quantum, round-robin among
 `Ready` processes), and a process blocked in `read` yields the CPU. Syscalls

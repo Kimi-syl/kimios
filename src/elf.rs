@@ -181,6 +181,7 @@ pub fn is_linux(image: &[u8]) -> bool {
 pub fn load_linux(
     image: &[u8],
     space: &mut mmu::AddressSpace,
+    argv: &[&str],
 ) -> Result<LinuxImage, &'static str> {
     let layout = core::alloc::Layout::from_size_align(image.len(), 16)
         .map_err(|_| "invalid ELF size")?;
@@ -189,7 +190,7 @@ pub fn load_linux(
         core::ptr::copy_nonoverlapping(image.as_ptr(), aligned.as_ptr(), image.len());
         core::slice::from_raw_parts(aligned.as_ptr(), image.len())
     };
-    let result = load_linux_aligned(buffer, space);
+    let result = load_linux_aligned(buffer, space, argv);
     allocator::dealloc(aligned);
     result
 }
@@ -197,6 +198,7 @@ pub fn load_linux(
 fn load_linux_aligned(
     image: &[u8],
     space: &mut mmu::AddressSpace,
+    argv: &[&str],
 ) -> Result<LinuxImage, &'static str> {
     let elf = ElfFile::new(image).map_err(|_| "not a valid ELF file")?;
     let entry = elf.header.pt2.entry_point();
@@ -275,7 +277,7 @@ fn load_linux_aligned(
     }
 
     let stack_top = LINUX_STACK_VA + LINUX_STACK_PAGES * PAGE_SIZE;
-    let sp = build_linux_stack(space, stack_top, phdr_va, phentsize, phnum, entry);
+    let sp = build_linux_stack(space, stack_top, phdr_va, phentsize, phnum, entry, argv);
     let brk = (data_end + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
 
     println!(
@@ -287,7 +289,7 @@ fn load_linux_aligned(
 
 /// Build argc/argv/envp/auxv + strings at the top of the stack and return the
 /// initial SP (points at argc, 16-byte aligned). Layout (low -> high):
-/// argc, argv[0], NULL, envp NULL, auxv pairs..., AT_NULL, strings/random.
+/// argc, argv[0..argc-1], NULL, envp NULL, auxv pairs..., AT_NULL, strings.
 fn build_linux_stack(
     space: &mut mmu::AddressSpace,
     stack_top: u64,
@@ -295,11 +297,13 @@ fn build_linux_stack(
     phent: u64,
     phnum: u64,
     entry: u64,
+    argv: &[&str],
 ) -> u64 {
     let mut buf = [0u8; 4096];
     let mut cur = buf.len();
+    let argc = argv.len().clamp(1, 16);
 
-    // Strings/random at the very top.
+    // 16 random bytes (AT_RANDOM) at the very top.
     cur -= 16;
     let random_off = cur;
     for i in 0..16 {
@@ -307,38 +311,50 @@ fn build_linux_stack(
     }
     let plat = b"aarch64\0";
     cur -= plat.len();
-    let plat_off = cur;
     buf[cur..cur + plat.len()].copy_from_slice(plat);
-    let name = b"app\0";
-    cur -= name.len();
-    let name_off = cur;
-    buf[cur..cur + name.len()].copy_from_slice(name);
-    cur &= !15; // keep the structured region 16-byte aligned
+
+    // argv strings (NUL-terminated), recording each offset.
+    let mut str_off = [0usize; 16];
+    for i in 0..argc {
+        let s = argv[i].as_bytes();
+        if cur < s.len() + 1 {
+            break;
+        }
+        cur -= s.len() + 1;
+        str_off[i] = cur;
+        buf[cur..cur + s.len()].copy_from_slice(s);
+        buf[cur + s.len()] = 0;
+    }
+    // Align the structured region so argc lands 16-byte aligned for any argc:
+    // its size is 288 + (argc+1)*8, which is 0 mod 16 for odd argc, 8 for even.
+    cur &= !15;
+    if argc % 2 == 0 {
+        cur -= 8;
+    }
 
     let base = stack_top - buf.len() as u64;
     let random_va = base + random_off as u64;
-    let _plat_va = base + plat_off as u64;
-    let name_va = base + name_off as u64;
+    let argv0_va = base + str_off[0] as u64;
 
     // auxv (AT_* pairs), terminated by AT_NULL.
     let auxv: [(u64, u64); 17] = [
-        (3, phdr_va),   // AT_PHDR
-        (4, phent),     // AT_PHENT
-        (5, phnum),     // AT_PHNUM
-        (6, PAGE_SIZE), // AT_PAGESZ
-        (7, 0),         // AT_BASE (static: no interpreter)
-        (8, 0),         // AT_FLAGS
-        (9, entry),     // AT_ENTRY
-        (11, 0),        // AT_UID
-        (12, 0),        // AT_EUID
-        (13, 0),        // AT_GID
-        (14, 0),        // AT_EGID
-        (16, 3),        // AT_HWCAP (FP | ASIMD)
-        (17, 100),      // AT_CLKTCK
-        (23, 0),        // AT_SECURE
-        (25, random_va),// AT_RANDOM
-        (31, name_va),  // AT_EXECFN
-        (0, 0),         // AT_NULL
+        (3, phdr_va),    // AT_PHDR
+        (4, phent),      // AT_PHENT
+        (5, phnum),      // AT_PHNUM
+        (6, PAGE_SIZE),  // AT_PAGESZ
+        (7, 0),          // AT_BASE (static: no interpreter)
+        (8, 0),          // AT_FLAGS
+        (9, entry),      // AT_ENTRY
+        (11, 0),         // AT_UID
+        (12, 0),         // AT_EUID
+        (13, 0),         // AT_GID
+        (14, 0),         // AT_EGID
+        (16, 3),         // AT_HWCAP (FP | ASIMD)
+        (17, 100),       // AT_CLKTCK
+        (23, 0),         // AT_SECURE
+        (25, random_va), // AT_RANDOM
+        (31, argv0_va),  // AT_EXECFN
+        (0, 0),          // AT_NULL
     ];
     cur -= auxv.len() * 16;
     let auxv_off = cur;
@@ -350,15 +366,17 @@ fn build_linux_stack(
 
     // envp: empty environment (single NULL terminator).
     cur -= 8;
-    buf[cur..cur + 8].copy_from_slice(&0u64.to_le_bytes());
-    // argv: [argv0, NULL].
-    cur -= 16;
-    buf[cur..cur + 8].copy_from_slice(&name_va.to_le_bytes());
-    buf[cur + 8..cur + 16].copy_from_slice(&0u64.to_le_bytes());
-    // argc = 1.
+    // argv: [argv0 .. argv(argc-1), NULL] (buf is zeroed, so NULL is implicit).
+    cur -= (argc + 1) * 8;
+    let argv_off = cur;
+    for i in 0..argc {
+        let va = base + str_off[i] as u64;
+        buf[argv_off + i * 8..argv_off + i * 8 + 8].copy_from_slice(&va.to_le_bytes());
+    }
+    // argc.
     cur -= 8;
     let argc_off = cur;
-    buf[cur..cur + 8].copy_from_slice(&1u64.to_le_bytes());
+    buf[cur..cur + 8].copy_from_slice(&(argc as u64).to_le_bytes());
 
     let sp = base + argc_off as u64;
     space.write_bytes(sp, &buf[cur..]);

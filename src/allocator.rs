@@ -31,7 +31,7 @@ unsafe impl GlobalAlloc for KernelAlloc {
 #[global_allocator]
 static GLOBAL: KernelAlloc = KernelAlloc;
 
-const HEAP_SIZE: usize = 4 * 1024 * 1024; // 4 MiB
+const HEAP_SIZE: usize = 8 * 1024 * 1024; // 8 MiB
 const HEADER: usize = 16;
 const MIN_SPLIT: usize = HEADER + 16;
 

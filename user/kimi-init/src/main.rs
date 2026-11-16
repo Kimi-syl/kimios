@@ -327,12 +327,30 @@ pub extern "C" fn _start() -> ! {
             };
             report_status(pid, k::wait(pid));
         } else if command == &b"run"[..] {
-            let Some(path) = with_slash(argument, &mut path_buffer) else {
-                k::print("usage: run <file>\n");
+            let (file_word, rest) = split_word(argument);
+            let Some(path) = with_slash(file_word, &mut path_buffer) else {
+                k::print("usage: run <file> [args...]\n");
                 continue;
             };
-
-            match k::spawn(path) {
+            let mut args: [&str; 16] = [""; 16];
+            let mut argc = 0usize;
+            let mut rem = trim(rest);
+            while !rem.is_empty() && argc < 16 {
+                let (word, next) = split_word(rem);
+                if let Ok(s) = core::str::from_utf8(word) {
+                    if !s.is_empty() {
+                        args[argc] = s;
+                        argc += 1;
+                    }
+                }
+                rem = trim(next);
+            }
+            let spawned = if argc > 0 {
+                k::spawn_args(path, &args[..argc])
+            } else {
+                k::spawn(path)
+            };
+            match spawned {
                 Some(pid) => {
                     k::print("spawned pid ");
                     k::print_u64(pid);
@@ -450,10 +468,28 @@ pub extern "C" fn _start() -> ! {
                     Ok(name) if !name.is_empty() => k::kpkg::install(name),
                     _ => k::print("usage: kpkg install <name>\n"),
                 },
-                b"run" => match core::str::from_utf8(rest) {
-                    Ok(name) if !name.is_empty() => k::kpkg::run(name),
-                    _ => k::print("usage: kpkg run <name>\n"),
-                },
+                b"run" => {
+                    let (name_word, arest) = split_word(rest);
+                    match core::str::from_utf8(name_word) {
+                        Ok(name) if !name.is_empty() => {
+                            let mut args: [&str; 16] = [""; 16];
+                            let mut argc = 0usize;
+                            let mut rem = trim(arest);
+                            while !rem.is_empty() && argc < 16 {
+                                let (w, nx) = split_word(rem);
+                                if let Ok(s) = core::str::from_utf8(w) {
+                                    if !s.is_empty() {
+                                        args[argc] = s;
+                                        argc += 1;
+                                    }
+                                }
+                                rem = trim(nx);
+                            }
+                            k::kpkg::run(name, &args[..argc]);
+                        }
+                        _ => k::print("usage: kpkg run <name> [args]\n"),
+                    }
+                }
                 _ => k::kpkg::help(),
             }
         } else if command == &b"net"[..] {

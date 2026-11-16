@@ -761,6 +761,20 @@ pub fn inode_size(index: usize) -> Option<u64> {
     Some(read_u64(&inode, INODE_SIZE_OFF))
 }
 
+/// Kind of an open inode (1 = file, 2 = directory), or None if unused.
+pub fn inode_kind(index: usize) -> Option<u8> {
+    let fs = FS.lock();
+    if !fs.mounted {
+        return None;
+    }
+    let mut inode = [0u8; INODE_SIZE];
+    read_inode(index, &mut inode).ok()?;
+    if inode[INODE_USED] == 0 {
+        return None;
+    }
+    Some(inode[INODE_KIND])
+}
+
 /// Rename or move a file or directory.
 pub fn rename(old: &str, new: &str) -> bool {
     if old == new {

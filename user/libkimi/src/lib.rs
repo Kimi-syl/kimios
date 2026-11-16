@@ -46,6 +46,7 @@ pub const SYS_FB_MAP: u64 = 31;
 pub const SYS_INPUT_POLL: u64 = 32;
 pub const SYS_INPUT_WAIT: u64 = 33;
 pub const SYS_NET: u64 = 34;
+pub const SYS_SPAWN_ARGS: u64 = 35;
 
 pub const EV_KEY: u16 = 1;
 pub const EV_REL: u16 = 2;
@@ -229,6 +230,36 @@ pub fn spawn(path: &str) -> Option<u64> {
         path.as_ptr() as u64,
         path.len() as u64,
         0,
+    );
+    if result == ERROR {
+        None
+    } else {
+        Some(result)
+    }
+}
+
+/// Create a child process with command-line arguments (Linux argv[1..]).
+pub fn spawn_args(path: &str, args: &[&str]) -> Option<u64> {
+    let mut blob = [0u8; 256];
+    let mut n = 0usize;
+    let mut count = 0u64;
+    for a in args {
+        if n + a.len() + 1 > blob.len() {
+            break;
+        }
+        blob[n..n + a.len()].copy_from_slice(a.as_bytes());
+        n += a.len();
+        blob[n] = 0;
+        n += 1;
+        count += 1;
+    }
+    let result = syscall5(
+        SYS_SPAWN_ARGS,
+        path.as_ptr() as u64,
+        path.len() as u64,
+        blob.as_ptr() as u64,
+        n as u64,
+        count,
     );
     if result == ERROR {
         None

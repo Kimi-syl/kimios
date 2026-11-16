@@ -137,6 +137,9 @@ pub extern "C" fn exception_handler(frame: &mut ExceptionFrame) {
             usermode::SYS_EXEC => usermode::sys_exec(frame, arg0, arg1),
             usermode::SYS_LIST => usermode::sys_list(arg0, arg1),
             usermode::SYS_SPAWN => usermode::sys_spawn(arg0, arg1),
+            usermode::SYS_SPAWN_ARGS => {
+                usermode::sys_spawn_args(arg0, arg1, arg2, arg3, arg4)
+            }
             usermode::SYS_GETPID => usermode::sys_getpid(),
             usermode::SYS_STATS => usermode::sys_stats(),
             usermode::SYS_CREATE => usermode::sys_create(arg0, arg1),

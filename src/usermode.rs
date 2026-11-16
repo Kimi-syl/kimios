@@ -42,6 +42,7 @@ pub const SYS_FB_MAP: u64 = 31;
 pub const SYS_INPUT_POLL: u64 = 32;
 pub const SYS_INPUT_WAIT: u64 = 33;
 pub const SYS_NET: u64 = 34;
+pub const SYS_SPAWN_ARGS: u64 = 35;
 
 /// Coarse user-accessible window: ELF, stack, PE image/thunks/stack.
 const USER_SPACE_START: u64 = 0x6000_0000;
@@ -268,6 +269,35 @@ pub fn sys_exec(frame: &mut ExceptionFrame, pointer: u64, length: u64) -> u64 {
 /// spawn(path, len) -> child PID, or u64::MAX.
 pub fn sys_spawn(pointer: u64, length: u64) -> u64 {
     with_user_path(pointer, length, process::sys_spawn)
+}
+
+/// spawn_args(path_ptr, path_len, args_ptr, args_len, argc) -> child PID.
+/// `args` is a NUL-separated blob of argc argument strings (Linux argv[1..]).
+pub fn sys_spawn_args(
+    path_ptr: u64,
+    path_len: u64,
+    args_ptr: u64,
+    args_len: u64,
+    argc: u64,
+) -> u64 {
+    with_user_path(path_ptr, path_len, |path| {
+        let mut args: [&str; 16] = [""; 16];
+        let mut count = 0usize;
+        if let Some(blob) = user_bytes(args_ptr, args_len) {
+            for part in blob.split(|&b| b == 0) {
+                if count >= 16 || count >= argc as usize {
+                    break;
+                }
+                if let Ok(s) = core::str::from_utf8(part) {
+                    if !s.is_empty() {
+                        args[count] = s;
+                        count += 1;
+                    }
+                }
+            }
+        }
+        process::sys_spawn_args(path, &args[..count])
+    })
 }
 
 pub fn sys_getpid() -> u64 {
