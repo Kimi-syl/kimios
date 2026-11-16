@@ -68,7 +68,8 @@ static mut FRAMEBUFFER: Framebuffer = Framebuffer([COLOR_BG; MAX_WIDTH * MAX_HEI
 /// Offscreen back buffer. A GUI renders here, then `present()` copies the
 /// finished frame to FRAMEBUFFER in one fast pass, so the display never shows
 /// a half-drawn frame (which otherwise appears as black flicker on scroll).
-static mut BACK: Framebuffer = Framebuffer([COLOR_BG; MAX_WIDTH * MAX_HEIGHT]);
+/// Zero-initialized (BSS) so it does not bloat the kernel image.
+static mut BACK: Framebuffer = Framebuffer([0; MAX_WIDTH * MAX_HEIGHT]);
 
 struct Screen {
     column: usize,
