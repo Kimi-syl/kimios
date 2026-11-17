@@ -1,0 +1,121 @@
+# KimiOS for iPad — library-OS (native, no QEMU)
+
+This is the **library-OS** build of KimiOS: the exact same pure-Rust userland
+(`user/libkimi` + `user/kimi-gui` + apps + shell) that runs bare-metal, compiled
+as a native ARM64 library and linked into a thin Swift/UIKit/Metal iOS shell.
+
+No QEMU. No EL1. No MMU. No exception vectors. The GUI runs at **native speed**
+on the iPad's CPU and renders through Metal.
+
+## How it works
+
+On bare metal, every OS service in libkimi is a `svc #0` trap to the KimiOS
+kernel. The whole userland is `no_std` with **no allocator** — pure computation
+over a framebuffer plus a small syscall surface. That makes it trivially
+portable:
+
+```
+                 bare metal                         iPad (library-OS)
+  kimi-gui  ──▶  libkimi syscall3/4/5         kimi-gui  ──▶  libkimi syscall3/4/5
+                 │  svc #0  (cfg none)                         │  kimi_host_syscall()  (cfg host)
+                 ▼                                             ▼
+              KimiOS kernel (EL1)                     Swift host dispatcher
+              MMU / virtio / ramfb                    Metal fb / UIKit touches /
+                                                      mach time / sandbox
+```
+
+The only code that differs is three primitives in `user/libkimi/src/lib.rs`,
+gated by `cfg(target_os = "none")`:
+
+- `syscall3/4/5` → `svc #0` (bare metal) **or** `kimi_host_syscall(n, a0..a4)` (host)
+- `cntpct()` → `mrs cntpct_el0` **or** `kimi_host_cntpct()`
+- `exit()` → `wfe` park **or** host `SYS_EXIT`
+
+Everything above libkimi is **byte-for-byte identical** across both builds. The
+GUI entry is `_start` on bare metal and `kimi_gui_start` on host (renamed to avoid
+colliding with the host C runtime's ELF entry symbol).
+
+The iOS host (`ios/app/Sources/KimiHost.swift`) implements `kimi_host_syscall`
+with `@_cdecl`, providing:
+
+- **Display**: double Metal-shared framebuffer (1080×1920 XRGB8888). The GUI
+  renders to `back`, publishes dirty rects to `front` on `fb_present`; the Metal
+  renderer blits `front` → texture → screen. Rendering is **on-demand** (MTKView
+  paused, redraw only on present) for low battery.
+- **Input**: UIKit touches → virtio-style `EV_ABS`/`BTN_TOUCH` events (ABS range
+  0..32767), same contract the GUI already expects.
+- **Time**: `clock_gettime_nsec_np` for `uptime_ms`/`cntpct`, `gmtime_r` for `rtc`.
+- **Heap**: `brk` over a malloc arena (the GUI itself uses no allocator).
+
+Filesystem / networking / process syscalls are stubbed in this first build, so
+the home screen, Clock, Calculator, Settings, etc. run; Terminal/Files/Browser
+need the sandboxed FS/net backend (next iteration).
+
+## Verified natively (no Mac required)
+
+`ios/host-harness/` implements the same dispatcher in C and runs the real GUI on
+Linux aarch64, dumping PPM frames:
+
+```bash
+bash ios/host-harness/build.sh
+# lock.ppm: 1 present, 96.8% non-black, ~970 colours
+# home.ppm: 5 presents after a scripted unlock tap, ~53% pixels changed
+```
+
+This proves the userland renders and responds to touch natively, de-risking the
+iOS build (identical staticlib + dispatcher contract).
+
+## Build the .ipa
+
+### GitHub Actions (recommended)
+
+`.github/workflows/ios.yml` runs on `macos-14` (Apple Silicon):
+
+1. builds `libkimi_gui.a` for `aarch64-apple-ios`,
+2. generates the Xcode project with `xcodegen`,
+3. `xcodebuild` (unsigned, `iphoneos`),
+4. packages `Payload/KimiOS.app` → `KimiOS.ipa`,
+5. uploads the **KimiOS-iOS-ipa** artifact.
+
+Trigger it manually:
+
+```bash
+GH_TOKEN=$(cat /opt/gh_token) gh workflow run ios.yml --repo Kimi-syl/kimios
+```
+
+### Locally on a Mac
+
+```bash
+bash ios/build-ipa.sh   # needs Xcode + Rust + xcodegen
+```
+
+## Install on the iPad
+
+The CI `.ipa` is **unsigned** (no Apple cert in CI). Install with any of:
+
+- **Sideloadly / AltStore / SideStore** — re-signs with your Apple ID (free
+  developer account works; 7-day refresh).
+- **StikDebug** — sideload + JIT. This build is pure ahead-of-time native code
+  (App-Store-legal, no JIT required), but StikDebug is a convenient installer.
+- **Your own cert** — sign the `.app` with `codesign` + a provisioning profile,
+  or set `CODE_SIGN_IDENTITY` / team in `ios/app/project.yml` and rebuild.
+
+Because the GUI is compiled-in native ARM64 (no interpreter, no JIT), it runs
+with full performance and low overhead — the goal of the library-OS pivot.
+
+## Layout
+
+```
+ios/
+  app/
+    Sources/KimiHost.swift        host syscall dispatcher (@_cdecl)
+    Sources/Renderer.swift        Metal framebuffer presenter
+    Sources/ViewController.swift  MTKView + touches + GUI thread
+    Sources/AppDelegate.swift     UIKit app lifecycle
+    Sources/main.swift            UIApplicationMain
+    KimiosBridge.h                declares kimi_gui_start to Swift
+    Info.plist
+    project.yml                   xcodegen project definition
+  host-harness/                   native Linux verification (C dispatcher + PPM)
+  build-ipa.sh                    local/CI build script
+```

@@ -11,7 +11,20 @@ pub mod dvm;
 pub mod kpkg;
 pub mod shell;
 
+#[cfg(target_os = "none")]
 use core::arch::asm;
+
+/// Library-OS host backend. When libkimi is compiled for a hosted target
+/// (iOS / Linux / macOS) instead of bare metal, every syscall is routed to a
+/// C-ABI dispatcher supplied by the embedding runtime rather than trapping to
+/// EL1 via `svc #0`. The dispatcher implements the same syscall numbers using
+/// host primitives (Metal/UIKit framebuffer, touches, mach time, sandboxed
+/// filesystem, BSD sockets). The entire userland above this line is unchanged.
+#[cfg(not(target_os = "none"))]
+extern "C" {
+    fn kimi_host_syscall(number: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> u64;
+    fn kimi_host_cntpct() -> u64;
+}
 
 pub const SYS_WRITE: u64 = 1;
 pub const SYS_EXIT: u64 = 2;
@@ -114,6 +127,7 @@ pub const STDOUT: u64 = 1;
 
 const ERROR: u64 = u64::MAX;
 
+#[cfg(target_os = "none")]
 #[inline(always)]
 fn syscall3(number: u64, arg0: u64, arg1: u64, arg2: u64) -> u64 {
     let result;
@@ -129,6 +143,13 @@ fn syscall3(number: u64, arg0: u64, arg1: u64, arg2: u64) -> u64 {
     result
 }
 
+#[cfg(not(target_os = "none"))]
+#[inline(always)]
+fn syscall3(number: u64, arg0: u64, arg1: u64, arg2: u64) -> u64 {
+    unsafe { kimi_host_syscall(number, arg0, arg1, arg2, 0, 0) }
+}
+
+#[cfg(target_os = "none")]
 #[inline(always)]
 fn syscall4(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64) -> u64 {
     let result;
@@ -145,6 +166,13 @@ fn syscall4(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64) -> u64 {
     result
 }
 
+#[cfg(not(target_os = "none"))]
+#[inline(always)]
+fn syscall4(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64) -> u64 {
+    unsafe { kimi_host_syscall(number, arg0, arg1, arg2, arg3, 0) }
+}
+
+#[cfg(target_os = "none")]
 #[inline(always)]
 fn syscall5(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> u64 {
     let result;
@@ -160,6 +188,12 @@ fn syscall5(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64) 
         );
     }
     result
+}
+
+#[cfg(not(target_os = "none"))]
+#[inline(always)]
+fn syscall5(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> u64 {
+    unsafe { kimi_host_syscall(number, arg0, arg1, arg2, arg3, arg4) }
 }
 
 pub fn write(fd: u64, buffer: &[u8]) -> u64 {
@@ -590,9 +624,16 @@ pub fn instr_map() -> Option<u64> {
 
 /// Read the ARM generic counter (EL0-accessible), for fine-grained timestamps.
 pub fn cntpct() -> u64 {
-    let v: u64;
-    unsafe { core::arch::asm!("mrs {}, cntpct_el0", out(reg) v, options(nomem, nostack)) };
-    v
+    #[cfg(target_os = "none")]
+    {
+        let v: u64;
+        unsafe { core::arch::asm!("mrs {}, cntpct_el0", out(reg) v, options(nomem, nostack)) };
+        v
+    }
+    #[cfg(not(target_os = "none"))]
+    {
+        unsafe { kimi_host_cntpct() }
+    }
 }
 
 /// Run the display-path benchmark; results are printed to the console.
@@ -653,8 +694,15 @@ pub fn print_i64(value: i64) {
 
 pub fn exit(status: u64) -> ! {
     syscall3(SYS_EXIT, status, 0, 0);
+    #[cfg(target_os = "none")]
     loop {
         unsafe { asm!("wfe") };
+    }
+    #[cfg(not(target_os = "none"))]
+    loop {
+        // The host dispatcher normally terminates this thread inside SYS_EXIT;
+        // if it returns, park instead of executing the bare-metal `wfe`.
+        syscall3(SYS_SLEEP, 1000, 0, 0);
     }
 }
 

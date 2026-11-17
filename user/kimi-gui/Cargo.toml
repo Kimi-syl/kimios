@@ -3,5 +3,13 @@ name = "kimi-gui"
 version = "0.1.0"
 edition = "2021"
 
+# Library-OS target: the same no_std GUI compiled as a C-ABI static library that
+# an iOS app (or native harness) links and drives via `kimi_gui_start`. The
+# bare-metal `kimi-gui` binary below is unchanged.
+[lib]
+name = "kimi_gui"
+path = "src/main.rs"
+crate-type = ["staticlib"]
+
 [dependencies]
 libkimi = { path = "../libkimi" }

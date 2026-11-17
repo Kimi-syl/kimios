@@ -257,8 +257,7 @@ impl Ui {
     }
 }
 
-#[no_mangle]
-pub extern "C" fn _start() -> ! {
+fn gui_run() -> ! {
     let Some((width, height, stride, _)) = k::fb_info() else {
         k::print("gui: no framebuffer\n");
         k::exit(1);
@@ -312,6 +311,22 @@ pub extern "C" fn _start() -> ! {
             None => k::sleep_ms(2),
         }
     }
+}
+
+/// Bare-metal entry point (EL0 process image loaded by the KimiOS kernel).
+#[no_mangle]
+#[cfg(target_os = "none")]
+pub extern "C" fn _start() -> ! {
+    gui_run()
+}
+
+/// Library-OS entry point. The embedding host (iOS app / native harness) calls
+/// this on a dedicated thread; it never returns. Named differently from `_start`
+/// so it does not collide with the host C runtime's ELF entry symbol.
+#[no_mangle]
+#[cfg(not(target_os = "none"))]
+pub extern "C" fn kimi_gui_start() -> ! {
+    gui_run()
 }
 
 fn handle(screen: &Screen, ui: &mut Ui, event: k::InputEvent, clock: [u64; 7]) -> bool {

@@ -1,2 +1,12 @@
 /target
+/user/target
 /disk.img
+
+# iOS library-OS build artifacts
+/ios/build
+/ios/app/libkimi_gui.a
+/ios/app/KimiOS.xcodeproj
+/ios/host-harness/out
+
+# tooling caches
+/.serena
