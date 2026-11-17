@@ -41,9 +41,16 @@ jobs:
           workspaces: user
 
       - name: Build APK
+        env:
+          DEBUG_KEYSTORE_B64: ${{ secrets.ANDROID_DEBUG_KEYSTORE }}
         run: |
           export ANDROID_SDK="$ANDROID_HOME"
           export ANDROID_NDK="$ANDROID_HOME/ndk/26.1.10909125"
+          # Sign with the same debug key as the phone / frontend releases.
+          if [ -n "$DEBUG_KEYSTORE_B64" ]; then
+            printf '%s' "$DEBUG_KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/kimios-debug.keystore"
+            export KIMIOS_KEYSTORE="$RUNNER_TEMP/kimios-debug.keystore"
+          fi
           bash android/build-apk.sh
 
       - name: Upload APK artifact
