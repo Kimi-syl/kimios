@@ -45,11 +45,18 @@ with `@_cdecl`, providing:
 - **Input**: UIKit touches → virtio-style `EV_ABS`/`BTN_TOUCH` events (ABS range
   0..32767), same contract the GUI already expects.
 - **Time**: `clock_gettime_nsec_np` for `uptime_ms`/`cntpct`, `gmtime_r` for `rtc`.
-- **Heap**: `brk` over a malloc arena (the GUI itself uses no allocator).
+- **Filesystem** (`KimiFS.swift`): persistent `/disk/` backed by the app sandbox
+  `Documents/disk` (full CRUD, directories, rename, stat, df) plus a read-only
+  RamFS — matching the kernel's exact syscall semantics.
+- **Networking** (`KimiNet.swift`): DNS via `getaddrinfo`, TCP via BSD sockets
+  with connect/recv timeouts (Browser, `dns`, `fetch`, kpkg).
+- **Process**: `ps`/`mem` report the native GUI process; `brk` over a malloc
+  arena (the GUI itself uses no allocator).
 
-Filesystem / networking / process syscalls are stubbed in this first build, so
-the home screen, Clock, Calculator, Settings, etc. run; Terminal/Files/Browser
-need the sandboxed FS/net backend (next iteration).
+All built-in apps and shell commands work natively. `spawn`/`run`/`exec` of
+external ELF/PE images needs the JIT ELF loader (mode B, future work) and fails
+gracefully here; APKs are inspected and DEX runs on the built-in mini-Dalvik VM,
+exactly as on bare metal.
 
 ## Verified natively (no Mac required)
 
@@ -65,11 +72,25 @@ bash ios/host-harness/build.sh
 This proves the userland renders and responds to touch natively, de-risking the
 iOS build (identical staticlib + dispatcher contract).
 
+The FS/net contract is verified end-to-end too: `ios/host-harness/shelltest` (a
+`no_std` staticlib) runs the real libkimi shell against `harness_fs.c` (temp-dir
+FS + BSD sockets):
+
+```bash
+cargo build --release --manifest-path ios/host-harness/shelltest/Cargo.toml \
+  --target aarch64-unknown-linux-gnu
+cc -O2 -o shelltest ios/host-harness/harness_fs.c \
+  ios/host-harness/shelltest/target/aarch64-unknown-linux-gnu/release/libshelltest.a -lpthread -lm
+./shelltest
+# write/cat/stat/mkdir/ls/mv/rm/rmdir/df/ps all correct;
+# dns example.com -> real IP; fetch example.com / -> HTTP 200 OK + body
+```
+
 ## Build the .ipa
 
 ### GitHub Actions (recommended)
 
-`.github/workflows/ios.yml` runs on `macos-14` (Apple Silicon):
+`.github/workflows/ios.yml` runs on `macos-latest`:
 
 1. builds `libkimi_gui.a` for `aarch64-apple-ios`,
 2. generates the Xcode project with `xcodegen`,
