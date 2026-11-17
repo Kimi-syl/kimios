@@ -1,11 +1,15 @@
 # KimiOS
 
-A bare-metal operating system for ARM64 (AArch64), written in Rust with
-`#![no_std]` and `#![no_main]`. It boots on QEMU's `virt` machine (no
-bootloader: QEMU loads the ELF directly with `-kernel`) and presents a
-Nothing-OS x Material-3 phone GUI. A companion Android app,
-[kimios-android](https://github.com/Kimi-syl/kimios-android), runs the whole
-OS on a phone inside bundled QEMU.
+A phone OS written in Rust whose **entire userland runs natively on iOS and
+Android** — no emulator, no VM. The same code also boots as a bare-metal ARM64
+kernel on QEMU. One codebase, three ways to run it.
+
+KimiOS began as a from-scratch `#![no_std]` `#![no_main]` operating system for
+AArch64. The phone GUI, apps and shell it grew are pure computation over a
+framebuffer with a tiny syscall surface — which turned out to be exactly what a
+**library-OS** needs. So the userland now ships as a native ARM64 library hosted
+by a thin platform shell on real devices, at native speed, with no QEMU in the
+loop.
 
 | Lock screen | Home | Quick settings |
 |:---:|:---:|:---:|
@@ -15,217 +19,184 @@ OS on a phone inside bundled QEMU.
 |:---:|:---:|:---:|
 | ![Terminal](docs/screenshot-terminal.png) | ![Calculator](docs/screenshot-calculator.png) | ![Settings](docs/screenshot-settings.png) |
 
-The GUI starts automatically at boot. Tap, swipe up, or press Enter/Space/Up
-to unlock; ESC returns to the text shell (`run /gui` starts it again). Every
-launcher app is interactive, including the in-phone Terminal.
+## One userland, three ways to run it
 
-## The pivot: "Desktop Lite", not Android
+| Mode | What runs | How | Status |
+|---|---|---|---|
+| **iOS library-OS** | GUI + apps + shell, native ARM64 | Rust staticlib + Swift/UIKit/Metal shell → `.ipa` | builds in CI, fully functional |
+| **Android library-OS** | GUI + apps + shell, native ARM64 | Rust staticlib + C/JNI + Java/SurfaceView shell → APK | builds in CI, signed, fully functional |
+| **Bare-metal kernel** | full OS (EL1 kernel + EL0 userland) | boots on QEMU `virt` (`-kernel` ELF) | working dev target |
 
-KimiOS originally aimed at Android APK compatibility. That path was explored
-and then **abandoned**: an APK inspector (Ph45) and a mini-Dalvik DEX
-interpreter (Ph46) were built and verified, but running real Play-Store apps
-requires the full Android runtime — Bionic, ART/libcore, the framework,
-Binder — which is team-scale. The full analysis is in
-[docs/android-feasibility.md](docs/android-feasibility.md).
+The library-OS ports are the headline: KimiOS running directly on a phone/tablet
+CPU, rendering through Metal (iOS) or an `ANativeWindow` framebuffer (Android),
+with the host's filesystem and sockets. The bare-metal kernel is the foundation
+the userland was built on, and still runs the whole OS under QEMU.
 
-Since Ph47 KimiOS is a **"Desktop Lite" environment in the WSL1 model**: a
-Linux ABI syscall-translation layer ([src/linux.rs](src/linux.rs)) runs
-standard **statically-linked Linux binaries** (musl/glibc) and native Rust
-apps directly on the KimiOS kernel — no Linux kernel, no VM inside the VM.
+## The library-OS insight
 
-- `run /disk/<binary>` executes a static Linux ELF (loaded at its own link
-  address, with a real argc/argv/envp/auxv stack).
-- **kpkg** (Ph48) is an apt-like package manager: `kpkg update`, `kpkg list`,
-  `kpkg install <name>`, `kpkg run <name>` — HTTP downloads over the built-in
-  TCP/IP stack, binaries land in `/disk/bin`.
-- **BusyBox** (Ph49): a static 402-applet build runs on the guest, e.g.
-  `run /disk/busybox ls -l` or `kpkg run busybox cat /motd`.
-- Boot to init takes **~0.4 s** (the legacy boot demos were trimmed).
+The userland (`user/libkimi` + `user/kimi-gui` + apps + shell) is `no_std` with
+**no allocator**. It touches the OS through only three primitives in
+[`user/libkimi/src/lib.rs`](user/libkimi/src/lib.rs), gated by
+`cfg(target_os = "none")`:
 
-## Key features
+- `syscall3/4/5` — `svc #0` trap to the kernel, **or** a call to a host
+  `kimi_host_syscall(number, a0..a4)` dispatcher.
+- `cntpct()` — `mrs cntpct_el0`, **or** `kimi_host_cntpct()`.
+- `exit()` — `wfe` park, **or** host `SYS_EXIT`.
 
-- **Kernel:** EL1 boot, PL011 UART, AArch64 exception vectors, MMU identity
-  map (up to 4 GiB RAM), DTB parsing, bitmap physical-frame allocator, GICv3 +
-  generic timer, PSCI secondary-CPU bring-up (`-smp 4`).
-- **Processes:** per-process address spaces (private TTBR0), preemptive
-  round-robin EL0 scheduling (50 ms quantum), `spawn`/`exec`/`wait`/`ps`/
-  `kill` (spawn-based; no `fork`), blocking console read, sleep/uptime,
-  per-process heaps (`brk`) and a user-space `GlobalAlloc`.
-- **Storage:** virtio-blk (legacy + modern virtio-mmio) and **KimiFS**, a
-  persistent on-disk filesystem with directories, rename, stat and
-  free-space reuse (up to 64 GiB disks). Files under `/disk/` survive reboots.
-- **Networking:** virtio-net + smoltcp (Ethernet/ARP/IPv4/ICMP/UDP/TCP),
-  DHCP, DNS (public resolvers first, 3-server fallback), TCP socket API, and
-  a mini in-GUI web browser (HTTP/1.0, HTML-to-text).
-- **Phone GUI:** lock screen, status bar, Quick Settings shade, 12-app
-  launcher with paging, Nothing OS typefaces (NType82 / Ndot-55 /
-  NType82Mono), all software-rendered in user space. Double-buffered with
-  dirty-rect present, instant press feedback and an 8 ms input poll.
-- **Graphics:** hardware-independent display interface — the GUI renders to
-  a back buffer and publishes via `fb_info`/`fb_back`/`fb_present`; the kernel
-  dispatches to a backend chosen by `kimios.gpu=` (auto/ramfb/virtio). A
-  VirtIO-GPU 2D driver exists; ramfb is the stable fallback (see status).
-- **Binary formats:** native KimiOS ELF, static Linux ELF (Linux ABI), and a
-  PE32+ loader with 9 translated `kernel32.dll` imports (a generated
-  `hello.exe` runs at EL0).
-
-## Architecture
+Everything above those three lines is **byte-for-byte identical** across bare
+metal, iOS and Android. A host implements the dispatcher with platform APIs:
 
 ```text
-QEMU virt (or Android frontend's bundled QEMU)
-  |  ramfb / VirtIO-GPU 2D, virtio-blk/net/keyboard/tablet, PL011, PL031, GICv3
-  v
-kernel (src/, EL1)
-  boot.s vectors.s main.rs      entry, exceptions, kmain
-  mmu.rs pfa.rs allocator.rs    identity map, frames, 8 MiB kernel heap
-  dtb.rs gic.rs timer.rs irq.rs device tree, interrupts
-  process.rs sched.rs elf.rs pe.rs   processes, loaders (ELF/PE/Linux)
-  linux.rs                      Linux ABI syscall translation (the pivot)
-  ramfs.rs block.rs virtio_blk.rs diskfs.rs   VFS + KimiFS
-  net.rs virtio_net.rs          smoltcp networking
-  fb.rs virtio_gpu.rs input.rs  display backends, input event ring
-  v
-user space (user/, EL0)
-  libkimi    syscall wrappers, Heap, kpkg, apk inspector, mini-Dalvik (dvm)
-  kimi-init  PID 1: boots /gui, falls back to the text shell
-  kimi-gui   the phone UI (draw.rs renderer, apps.rs, Nothing fonts)
-  test binaries: hello, fstest, spin, fbtest, gfxtest, inputtest, stress, ...
+                 kimi-gui + apps + shell + libkimi   (one pure-Rust userland)
+                                   |
+                    kimi_host_syscall(n, a0..a4)      (C ABI; cfg host)
+          ┌────────────────────────┼────────────────────────┐
+   iOS shell (Swift)        Android shell (C/JNI)     bare-metal kernel
+   Metal framebuffer        ANativeWindow fb          EL1, MMU, virtio
+   UIKit touches            JNI touches               svc #0 trap
+   sandbox FS, BSD sockets  sandbox FS, BSD sockets   KimiFS, smoltcp
+   mach time                clock_gettime             CNTPCT, PL031
 ```
 
-`build.rs` builds the whole `user/` workspace (separate target dir) and
-embeds the binaries into the kernel's RamFS; it also generates `hello.exe`.
-Full per-phase history and design notes: **[docs/phases.md](docs/phases.md)**.
+Because the GUI is just pixels + events + a handful of services, porting it is
+implementing that one dispatcher — not rewriting the OS.
 
-## Build and run
+## Get KimiOS
 
-Prerequisites:
+Both device builds are produced by GitHub Actions and attached to draft releases:
+
+- **iOS** — [`ios/`](ios/README.md), workflow `ios.yml` (`macos-latest`) →
+  unsigned `KimiOS-iPad-v0.9.0.ipa`. Install with Sideloadly / AltStore /
+  StikDebug (re-signs with your Apple ID). iOS 15+, portrait.
+- **Android** — [`android/`](android/README.md), workflow `android-libos.yml`
+  (`ubuntu`) → `KimiOS-Android-libOS-v0.9.0.apk`, signed with the **same debug key
+  as the phone** (cert SHA-256 `b1339cd3…`). `adb install -r` or sideload.
+  Android 8.0+ (API 26), arm64, portrait.
+
+```bash
+GH_TOKEN=… gh workflow run ios.yml           --repo Kimi-syl/kimios
+GH_TOKEN=… gh workflow run android-libos.yml --repo Kimi-syl/kimios
+```
+
+## What's inside (the userland)
+
+A Nothing-OS × Material-3 phone shell, all software-rendered in Rust at
+1080×1920 (logical 480×800), double-buffered with dirty-rect present:
+
+- Lock screen, status bar, Quick Settings shade, 12-app paged launcher + dock,
+  Nothing typefaces (NType82 / Ndot-55 / NType82Mono), on-screen keyboard.
+- Interactive apps: Phone, Messages, Camera (saves PPM), Music, Clock,
+  Calculator, Notes, Maps, Photos, Files, Weather, **Terminal**, **Browser**,
+  APK inspector, mini-Dalvik DEX runner.
+- A shared command interpreter (`libkimi::shell`) used by both the CLI and the
+  in-GUI Terminal: `ls cat write rm mkdir rmdir mv stat df net dns fetch date
+  time sleep uptime ps kpkg apk dvm …`.
+- **kpkg** (apt-like package manager), an **APK inspector** (ZIP/DEFLATE/binary
+  AXML/DEX), and a bounded **mini-Dalvik** DEX interpreter.
+
+On the device ports the filesystem is the app sandbox (`/disk/` persists), and
+networking is real DNS + TCP (Browser, `dns`, `fetch`, kpkg all work).
+
+## Building
+
+### Device library-OS (recommended)
+
+```bash
+bash ios/build-ipa.sh      # macOS + Xcode + Rust + xcodegen → .ipa
+bash android/build-apk.sh  # JDK 17 + Android SDK/NDK + Rust → signed APK
+```
+
+Both scripts also run unchanged in CI. The Android script auto-detects the phone
+build host (`/opt/tusr` toolchain) vs CI (NDK).
+
+### Bare-metal kernel (QEMU)
 
 ```bash
 rustup target add aarch64-unknown-none
-# Debian / Kali: qemu-system-aarch64 lives in qemu-system-arm
-sudo apt install qemu-system-arm
-```
+cargo build --release                 # target preset in .cargo/config.toml
+truncate -s 4M disk.img               # optional persistent disk
 
-Build (the target is preset in `.cargo/config.toml`):
-
-```bash
-cargo build --release
-
-# Optional 4 MiB disk image. Without it the kernel runs from RamFS only.
-truncate -s 4M disk.img
-```
-
-Headless run (text shell; `init` prints `gui: no framebuffer` and continues):
-
-```bash
-qemu-system-aarch64 \
-  -machine virt,gic-version=3 \
-  -cpu cortex-a53 \
-  -m 128M \
-  -nographic \
-  -semihosting-config enable=on,target=native \
-  -dtb virt.dtb \
-  -drive if=none,format=raw,file=disk.img,id=hd0 \
-  -device virtio-blk-device,drive=hd0 \
-  -kernel target/aarch64-unknown-none/release/kimios
-```
-
-For the phone GUI add `-device ramfb -device virtio-keyboard-device
--device virtio-tablet-device`. With no X/Wayland session (e.g. proot on a
-phone), use QEMU's VNC server instead of GTK:
-
-```bash
-qemu-system-aarch64 \
-  -machine virt,gic-version=3 -cpu cortex-a53 -m 128M \
+qemu-system-aarch64 -machine virt,gic-version=3 -cpu cortex-a53 -m 128M \
   -semihosting-config enable=on,target=native -dtb virt.dtb \
-  -drive if=none,format=raw,file=disk.img,id=hd0 \
-  -device virtio-blk-device,drive=hd0 \
+  -drive if=none,format=raw,file=disk.img,id=hd0 -device virtio-blk-device,drive=hd0 \
   -device ramfb -device virtio-keyboard-device -device virtio-tablet-device \
   -display none -vnc 127.0.0.1:0 -serial stdio \
   -kernel target/aarch64-unknown-none/release/kimios
 ```
 
-Notes:
+The GUI starts at boot; tap/swipe/Enter unlocks, ESC returns to the shell.
+`build.rs` builds the `user/` workspace and embeds the binaries into the kernel
+RamFS. Resolution via `-append "kimios.fb=1080x1920"`, backend via
+`kimios.gpu=auto|ramfb|virtio`.
 
-- Release builds are much faster than debug at 1080p. `-smp 4` exercises the
-  PSCI bring-up; `-global virtio-mmio.force-legacy=false` exercises the
-  modern virtio transport (both are supported).
-- Display resolution can be set with `-append "kimios.fb=1080x1920"`;
-  backend preference with `-append "kimios.gpu=ramfb"` (auto/ramfb/virtio).
-- The checked-in `virt.dtb` is trimmed for `-m 128M`; regenerate after
-  changing `-m`/`-smp`:
-  `qemu-system-aarch64 -machine virt,dumpdtb=virt.dtb -m 128M -nographic`.
+## The bare-metal foundation
 
-### Using Desktop Lite
+The kernel (`src/`, EL1) the userland was built on:
 
-In the shell (or the in-GUI Terminal):
+- **Boot/CPU:** EL1 entry (drops EL2→EL1 for UTM), PL011 UART, exception vectors,
+  MMU identity map (≤4 GiB), DTB parse, bitmap frame allocator, GICv3 + generic
+  timer, PSCI secondary bring-up (`-smp 4`).
+- **Processes:** private TTBR0 address spaces, preemptive round-robin EL0
+  scheduling (50 ms), `spawn`/`exec`/`wait`/`ps`/`kill` (no `fork`), blocking
+  console read, per-process `brk` heaps + a user `GlobalAlloc`.
+- **Storage:** virtio-blk (legacy + modern mmio) and **KimiFS** (directories,
+  rename, stat, free-space reuse, ≤64 GiB); `/disk/` survives reboots.
+- **Networking:** virtio-net + smoltcp (Ethernet/ARP/IPv4/ICMP/UDP/TCP), DHCP,
+  DNS, TCP socket API.
+- **Graphics:** hardware-independent `fb_info`/`fb_back`/`fb_present`; backend
+  dispatch (ramfb stable, VirtIO-GPU 2D implemented).
+- **Loaders:** native KimiOS ELF, static Linux ELF (a Linux ABI translation
+  layer, `src/linux.rs`), and PE32+ with translated `kernel32` imports.
 
-```text
-$ kpkg update                 # fetch repo.json (default http://10.0.2.2:8080)
-$ kpkg install busybox        # download a static binary to /disk/bin
-$ kpkg run busybox ls -l      # run it through the Linux ABI
-$ run /disk/busybox uname -a  # same thing, directly
-$ dns example.com             # networking helpers: net / dns / fetch
-```
+Full per-phase history: **[docs/phases.md](docs/phases.md)**.
 
-With QEMU user-mode networking (`-netdev user,id=n0 -device
-virtio-net-device,netdev=n0`) the guest reaches the host loopback at
-`10.0.2.2`; the Android frontend serves its bundled kpkg repo there.
+## How we got here
 
-## Library-OS ports: native iOS & Android (no QEMU)
+1. **Bare-metal kernel + phone GUI** (Ph1–44): a working ARM64 OS on QEMU with a
+   Nothing-style phone UI, real apps, storage and networking.
+2. **Android APK compatibility — abandoned.** An APK inspector and mini-Dalvik
+   were built and verified, but running Play-Store apps needs the full Android
+   runtime (Bionic/ART/framework/Binder) — team-scale. See
+   [docs/android-feasibility.md](docs/android-feasibility.md).
+3. **"Desktop Lite" (Ph47+):** a WSL1-style Linux syscall-translation layer ran
+   static Linux binaries (BusyBox, musl/glibc) on the kernel, with kpkg. This
+   proved the userland could host real binaries — but still inside QEMU.
+4. **Library-OS (current):** the same userland compiled as a native library and
+   hosted directly by iOS/Android. No QEMU, native speed, real device FS/net.
+   The QEMU frontend ([kimios-android](https://github.com/Kimi-syl/kimios-android))
+   remains as the full-kernel emulation path.
 
-The userland is `no_std` with **no allocator** and talks to the OS only through
-three primitives in `libkimi` (`svc` syscalls, `cntpct`, `wfe` exit), gated by
-`cfg(target_os = "none")`. On a hosted target those route to a C-ABI
-`kimi_host_syscall` dispatcher, so the **exact same GUI/apps/shell** compile as a
-native ARM64 library and run directly on the device — no QEMU, no EL1/MMU.
+## Status and honest caveats
 
-- **[ios/](ios/README.md)** — Swift/UIKit/Metal shell. Builds an unsigned `.ipa`
-  via GitHub Actions (`macos-latest`). Sandboxed FS + BSD-socket net.
-- **[android/](android/README.md)** — Java/SurfaceView shell + C JNI dispatcher
-  (`ANativeWindow` framebuffer). Builds a signed APK via GitHub Actions
-  (`ubuntu`), using the same debug key as the phone/frontend.
-
-Both are fully functional (filesystem, networking, all built-in apps) and verified
-end-to-end natively (real shell, DNS, HTTP fetch; GUI render + touch). Distinct
-from the QEMU-based [kimios-android](https://github.com/Kimi-syl/kimios-android)
-frontend, which emulates the whole kernel. External ELF `spawn`/`exec` needs a JIT
-loader (future work); everything else runs ahead-of-time at native speed.
-
-## Current status and honest caveats
-
-- **QEMU `virt` is the working target.** Bare metal (Redmi Note 11, `spes`)
-  is blocked: locked bootloader, stock boot chain not yet dumped/verified.
-  See [docs/hardware.md](docs/hardware.md) and [ROADMAP.md](ROADMAP.md).
-- **VirtIO-GPU 2D is implemented but blocked on tested QEMU builds:**
-  `RESOURCE_ATTACH_BACKING` returns `ERR_UNSPEC` (host 11.1.2 and bundled
-  10.2.1), so the kernel auto-falls back to ramfb. Details and the next
-  debugging step: [docs/graphics-architecture.md](docs/graphics-architecture.md).
-- **No `fork`/`execve` in the Linux ABI:** individual BusyBox applets work,
-  but interactive `busybox sh` does not. Threads/futex/epoll/dlopen and
-  Linux-side sockets are also unimplemented — npm/pip/TLS-curl are marked
-  not-runnable in the kpkg repo.
-- **Linux binaries must be static, non-PIE** (musl/glibc static, linked at
-  e.g. `0x40_0000`). Dynamic linking is not supported.
-- SMP is bring-up only: scheduling, timer and EL0 run on CPU 0; secondaries
-  park in `wfe`. Syscalls execute with IRQs masked.
-- **Display latency:** `gfxbench` (SYS 38) measures ramfb full-frame present
-  ~15.6 ms vs ~0.44 ms for a 256 px dirty rect under TCG (~35x cheaper). The
-  remaining end-to-end bottleneck is the VNC transport; the real lever is an
-  ashmem shared-memory framebuffer, in progress in the Android frontend
-  ([display-pipeline.md](https://github.com/Kimi-syl/kimios-android/blob/main/docs/display-pipeline.md)).
+- **Library-OS ports build and are functionally complete** (FS, net, all apps),
+  verified end-to-end natively (real shell, DNS, HTTP fetch; GUI render + touch
+  via a host harness) and in CI. On-device runtime verification is pending
+  hardware access (no test device attached); the contract is proven, the Swift /
+  JNI shells are standard platform code.
+- **External binaries on device:** `spawn`/`run`/`exec` of external ELF/PE needs
+  a JIT ELF loader (mode B) — not yet built. Everything compiled-in runs
+  ahead-of-time at native speed. APKs are inspected (not executed); DEX runs on
+  the built-in mini-Dalvik, exactly as on bare metal.
+- **Bare metal on real silicon** (Redmi Note 11, `spes`) is blocked: locked
+  bootloader, boot chain not dumped/verified. QEMU `virt` is the working kernel
+  target. See [docs/hardware.md](docs/hardware.md).
+- **Legacy QEMU-era limits** (still true for the kernel path): VirtIO-GPU 2D
+  falls back to ramfb on tested QEMU; the Linux ABI has no `fork`/`execve`
+  (individual BusyBox applets work, interactive `sh` doesn't); Linux binaries
+  must be static non-PIE; SMP is bring-up only. These motivated the library-OS
+  pivot — on a real device the host OS provides all of this.
 
 ## Documentation
 
-- [ios/README.md](ios/README.md) — iOS library-OS port (native, no QEMU); `.ipa` CI.
-- [android/README.md](android/README.md) — Android library-OS port (native, no
-  QEMU); signed APK CI.
-- [docs/phases.md](docs/phases.md) — detailed write-up of every phase (Ph1-Ph52).
-- [ROADMAP.md](ROADMAP.md) — terse milestone checklist (QEMU vs bare metal).
+- [ios/README.md](ios/README.md) — iOS library-OS port; `.ipa` CI; host dispatcher.
+- [android/README.md](android/README.md) — Android library-OS port; signed APK CI.
+- [docs/phases.md](docs/phases.md) — detailed write-up of every phase (Ph1–Ph52).
+- [ROADMAP.md](ROADMAP.md) — milestone checklist across the three modes.
 - [docs/graphics-architecture.md](docs/graphics-architecture.md) — display
-  backends, VirtIO-GPU status, benchmarks, acceleration staging.
+  backends, VirtIO-GPU status, benchmarks.
 - [docs/android-feasibility.md](docs/android-feasibility.md) — why APK
-  compatibility was abandoned; the mini-Dalvik scope that was shipped.
+  compatibility was abandoned; the mini-Dalvik scope shipped.
 - [docs/hardware.md](docs/hardware.md) — Redmi Note 11 (spes) hardware profile.
-- [kimios-android](https://github.com/Kimi-syl/kimios-android) — the Android
-  frontend (bundled QEMU 10.2.1, VNC display, local kpkg repo server).
+- [kimios-android](https://github.com/Kimi-syl/kimios-android) — the QEMU
+  frontend (full-kernel emulation, bundled QEMU, VNC/ashmem display).
