@@ -137,7 +137,7 @@ final class KimiHost {
             return 0
         case 26: // SYS_RTC -> [epoch,y,m,d,h,min,s]
             let f = UnsafeMutablePointer<UInt64>(bitPattern: UInt(a0))!
-            let t = time(nil)
+            var t = time(nil)
             var tmb = tm()
             gmtime_r(&t, &tmb)
             f[0] = UInt64(t); f[1] = UInt64(tmb.tm_year + 1900); f[2] = UInt64(tmb.tm_mon + 1)
