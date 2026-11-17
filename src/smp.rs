@@ -33,6 +33,11 @@ pub struct Stack([u8; STACK_SIZE]);
 #[no_mangle]
 pub static mut SECONDARY_STACKS: [Stack; MAX_CPUS] = [const { Stack([0; STACK_SIZE]) }; MAX_CPUS];
 
+/// Set by boot.s when the boot CPU had to drop from EL2 (virtualization=on,
+/// e.g. UTM). The PSCI HVC self-test does not return on that path, so skip it.
+#[no_mangle]
+pub static mut BOOT_EL2: u64 = 0;
+
 static ONLINE: AtomicU64 = AtomicU64::new(0);
 static DONE: AtomicU64 = AtomicU64::new(0);
 static MPIDRS: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
@@ -139,6 +144,10 @@ fn wait_for(counter: &AtomicU64, target: u64) -> bool {
 
 /// Bring up every secondary CPU QEMU exposes and run the parallel self-test.
 pub fn init() {
+    if unsafe { BOOT_EL2 } != 0 {
+        println!("SMP         : skipped (EL2 boot; scheduler uses the boot CPU only)");
+        return;
+    }
     let version = unsafe { psci(PSCI_VERSION, 0, 0, 0) };
     println!(
         "PSCI        : {}.{} (HVC conduit)",
