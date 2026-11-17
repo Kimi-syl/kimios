@@ -1,5 +1,8 @@
 # KimiOS milestones
 
+Terse checklist; detailed per-phase write-ups (Ph1-Ph52) live in
+[docs/phases.md](docs/phases.md).
+
 Two tracks share one kernel:
 
 - **QEMU `virt`**: the executable development/test target on this phone
@@ -55,9 +58,10 @@ Target-independent, implemented before display/device work:
    completed lines; `read` parks in a `Blocked` state with a rewound `SVC` and
    the console IRQ wakes it, so background processes run at the prompt.
 7. ~~Basic display output.~~ Done on QEMU: a fw_cfg DMA driver writes
-   `etc/ramfb` and the kernel draws a 640x480 XRGB8888 test pattern into an
-   identity-mapped buffer. Pixel output verified with monitor `screendump`.
-   Real hardware still needs a panel/DSI driver.
+   `etc/ramfb` and the kernel draws an XRGB8888 test pattern into an
+   identity-mapped buffer (640x480 at first bring-up; 1080x1920 default
+   today, boot-configurable via `kimios.fb=`). Pixel output verified with
+   monitor `screendump`. Real hardware still needs a panel/DSI driver.
 8. ~~Framebuffer text console.~~ Done: an embedded 8x8 font mirrors kernel and
    user console output at 80x60 with wrapping, scrolling and input echo;
    verified pixel-for-pixel and with a 60-line scroll test.
@@ -205,10 +209,13 @@ beyond the console appears.
 
 ## Next
 
-1. Block storage beyond QEMU: UFS and the spes partition table (blocked on
-   bootloader unlock for bare-metal testing).
-2. Filesystem surface: directories, rename, and a real free-inode list.
-3. SMP scheduling: per-CPU runqueues, GIC redistributor init and timer/IPIs on
+1. ashmem/shared-memory display transport in the Android frontend (removes
+   the VNC latency floor; see kimios-android/docs/display-pipeline.md).
+2. VirtIO-GPU `attach_backing` debugging (non-`none` display backend /
+   upstream QEMU), then staged accelerated backends.
+3. Linux ABI growth: fork/execve for interactive shells, then threads/
+   futex/epoll and sockets as real binaries demand them.
+4. SMP scheduling: per-CPU runqueues, GIC redistributor init and timer/IPIs on
    secondary cores (needs khaje firmware on spes for hardware).
-4. More drawing: user-space font/glyph blitting or a shared framebuffer
-   mapping, plus a proper compositor/invalid-rect refresh model.
+5. Block storage beyond QEMU: UFS and the spes partition table (blocked on
+   bootloader unlock for bare-metal testing).
