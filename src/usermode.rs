@@ -45,6 +45,7 @@ pub const SYS_NET: u64 = 34;
 pub const SYS_SPAWN_ARGS: u64 = 35;
 pub const SYS_FB_BACK: u64 = 36;
 pub const SYS_FB_PRESENT: u64 = 37;
+pub const SYS_GFX_BENCH: u64 = 38;
 
 /// Coarse user-accessible window: ELF, stack, PE image/thunks/stack.
 const USER_SPACE_START: u64 = 0x6000_0000;
@@ -654,6 +655,12 @@ pub fn sys_fb_back() -> u64 {
 /// Present a rectangle of the back buffer to the live framebuffer.
 pub fn sys_fb_present(x0: u64, y0: u64, x1: u64, y1: u64) -> u64 {
     crate::fb::present(x0 as usize, y0 as usize, x1 as usize, y1 as usize);
+    0
+}
+
+/// Run the display-path benchmark (results printed to the console).
+pub fn sys_gfx_bench() -> u64 {
+    crate::fb::benchmark();
     0
 }
 

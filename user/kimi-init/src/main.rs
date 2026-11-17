@@ -458,6 +458,8 @@ pub extern "C" fn _start() -> ! {
                 k::print(if e.is_empty() { "cannot read DEX file" } else { e });
                 k::print("\n");
             }
+        } else if command == &b"gfxbench"[..] {
+            k::gfx_bench();
         } else if command == &b"kpkg"[..] {
             let (sub, rest) = split_word(argument);
             let rest = trim(rest);

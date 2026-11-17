@@ -184,6 +184,19 @@ Target-independent, implemented before display/device work:
     client forces opaque alpha (VNC's 32bpp padding byte was 0 → transparent
     pixels) and handles DesktopSize/Cursor pseudo-encodings without dropping
     the connection (which had caused constant reconnect/reload).
+39. Hardware-independent graphics interface. Done: the GUI is decoupled from
+    QEMU graphics — it renders to a back buffer and publishes via
+    fb_info/fb_back/fb_present; `src/fb.rs` dispatches to a backend selected by
+    `kimios.gpu=` (auto/ramfb/virtio). ramfb is the stable boot/recovery
+    fallback. A VirtIO-GPU 2D driver (`src/virtio_gpu.rs`: create_2d,
+    attach_backing, set_scanout, transfer_to_host_2d, resource_flush) is
+    implemented; on the tested QEMU builds attach_backing returns ERR_UNSPEC
+    (shareable-image/udmabuf path), so it auto-falls back to ramfb — see
+    docs/graphics-architecture.md for the honest status + next debugging step.
+    Added `gfxbench` (SYS_GFX_BENCH): ramfb full-frame present ~15.6 ms /
+    256px dirty rect ~0.44 ms under TCG (dirty rects ~35x cheaper). Accelerated
+    backends (VirGL/Venus/rutabaga-gfxstream) are designed but staged until 2D
+    is stable; the real latency lever remains the ashmem transport.
 
 EL0 processes are preempted by the timer (50 ms quantum, round-robin among
 `Ready` processes), and a process blocked in `read` yields the CPU. Syscalls

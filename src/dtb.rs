@@ -34,6 +34,8 @@ pub struct BootInfo {
     pub memory: MemoryRegion,
     pub memory_from_dtb: bool,
     pub fb_resolution: Option<(u32, u32)>,
+    /// GPU backend preference: 0 auto, 1 ramfb, 2 virtio-gpu.
+    pub gpu_pref: u8,
 }
 
 fn read_be32(address: u64) -> u32 {
@@ -133,6 +135,26 @@ fn parse_fb_resolution(dtb: &Dtb) -> Option<(u32, u32)> {
     None
 }
 
+/// Parse `kimios.gpu=auto|ramfb|virtio` from `/chosen/bootargs` (default auto).
+fn parse_gpu_pref(dtb: &Dtb) -> u8 {
+    let Some(args) = dtb.get_property("/chosen", "bootargs") else {
+        return 0;
+    };
+    let Ok(text) = core::str::from_utf8(args) else {
+        return 0;
+    };
+    for token in text.trim_matches('\0').split_whitespace() {
+        if let Some(value) = token.strip_prefix("kimios.gpu=") {
+            return match value {
+                "ramfb" => 1,
+                "virtio" | "virtio-gpu" => 2,
+                _ => 0,
+            };
+        }
+    }
+    0
+}
+
 fn try_parse(address: u64, from_x0: bool) -> Option<BootInfo> {
     let size = dtb_size_at(address)?;
 
@@ -140,6 +162,7 @@ fn try_parse(address: u64, from_x0: bool) -> Option<BootInfo> {
     let dtb = unsafe { Dtb::from_raw(address as *const u8)? };
     let memory = parse_memory(&dtb)?;
     let fb_resolution = parse_fb_resolution(&dtb);
+    let gpu_pref = parse_gpu_pref(&dtb);
 
     Some(BootInfo {
         dtb_addr: address,
@@ -148,6 +171,7 @@ fn try_parse(address: u64, from_x0: bool) -> Option<BootInfo> {
         memory,
         memory_from_dtb: true,
         fb_resolution,
+        gpu_pref,
     })
 }
 
@@ -184,5 +208,6 @@ pub fn probe(x0: usize) -> BootInfo {
         },
         memory_from_dtb: false,
         fb_resolution: None,
+        gpu_pref: 0,
     }
 }

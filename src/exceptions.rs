@@ -172,6 +172,7 @@ pub extern "C" fn exception_handler(frame: &mut ExceptionFrame) {
             usermode::SYS_FB_PRESENT => {
                 usermode::sys_fb_present(arg0, arg1, arg2, arg3)
             }
+            usermode::SYS_GFX_BENCH => usermode::sys_gfx_bench(),
             usermode::SYS_INPUT_POLL => usermode::sys_input_poll(),
             usermode::SYS_NET => usermode::sys_net(arg0, arg1, arg2, arg3, arg4),
             crate::pe::SYS_PE_GET_STD_HANDLE => {

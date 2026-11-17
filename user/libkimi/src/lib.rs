@@ -49,6 +49,7 @@ pub const SYS_NET: u64 = 34;
 pub const SYS_SPAWN_ARGS: u64 = 35;
 pub const SYS_FB_BACK: u64 = 36;
 pub const SYS_FB_PRESENT: u64 = 37;
+pub const SYS_GFX_BENCH: u64 = 38;
 
 pub const EV_KEY: u16 = 1;
 pub const EV_REL: u16 = 2;
@@ -510,6 +511,11 @@ pub fn fb_back() -> Option<u64> {
 /// Publish a rectangle of the back buffer to the display (dirty-rect copy).
 pub fn fb_present(x0: u64, y0: u64, x1: u64, y1: u64) {
     syscall4(SYS_FB_PRESENT, x0, y0, x1, y1);
+}
+
+/// Run the display-path benchmark; results are printed to the console.
+pub fn gfx_bench() {
+    syscall3(SYS_GFX_BENCH, 0, 0, 0);
 }
 
 /// Current program break (one past the last heap byte).

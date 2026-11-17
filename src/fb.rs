@@ -12,7 +12,7 @@
 use crate::font::FONT8X8;
 use crate::fwcfg;
 use crate::println;
-use core::ptr::addr_of;
+use core::ptr::{addr_of, addr_of_mut};
 use core::sync::atomic::{AtomicBool, Ordering};
 use spin::Mutex;
 
@@ -81,9 +81,31 @@ static ENABLED: AtomicBool = AtomicBool::new(false);
 /// When false, console text is not mirrored (a GUI owns the framebuffer).
 static CONSOLE: AtomicBool = AtomicBool::new(true);
 
+/// Active display backend: 0 = ramfb (boot/recovery fallback), 1 = virtio-gpu 2D.
+static BACKEND: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0);
+/// Boot preference: 0 = auto (virtio-gpu if present, else ramfb), 1 = ramfb, 2 = virtio.
+static GPU_PREF: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0);
+
+/// Select the GPU backend preference from the `kimios.gpu=` boot argument.
+pub fn set_gpu_pref(pref: u8) {
+    GPU_PREF.store(pref, Ordering::Release);
+}
+
+pub fn backend_name() -> &'static str {
+    if BACKEND.load(Ordering::Acquire) == 1 {
+        "virtio-gpu-2d"
+    } else {
+        "ramfb"
+    }
+}
+
 #[allow(static_mut_refs)]
 fn buffer() -> &'static mut [u32] {
-    unsafe { &mut FRAMEBUFFER.0 }
+    if BACKEND.load(Ordering::Acquire) == 1 {
+        unsafe { &mut BACK.0 }
+    } else {
+        unsafe { &mut FRAMEBUFFER.0 }
+    }
 }
 
 fn dims() -> Dims {
@@ -109,12 +131,37 @@ fn clear_active(fb: &mut [u32], d: &Dims) {
 /// Returns `false` when the device is absent (no `-device ramfb`), leaving the
 /// rest of the boot unaffected.
 pub fn init() -> bool {
+    let d = dims();
+
+    // Prefer VirtIO-GPU 2D unless ramfb is forced; ramfb is the fallback.
+    let pref = GPU_PREF.load(Ordering::Acquire);
+    if pref != 1 {
+        let backing = addr_of!(BACK) as u64;
+        if crate::virtio_gpu::init(d.width as u32, d.height as u32, backing, d.stride as u32) {
+            BACKEND.store(1, Ordering::Release);
+            unsafe {
+                core::ptr::write_bytes(addr_of_mut!(BACK) as *mut u8, 0, MAX_WIDTH * MAX_HEIGHT * 4);
+            }
+            let mut screen = SCREEN.lock();
+            screen.column = 0;
+            screen.row = 0;
+            ENABLED.store(true, Ordering::Release);
+            println!(
+                "virtio-gpu  : 2D scanout {}x{} B8G8R8X8 (backing {:#x})",
+                d.width, d.height, backing
+            );
+            return true;
+        }
+        if pref == 2 {
+            println!("virtio-gpu  : requested but absent; falling back to ramfb");
+        }
+    }
+
     let Some(selector) = fwcfg::find_file("etc/ramfb") else {
         println!("ramfb       : not configured (no etc/ramfb in fw_cfg)");
         return false;
     };
 
-    let d = dims();
     let address = addr_of!(FRAMEBUFFER) as u64;
 
     // QEMU_PACKED RAMFBCfg: addr, fourcc, flags, width, height, stride.
@@ -222,8 +269,16 @@ pub fn putc(byte: u8) {
     if !ENABLED.load(Ordering::Acquire) || !CONSOLE.load(Ordering::Acquire) {
         return;
     }
-    let mut screen = SCREEN.lock();
-    putc_locked(&mut screen, buffer(), byte);
+    {
+        let mut screen = SCREEN.lock();
+        putc_locked(&mut screen, buffer(), byte);
+    }
+    // ramfb is scanned directly by QEMU; virtio-gpu must transfer the back
+    // buffer to the host scanout for console text to appear.
+    if BACKEND.load(Ordering::Acquire) == 1 {
+        let d = dims();
+        present(0, 0, d.width, d.height);
+    }
 }
 
 /// Framebuffer geometry as `(width, height, stride, format)`.
@@ -246,7 +301,12 @@ pub fn mapping() -> Option<(u64, usize, usize)> {
         return None;
     }
     let d = dims();
-    Some((addr_of!(FRAMEBUFFER) as u64, d.stride, d.height))
+    let addr = if BACKEND.load(Ordering::Acquire) == 1 {
+        addr_of!(BACK) as u64
+    } else {
+        addr_of!(FRAMEBUFFER) as u64
+    };
+    Some((addr, d.stride, d.height))
 }
 
 /// Physical address of the offscreen back buffer (same layout as the front).
@@ -256,6 +316,77 @@ pub fn back_mapping() -> Option<(u64, usize, usize)> {
     }
     let d = dims();
     Some((addr_of!(BACK) as u64, d.stride, d.height))
+}
+
+/// Read the ARM generic counter (fine-grained timing for benchmarks).
+fn counter() -> u64 {
+    let v: u64;
+    unsafe { core::arch::asm!("mrs {}, cntpct_el0", out(reg) v, options(nomem, nostack)) };
+    v
+}
+fn counter_freq() -> u64 {
+    let v: u64;
+    unsafe { core::arch::asm!("mrs {}, cntfrq_el0", out(reg) v, options(nomem, nostack)) };
+    v
+}
+
+/// Benchmark the display path: full-frame and dirty-rect present latency and
+/// memcpy bandwidth, plus virtio-gpu command round-trips when available.
+/// Results are printed to the console (serial).
+pub fn benchmark() {
+    if !ENABLED.load(Ordering::Acquire) {
+        println!("gfxbench: no display");
+        return;
+    }
+    let d = dims();
+    let freq = counter_freq().max(1);
+    let full_bytes = (d.width * d.height * 4) as u64;
+    let rect_bytes = (256 * 256 * 4) as u64;
+    let iters = 50u64;
+
+    let ns = |ticks: u64| -> u64 { ticks * 1_000_000_000 / freq };
+
+    // Full-frame present.
+    let t0 = counter();
+    for _ in 0..iters {
+        present(0, 0, d.width, d.height);
+    }
+    let full_ns = ns(counter() - t0) / iters;
+
+    // Small dirty-rect present (256x256).
+    let t0 = counter();
+    for _ in 0..iters {
+        present(100, 100, 356, 356);
+    }
+    let rect_ns = ns(counter() - t0) / iters;
+
+    let bw = |bytes: u64, ns_val: u64| -> u64 {
+        if ns_val == 0 {
+            0
+        } else {
+            bytes * 1000 / ns_val // MB/s (bytes/ns * 1000 = MB/s approx)
+        }
+    };
+
+    println!(
+        "gfxbench[{}]: full {}x{} present={} us ({} MB/s), rect256 present={} us ({} MB/s)",
+        backend_name(),
+        d.width,
+        d.height,
+        full_ns / 1000,
+        bw(full_bytes, full_ns),
+        rect_ns / 1000,
+        bw(rect_bytes, rect_ns)
+    );
+
+    if BACKEND.load(Ordering::Acquire) == 1 {
+        let t0 = counter();
+        for _ in 0..iters {
+            crate::virtio_gpu::present(0, 0, d.width as u32, d.height as u32, (d.stride / 4) as u32);
+        }
+        let vns = ns(counter() - t0) / iters;
+        println!("gfxbench[virtio]: transfer+flush round-trip={} us", vns / 1000);
+    }
 }
 
 /// Copy a rectangle of the back buffer to the live framebuffer. Copying only
@@ -271,6 +402,16 @@ pub fn present(x0: usize, y0: usize, x1: usize, y1: usize) {
     let y0 = y0.min(d.height);
     let y1 = y1.min(d.height);
     if x0 >= x1 || y0 >= y1 {
+        return;
+    }
+    if BACKEND.load(Ordering::Acquire) == 1 {
+        crate::virtio_gpu::present(
+            x0 as u32,
+            y0 as u32,
+            x1 as u32,
+            y1 as u32,
+            (d.stride / 4) as u32,
+        );
         return;
     }
     let stride_px = d.stride / 4;

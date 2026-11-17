@@ -29,6 +29,7 @@ mod timer;
 mod usermode;
 mod uart;
 mod virtio_blk;
+mod virtio_gpu;
 mod virtio_input;
 mod virtio_net;
 
@@ -227,6 +228,7 @@ pub extern "C" fn kmain(dtb: usize) -> ! {
     if let Some((width, height)) = boot.fb_resolution {
         fb::configure(width as usize, height as usize);
     }
+    fb::set_gpu_pref(boot.gpu_pref);
     fb::init();
 
     // Phase 30: virtio-input keyboard (shares the UART line editor).
