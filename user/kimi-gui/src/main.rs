@@ -11,9 +11,33 @@ mod font_data;
 mod keyboard;
 
 use core::panic::PanicInfo;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use draw::Screen;
 use libkimi as k;
+
+/// User VA of the latency mailbox (0 = unavailable). Stages are written here so
+/// the Android frontend can read them out of shared guest RAM.
+static INSTR: AtomicU64 = AtomicU64::new(0);
+
+fn istamp(idx: usize, val: u64) {
+    let base = INSTR.load(Ordering::Relaxed);
+    if base != 0 {
+        unsafe {
+            *(base as *mut u64).add(idx) = val;
+        }
+    }
+}
+
+fn ibump_seq() {
+    let base = INSTR.load(Ordering::Relaxed);
+    if base != 0 {
+        unsafe {
+            let slot = (base as *mut u64).add(k::IBOX_SEQ);
+            *slot += 1;
+        }
+    }
+}
 
 const BLACK: u32 = 0x0000_0000;
 const SURFACE: u32 = 0x0014_1419;
@@ -245,6 +269,7 @@ pub extern "C" fn _start() -> ! {
     };
 
     let screen = Screen::new(base, width, height, stride);
+    INSTR.store(k::instr_map().unwrap_or(0), Ordering::Relaxed);
     while k::input_poll().is_some() {}
     let mut ui = Ui::new(screen.width(), screen.height());
     let mut last_minute = u64::MAX;
@@ -252,6 +277,7 @@ pub extern "C" fn _start() -> ! {
     let mut dirty = true;
 
     loop {
+        istamp(k::IBOX_HB, k::cntpct());
         let clock = clock();
         let (minute, second) = (clock[5], clock[6]);
 
@@ -272,11 +298,18 @@ pub extern "C" fn _start() -> ! {
 
         match k::input_poll() {
             Some(event) => {
+                if event.kind == k::EV_KEY
+                    && (event.code == k::BTN_LEFT || event.code == k::BTN_TOUCH)
+                {
+                    istamp(k::IBOX_INPUT, k::cntpct());
+                    istamp(k::IBOX_IVAL, event.value as u64);
+                    ibump_seq();
+                }
                 if handle(&screen, &mut ui, event, clock) {
                     dirty = true;
                 }
             }
-            None => k::sleep_ms(8),
+            None => k::sleep_ms(2),
         }
     }
 }
@@ -342,6 +375,7 @@ fn handle(screen: &Screen, ui: &mut Ui, event: k::InputEvent, clock: [u64; 7]) -
                 }
                 true
             } else {
+                istamp(k::IBOX_HANDLER, k::cntpct());
                 ui.press = Some(ui.touch);
                 // Instant press feedback: draw just the touch ring over the
                 // existing frame and present only its small bounding box,
@@ -359,6 +393,7 @@ fn press_feedback(screen: &Screen, ui: &Ui) {
         screen.reset_dirty();
         screen.ring(point.0, point.1, 18, 3, 0x00a0_a8b8);
         screen.circle(point.0, point.1, 3, TEXT);
+        istamp(k::IBOX_DRAWN, k::cntpct());
         present_dirty(screen);
     }
 }

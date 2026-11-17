@@ -46,6 +46,7 @@ pub const SYS_SPAWN_ARGS: u64 = 35;
 pub const SYS_FB_BACK: u64 = 36;
 pub const SYS_FB_PRESENT: u64 = 37;
 pub const SYS_GFX_BENCH: u64 = 38;
+pub const SYS_INSTR_MAP: u64 = 39;
 
 /// Coarse user-accessible window: ELF, stack, PE image/thunks/stack.
 const USER_SPACE_START: u64 = 0x6000_0000;
@@ -650,6 +651,11 @@ pub fn sys_fb_back() -> u64 {
         return ERROR;
     }
     process::map_backbuffer().unwrap_or(ERROR)
+}
+
+/// Map the latency-instrumentation mailbox into the calling process.
+pub fn sys_instr_map() -> u64 {
+    process::map_instr().unwrap_or(ERROR)
 }
 
 /// Present a rectangle of the back buffer to the live framebuffer.

@@ -201,6 +201,19 @@ Target-independent, implemented before display/device work:
     256px dirty rect ~0.44 ms under TCG (dirty rects ~35x cheaper). Accelerated
     backends (VirGL/Venus/rutabaga-gfxstream) are designed but staged until 2D
     is stable; the real latency lever remains the ashmem transport.
+40. ~~Terminal app = CLI shell; OSK latency cut.~~ Done: the GUI Terminal now
+    runs the *same* command interpreter as the init CLI (`libkimi::shell`), so
+    `kpkg`, `run`, `dvm`, `gfxbench`, `net`, `fetch`, etc. all work in the app;
+    console output is redirected into the terminal display via a capture hook
+    (`capture_begin`/`take`/`end`). Verified GUI + CLI. Added touch->display
+    latency instrumentation: a shared CNTPCT mailbox (`src/instr.rs`,
+    `SYS_INSTR_MAP`, EL0 counter access) stamps input/handler/drawn/present and
+    Android correlates via heartbeat. Measured guest internal ~0.4 ms; the cost
+    was the Android full-frame blit + 16 ms poll. Optimized: dirty-rect shm blit
+    (cumulative `ACCUM`/`ACK`/`FRAME` rect; 529x less swizzle work), 1 ms
+    frame-counter poll (present->detect ~0.6 ms), 2 ms guest input poll. Remaining
+    dominant term is QMP->guest input transport (~11 ms) — a shared-memory input
+    ring is the next (architecture-level) lever.
 
 EL0 processes are preempted by the timer (50 ms quantum, round-robin among
 `Ready` processes), and a process blocked in `read` yields the CPU. Syscalls

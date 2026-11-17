@@ -24,6 +24,18 @@ pub fn uptime_ms() -> u64 {
     (ticks / frequency().max(1) as u128) as u64
 }
 
+/// Allow EL0 (user processes) to read the system counter (CNTPCT_EL0 /
+/// CNTVCT_EL0). Needed by the GUI's latency timestamps; without it the MRS
+/// traps to EL1.
+pub fn enable_el0_access() {
+    unsafe {
+        let v: u64;
+        asm!("mrs {}, cntkctl_el1", out(reg) v, options(nomem, nostack));
+        // EL0PCTEN (bit 0) | EL0VCTEN (bit 1)
+        asm!("msr cntkctl_el1, {}", in(reg) v | 0x3, options(nomem, nostack));
+    }
+}
+
 /// Start a periodic timer. `interval` is in counter ticks.
 ///
 /// CNTP_TVAL_EL0 is a down-counter; when it reaches zero the condition is

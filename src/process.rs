@@ -26,6 +26,7 @@ const LINUX_MMAP_LIMIT: u64 = 0x6000_0000;
 const LINUX_BRK_LIMIT: u64 = 0x2000_0000;
 /// Fixed user mapping for the framebuffer (read/write, no execute).
 pub const USER_FB_VA: u64 = 0x6600_0000;
+pub const USER_INSTR_VA: u64 = 0x6700_0000;
 pub const SYS_ERROR: u64 = u64::MAX;
 
 const INIT_PID: u64 = 1;
@@ -1265,6 +1266,15 @@ pub fn map_framebuffer() -> Option<u64> {
 pub fn map_backbuffer() -> Option<u64> {
     let (physical, stride, height) = crate::fb::back_mapping()?;
     map_fb_at(physical, stride, height)
+}
+
+/// Map the latency-instrumentation mailbox (one page) for user-space writes.
+#[allow(static_mut_refs)]
+pub fn map_instr() -> Option<u64> {
+    let slot = current_slot()?;
+    let space = unsafe { PROCESSES[slot].space.as_mut() }?;
+    space.map_shared_page(USER_INSTR_VA, crate::instr::addr(), false);
+    Some(USER_INSTR_VA)
 }
 
 #[allow(static_mut_refs)]

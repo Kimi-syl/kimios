@@ -14,6 +14,7 @@ mod font;
 mod fwcfg;
 mod gic;
 mod input;
+mod instr;
 mod irq;
 mod linux;
 mod mmu;
@@ -157,6 +158,7 @@ pub extern "C" fn kmain(dtb: usize) -> ! {
     let frequency = timer::frequency();
     let interval = frequency / 20; // 50 ms
     timer::start_periodic(interval);
+    timer::enable_el0_access();
 
     println!("CNTFRQ_EL0  : {} Hz", frequency);
     println!("Timer       : PPI 30, {} ticks per tick (50 ms)", interval);
@@ -230,6 +232,7 @@ pub extern "C" fn kmain(dtb: usize) -> ! {
     }
     fb::set_gpu_pref(boot.gpu_pref);
     fb::init();
+    instr::init();
 
     // Phase 30: virtio-input keyboard (shares the UART line editor).
     println!();

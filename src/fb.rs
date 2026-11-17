@@ -406,6 +406,7 @@ pub fn present(x0: usize, y0: usize, x1: usize, y1: usize) {
     if x0 >= x1 || y0 >= y1 {
         return;
     }
+    crate::instr::present(x0, y0, x1, y1);
     if BACKEND.load(Ordering::Acquire) == 1 {
         crate::virtio_gpu::present(
             x0 as u32,
