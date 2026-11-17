@@ -16,6 +16,8 @@ pub struct Screen {
     stride: i64,
     logical_height: i64,
     app_space: core::cell::Cell<bool>,
+    /// Accumulated dirty bounding box in physical pixels [x0, y0, x1, y1].
+    dirty: core::cell::Cell<[i64; 4]>,
 }
 
 impl Screen {
@@ -30,7 +32,46 @@ impl Screen {
             stride: (stride_bytes / 4) as i64,
             logical_height,
             app_space: core::cell::Cell::new(false),
+            dirty: core::cell::Cell::new([i64::MAX, i64::MAX, i64::MIN, i64::MIN]),
         }
+    }
+
+    /// Expand the dirty bounding box to include a physical-pixel rectangle.
+    fn mark_dirty(&self, x0: i64, y0: i64, x1: i64, y1: i64) {
+        let mut d = self.dirty.get();
+        if x0 < d[0] {
+            d[0] = x0;
+        }
+        if y0 < d[1] {
+            d[1] = y0;
+        }
+        if x1 > d[2] {
+            d[2] = x1;
+        }
+        if y1 > d[3] {
+            d[3] = y1;
+        }
+        self.dirty.set(d);
+    }
+
+    /// Clear the dirty box (call at the start of a frame).
+    pub fn reset_dirty(&self) {
+        self.dirty.set([i64::MAX, i64::MAX, i64::MIN, i64::MIN]);
+    }
+
+    /// The accumulated dirty box, if anything was drawn.
+    pub fn dirty_rect(&self) -> Option<[i64; 4]> {
+        let d = self.dirty.get();
+        if d[0] < d[2] && d[1] < d[3] {
+            Some(d)
+        } else {
+            None
+        }
+    }
+
+    /// Mark the whole screen dirty (force a full present).
+    pub fn mark_full_dirty(&self) {
+        self.mark_dirty(0, 0, self.physical_width, self.physical_height);
     }
 
     /// Apps are laid out in a fixed 480x800 space; on shorter/wider screens
@@ -106,6 +147,7 @@ impl Screen {
         if x0 >= x1 || y0 >= y1 {
             return;
         }
+        self.mark_dirty(x0, y0, x1, y1);
         if x0 == 0 && x1 == self.physical_width && self.stride == self.physical_width {
             self.solid_run(y0 * self.stride, (y1 - y0) * self.stride, color);
             return;
@@ -163,6 +205,7 @@ impl Screen {
         let y0 = self.map_y(y);
         let x1 = self.map_x(x + width);
         let y1 = self.map_y(y + height);
+        self.mark_dirty(x0, y0, x1, y1);
         for row in y0..y1 {
             for column in x0..x1 {
                 self.phys_blend(column, row, color, alpha);
@@ -206,6 +249,7 @@ impl Screen {
         let py = self.map_y(y);
         let pw = self.map_x(x + width) - px;
         let ph = self.map_y(y + height) - py;
+        self.mark_dirty(px, py, px + pw, py + ph);
         let radius = self.map_x(radius).min(pw / 2).min(ph / 2).max(0);
         for row in 0..ph {
             let dy = if row < radius {
@@ -366,6 +410,7 @@ impl Screen {
         let oy = self.map_y(gy);
         let pw = (self.map_x(gx + gw) - ox).max(1);
         let ph = (self.map_y(gy + gh) - oy).max(1);
+        self.mark_dirty(ox, oy, ox + pw, oy + ph);
 
         let w = glyph.w as i64;
         let h = glyph.h as i64;

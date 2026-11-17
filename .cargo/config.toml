@@ -8,3 +8,7 @@ rustflags = [
     "-C", "link-arg=-Tlinker.ld",
     "-C", "relocation-model=static",
 ]
+
+# Allow a fallback list of DNS servers (smoltcp defaults to a single server).
+[env]
+SMOLTCP_DNS_MAX_SERVER_COUNT = "3"

@@ -507,9 +507,9 @@ pub fn fb_back() -> Option<u64> {
     }
 }
 
-/// Publish the back buffer to the display (one fast copy, no partial frames).
-pub fn fb_present() {
-    syscall3(SYS_FB_PRESENT, 0, 0, 0);
+/// Publish a rectangle of the back buffer to the display (dirty-rect copy).
+pub fn fb_present(x0: u64, y0: u64, x1: u64, y1: u64) {
+    syscall4(SYS_FB_PRESENT, x0, y0, x1, y1);
 }
 
 /// Current program break (one past the last heap byte).

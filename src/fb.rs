@@ -258,20 +258,36 @@ pub fn back_mapping() -> Option<(u64, usize, usize)> {
     Some((addr_of!(BACK) as u64, d.stride, d.height))
 }
 
-/// Copy the finished back buffer to the live framebuffer in one pass.
-pub fn present() {
+/// Copy a rectangle of the back buffer to the live framebuffer. Copying only
+/// the changed region (dirty rectangle) instead of the whole 1080p frame keeps
+/// the GUI fast. Coordinates are physical pixels, clamped to the active area.
+pub fn present(x0: usize, y0: usize, x1: usize, y1: usize) {
     if !ENABLED.load(Ordering::Acquire) {
         return;
     }
     let d = dims();
-    // stride == width pixels, so the active region is contiguous.
-    let pixels = d.width * d.height;
+    let x0 = x0.min(d.width);
+    let x1 = x1.min(d.width);
+    let y0 = y0.min(d.height);
+    let y1 = y1.min(d.height);
+    if x0 >= x1 || y0 >= y1 {
+        return;
+    }
+    let stride_px = d.stride / 4;
     unsafe {
-        core::ptr::copy_nonoverlapping(
-            addr_of!(BACK) as *const u32,
-            addr_of!(FRAMEBUFFER) as *mut u32,
-            pixels,
-        );
+        let src = addr_of!(BACK) as *const u32;
+        let dst = addr_of!(FRAMEBUFFER) as *mut u32;
+        if x0 == 0 && x1 == d.width {
+            // Full-width rows are contiguous: one copy.
+            let start = y0 * stride_px;
+            let count = (y1 - y0) * stride_px;
+            core::ptr::copy_nonoverlapping(src.add(start), dst.add(start), count);
+        } else {
+            for y in y0..y1 {
+                let off = y * stride_px + x0;
+                core::ptr::copy_nonoverlapping(src.add(off), dst.add(off), x1 - x0);
+            }
+        }
     }
 }
 

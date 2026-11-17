@@ -273,7 +273,7 @@ pub extern "C" fn _start() -> ! {
                     dirty = true;
                 }
             }
-            None => k::sleep_ms(16),
+            None => k::sleep_ms(8),
         }
     }
 }
@@ -340,10 +340,23 @@ fn handle(screen: &Screen, ui: &mut Ui, event: k::InputEvent, clock: [u64; 7]) -
                 true
             } else {
                 ui.press = Some(ui.touch);
-                true
+                // Instant press feedback: draw just the touch ring over the
+                // existing frame and present only its small bounding box,
+                // instead of redrawing the whole scene (keeps clicks snappy).
+                press_feedback(screen, ui);
+                false
             }
         }
         _ => false,
+    }
+}
+
+fn press_feedback(screen: &Screen, ui: &Ui) {
+    if let Some(point) = ui.press {
+        screen.reset_dirty();
+        screen.ring(point.0, point.1, 18, 3, 0x00a0_a8b8);
+        screen.circle(point.0, point.1, 3, TEXT);
+        present_dirty(screen);
     }
 }
 
@@ -450,11 +463,12 @@ fn unlock(screen: &Screen, ui: &mut Ui, clock: [u64; 7]) {
     if ui.settings.animations {
         for step in 0..=6 {
             let offset = height * (100 - ease(step, 6)) / 100;
+            screen.reset_dirty();
             draw_wallpaper(screen, 0, true);
             draw_lock(screen, clock, 0);
             draw_home(screen, clock, ui, None, offset, true);
             draw_status_bar(screen, clock, ui);
-            k::fb_present();
+            present_dirty(screen);
             k::sleep_ms(12);
         }
     }
@@ -469,11 +483,12 @@ fn open_app(screen: &Screen, ui: &mut Ui, app: AppKind, clock: [u64; 7]) {
     if ui.settings.animations {
         for step in 0..=6 {
             let offset = width * (100 - ease(step, 6)) / 100;
+            screen.reset_dirty();
             draw_wallpaper(screen, 0, true);
             draw_home(screen, clock, ui, None, 0, true);
             draw_app(screen, ui, app, clock, offset, true);
             draw_status_bar(screen, clock, ui);
-            k::fb_present();
+            present_dirty(screen);
             k::sleep_ms(12);
         }
     }
@@ -488,11 +503,12 @@ fn close_app(screen: &Screen, ui: &mut Ui, clock: [u64; 7]) {
         if ui.settings.animations {
             for step in 0..=6 {
                 let offset = width * ease(step, 6) / 100;
+                screen.reset_dirty();
                 draw_wallpaper(screen, 0, true);
                 draw_home(screen, clock, ui, None, 0, true);
                 draw_app(screen, ui, app, clock, offset, true);
                 draw_status_bar(screen, clock, ui);
-                k::fb_present();
+                present_dirty(screen);
             k::sleep_ms(12);
             }
         }
@@ -503,6 +519,7 @@ fn close_app(screen: &Screen, ui: &mut Ui, clock: [u64; 7]) {
 }
 
 fn render(screen: &Screen, ui: &mut Ui, clock: [u64; 7]) {
+    screen.reset_dirty();
     let paint = ui.paint_bg;
     draw_scene(screen, ui, clock, paint);
     if ui.shade {
@@ -515,7 +532,14 @@ fn render(screen: &Screen, ui: &mut Ui, clock: [u64; 7]) {
         screen.circle(point.0, point.1, 3, TEXT);
     }
     ui.paint_bg = false;
-    k::fb_present();
+    present_dirty(screen);
+}
+
+/// Copy only the drawn (dirty) region of the back buffer to the display.
+fn present_dirty(screen: &Screen) {
+    if let Some(d) = screen.dirty_rect() {
+        k::fb_present(d[0] as u64, d[1] as u64, d[2] as u64, d[3] as u64);
+    }
 }
 
 fn draw_scene(screen: &Screen, ui: &Ui, clock: [u64; 7], paint_bg: bool) {

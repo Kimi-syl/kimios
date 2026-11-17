@@ -651,9 +651,9 @@ pub fn sys_fb_back() -> u64 {
     process::map_backbuffer().unwrap_or(ERROR)
 }
 
-/// Present the back buffer to the live framebuffer (one fast copy).
-pub fn sys_fb_present() -> u64 {
-    crate::fb::present();
+/// Present a rectangle of the back buffer to the live framebuffer.
+pub fn sys_fb_present(x0: u64, y0: u64, x1: u64, y1: u64) -> u64 {
+    crate::fb::present(x0 as usize, y0 as usize, x1 as usize, y1 as usize);
     0
 }
 

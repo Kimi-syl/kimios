@@ -118,7 +118,10 @@ pub fn init() -> bool {
 
     let mut sockets = SocketSet::new(Vec::new());
     let dhcp = sockets.add(dhcpv4::Socket::new());
-    let dns = sockets.add(dns::Socket::new(&[], Vec::new()));
+    let dns = sockets.add(dns::Socket::new(
+        &[IpAddress::v4(1, 1, 1, 1), IpAddress::v4(8, 8, 8, 8)],
+        Vec::new(),
+    ));
 
     *NET.lock() = Some(NetState {
         iface,
@@ -175,11 +178,24 @@ fn poll_state(state: &mut NetState) {
             if let Some(router) = router {
                 let _ = state.iface.routes_mut().add_default_ipv4_route(router);
             }
-            let as_ip: Vec<IpAddress> = servers.iter().map(|&s| IpAddress::Ipv4(s)).collect();
+            // Prefer public resolvers. QEMU's 10.0.2.3 forwarder relies on the
+            // host's resolver config, which is absent on some hosts (Android),
+            // and smoltcp waits 10 s before falling back to the next server.
+            // Public DNS is reachable via slirp UDP forwarding everywhere, so
+            // list it first; keep the DHCP-provided servers as fallbacks.
+            let mut dns_v4: Vec<Ipv4Address> = Vec::new();
+            dns_v4.push(Ipv4Address::new(1, 1, 1, 1));
+            dns_v4.push(Ipv4Address::new(8, 8, 8, 8));
+            for server in &servers {
+                if !dns_v4.contains(server) {
+                    dns_v4.push(*server);
+                }
+            }
+            let as_ip: Vec<IpAddress> = dns_v4.iter().map(|&s| IpAddress::Ipv4(s)).collect();
             state.sockets.get_mut::<dns::Socket>(state.dns).update_servers(&as_ip);
             state.ip = Some(address);
             state.gateway = router;
-            state.dns_servers = servers;
+            state.dns_servers = dns_v4;
             println!("[net] DHCP lease: {}", address);
         }
         DhcpOutcome::Lost => {
