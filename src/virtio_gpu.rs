@@ -13,6 +13,7 @@
 //! around the shared command buffers so the console (IRQ context) and the GUI
 //! (syscall context) cannot race.
 
+use crate::println;
 use core::ptr::{addr_of_mut, read_volatile, write_volatile};
 use spin::Mutex;
 
@@ -61,7 +62,7 @@ const CMD_RESOURCE_CREATE_2D: u32 = 0x0101;
 const CMD_SET_SCANOUT: u32 = 0x0103;
 const CMD_RESOURCE_FLUSH: u32 = 0x0104;
 const CMD_TRANSFER_TO_HOST_2D: u32 = 0x0105;
-const CMD_RESOURCE_ATTACH_BACKING: u32 = 0x0107;
+const CMD_RESOURCE_ATTACH_BACKING: u32 = 0x0106;
 
 const RESP_OK_NODATA: u32 = 0x1100;
 const RESP_OK_DISPLAY_INFO: u32 = 0x1101;
@@ -70,7 +71,7 @@ const RESP_OK_DISPLAY_INFO: u32 = 0x1101;
 const FORMAT_B8G8R8X8: u32 = 2;
 
 const CTRL_HDR: usize = 24;
-const REQ_BUF: usize = 40000;
+const REQ_BUF: usize = 65536;
 const RESP_BUF: usize = 512;
 
 #[repr(C)]
@@ -353,6 +354,7 @@ pub fn init(width: u32, height: u32, backing: u64, stride: u32) -> bool {
         put32(req, CTRL_HDR + 12, height);
         let r = command(&mut state, CTRL_HDR + 16);
         if r != Some(RESP_OK_NODATA) {
+            println!("virtio-gpu  : CREATE_2D rejected (resp {:?})", r);
             return false;
         }
 
@@ -376,6 +378,7 @@ pub fn init(width: u32, height: u32, backing: u64, stride: u32) -> bool {
         }
         let r = command(&mut state, off);
         if r != Some(RESP_OK_NODATA) {
+            println!("virtio-gpu  : ATTACH_BACKING rejected (resp {:?})", r);
             return false;
         }
 
@@ -389,6 +392,7 @@ pub fn init(width: u32, height: u32, backing: u64, stride: u32) -> bool {
         put32(req, CTRL_HDR + 20, 1); // resource_id
         let r = command(&mut state, CTRL_HDR + 24);
         if r != Some(RESP_OK_NODATA) {
+            println!("virtio-gpu  : SET_SCANOUT rejected (resp {:?})", r);
             return false;
         }
 

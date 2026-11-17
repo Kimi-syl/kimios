@@ -142,9 +142,11 @@ pub fn init() -> bool {
             unsafe {
                 core::ptr::write_bytes(addr_of_mut!(BACK) as *mut u8, 0, MAX_WIDTH * MAX_HEIGHT * 4);
             }
-            let mut screen = SCREEN.lock();
-            screen.column = 0;
-            screen.row = 0;
+            {
+                let mut screen = SCREEN.lock();
+                screen.column = 0;
+                screen.row = 0;
+            }
             ENABLED.store(true, Ordering::Release);
             println!(
                 "virtio-gpu  : 2D scanout {}x{} B8G8R8X8 (backing {:#x})",
@@ -153,7 +155,7 @@ pub fn init() -> bool {
             return true;
         }
         if pref == 2 {
-            println!("virtio-gpu  : requested but absent; falling back to ramfb");
+            println!("virtio-gpu  : requested but unavailable (absent or init failed); falling back to ramfb");
         }
     }
 

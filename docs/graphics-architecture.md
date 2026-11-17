@@ -40,7 +40,7 @@ Zero-copy guest→QEMU: the GUI publishes into a RAM framebuffer that QEMU's ram
 device scans directly. Simple and robust; used for boot/recovery and as the
 default when VirtIO-GPU is unavailable.
 
-## 3. VirtIO-GPU 2D backend (implemented; attach blocked on this QEMU)
+## 3. VirtIO-GPU 2D backend (working — verified on QEMU 11.1.2 and 10.2.1)
 
 `src/virtio_gpu.rs` implements the 2D (non-VirGL) protocol over virtio-mmio:
 device init + feature negotiation (2D only), control + cursor virtqueues, and
@@ -49,19 +49,78 @@ device init + feature negotiation (2D only), control + cursor virtqueues, and
 issues a transfer of the dirty rect from the backing into the host resource and
 flushes it to scanout; QEMU then shows the scanout via its display backend.
 
-**Status (honest):** device discovery, `CREATE_2D`, `GET_DISPLAY_INFO`,
-`SET_SCANOUT` and the transfer/flush command framing all work. On the QEMU
-builds tested (host 11.1.2 and bundled 10.2.1) `RESOURCE_ATTACH_BACKING` returns
-`VIRTIO_GPU_RESP_ERR_UNSPEC` with no guest-error log, for single-page,
-single-large, and page-sized (2025-entry) backing lists alike, at valid RAM
-addresses. The resource image is confirmed created (a pre-attach transfer reports
-"no backing storage", not "is a blob"). The tested builds use a refactored
-virtio-gpu ("no backing storage %d") whose attach path differs from upstream
-master; the shareable-image/udmabuf path likely requires a non-`none` display
-backend. **Until this is resolved the backend falls back to ramfb automatically**,
-so the system always boots and renders. Next debugging step: run against a QEMU
-with `-display egl-headless`/`sdl` (or upstream master) and trace
-`virtio_gpu_create_mapping_iov`/`init_udmabuf`.
+**Status: FIXED and verified.** The GUI renders through virtio-gpu 2D with
+`-display none` + VNC on both the host QEMU 11.1.2 and the bundled Termux QEMU
+10.2.1 (serial: `virtio-gpu  : 2D scanout 1080x1920 B8G8R8X8`, QMP screendump of
+the GPU console shows the full GUI, ~1000 distinct colors, zero guest errors).
+ramfb remains the automatic fallback when the device is absent or init fails.
+
+### Root cause of the former ATTACH_BACKING failure (confirmed by trace)
+
+A **guest driver opcode bug**, not a QEMU/display-backend problem: the driver
+sent `0x0107` for attach, but per the virtio spec `0x0106` is
+`RESOURCE_ATTACH_BACKING` and `0x0107` is `RESOURCE_DETACH_BACKING`. QEMU
+dispatched the request to `virtio_gpu_resource_detach_backing()`, whose
+`virtio_gpu_find_check_resource(require_backing=true)` check fails on a resource
+that has never been attached:
+
+```
+trace (buggy driver, -trace enable=virtio_gpu_* -d guest_errors):
+  virtio_gpu_cmd_res_create_2d res 0x1, fmt 0x2, w 1080, h 1920
+  virtio_gpu_cmd_res_back_detach res 0x1                      <- 0x0107 = DETACH
+  virtio_gpu_resource_detach_backing: no backing storage 1    <- LOG_GUEST_ERROR
+  -> response VIRTIO_GPU_RESP_ERR_UNSPEC (0x1200)
+```
+
+This explains every reported symptom: `ERR_UNSPEC` for *all* backing-list
+shapes (the payload never mattered — the command type was wrong), `CREATE_2D` /
+`SET_SCANOUT` succeeding, and transfers reporting "no backing storage". The
+guest error *was* emitted by QEMU, but from the **detach** function (easy to
+miss when looking for attach-path errors). Fix: one constant,
+`CMD_RESOURCE_ATTACH_BACKING = 0x0106` (src/virtio_gpu.rs).
+
+Secondary latent bug fixed alongside: the request buffer was 40000 bytes, too
+small for the maximum resolution's page list (1440x2560 needs 3600 entries =
+57632 bytes). Now 65536; verified by booting `kimios.fb=1440x2560`.
+
+Disproved hypotheses: the refactored attach path does **not** need a non-`none`
+display backend (works with `-display none`), and udmabuf is irrelevant for 2D
+resources — QEMU only calls `virtio_gpu_init_udmabuf()` when `res->image` is
+NULL, which never happens for `CREATE_2D` resources.
+
+### Experiment matrix (2026-11-17, host QEMU 11.1.2 unless noted)
+
+All runs: `-machine virt,gic-version=3 -cpu cortex-a53 -m 128M`, ramfb present
+as fallback, VNC `127.0.0.1:3`, `-trace enable=virtio_gpu_* -d guest_errors,unimp`.
+
+| config | result |
+|---|---|
+| buggy driver (0x0107), `-display none` | FAIL: `res_back_detach` + "no backing storage 1" → ERR_UNSPEC; ramfb fallback |
+| fixed driver, `-display none` | **OK**: attach/scanout/transfer+flush, GUI pixels verified |
+| `-display egl-headless` | QEMU refuses: "no drm render node available" (proot, no GPU) |
+| `-display sdl` | QEMU refuses: "No available video device" (no X/Wayland in proot) |
+| `-display gtk` | QEMU refuses: "gtk initialization failed" |
+| `-device virtio-gpu-pci` | guest driver is mmio-only → device not found → ramfb fallback (expected) |
+| `,blob=true` | QEMU refuses: `/dev/udmabuf` missing ("need rutabaga or udmabuf") |
+| `,hostmem=256` | OK, GUI renders |
+| `,venus=on` | property only exists on GL devices; `virtio-gpu-gl-device,venus=on` needs `-display ...,gl=on` → unavailable here |
+| `,max_outputs=1` | OK, GUI renders |
+| no `kimios.gpu=` (auto) | virtio-gpu auto-selected when present, GUI renders |
+| `kimios.gpu=ramfb` | ramfb baseline renders the same GUI (pixel parity) |
+| `kimios.fb=1440x2560` | OK: 3600-entry backing list, GUI renders (REQ_BUF regression test) |
+| no virtio device + `kimios.gpu=virtio` | clean fallback message + ramfb |
+| **Termux QEMU 10.2.1** (`libqemu.so`, `-display none`) | **OK**: virtio backend init + GUI pixels (trace backend compiled out; serial + screendump evidence) |
+
+Verification method (no image viewing): QMP `screendump` **with
+`device=<gpu id>`** — the default targets the active console, which under
+`-display none` is a 640x480 placeholder, not the GPU scanout — then PPM pixel
+statistics (distinct colors / theme palette), plus the serial backend line and
+the virtio trace (`res_back_attach` → `set_scanout` → continuous
+`res_xfer_toh_2d` + `res_flush`, ~1000 transfers per 12 s session, zero
+guest_errors).
+
+Driver observability: `CREATE_2D` / `ATTACH_BACKING` / `SET_SCANOUT` failures now
+log the response code to serial (the original bug was silent on the guest side).
 
 **Performance expectation (honest):** for a single software-rendered framebuffer
 shown over VNC, VirtIO-GPU 2D is *not* a latency win over ramfb — it adds a
@@ -86,8 +145,10 @@ Takeaways:
   bare metal it would be ~1 ms; under emulation it dominates. Reducing full-frame
   copies (incremental app rendering, or a shared-memory transport that avoids the
   copy entirely) is the next lever.
-- Memcpy bandwidth under TCG is ~0.5 GB/s; virtio-gpu 2D would add command
-  round-trips on top of a comparable copy, hence not faster for this use case.
+- Memcpy bandwidth under TCG is ~0.5 GB/s; virtio-gpu 2D adds command
+  round-trips on top of a comparable copy, hence not faster for this use case
+  (guest-side `gfxbench[virtio]` numbers still to be captured; the virtio path
+  is verified functionally, not benchmarked).
 
 End-to-end frame latency to the phone panel additionally includes the VNC refresh
 (~30 ms), encode/decode, and SurfaceFlinger — see `kimios-android/docs/display-pipeline.md`.
@@ -101,18 +162,21 @@ current renderer is pure software, so these are future work, not flags:
   + virglrenderer on the host. Guest gets a Gallium OpenGL driver; the GUI would
   need a GL backend (e.g. render via a small GL abstraction instead of CPU
   blits). Host needs EGL/GPU access (non-trivial on Android).
-- **Venus (Vulkan):** `-device virtio-gpu-gl` withvenus renderer; guest Vulkan
+- **Venus (Vulkan):** `-device virtio-gpu-gl` with venus renderer; guest Vulkan
   driver. Higher performance ceiling, larger guest-side effort.
 - **rutabaga / gfxstream:** the Android emulator's GPU streaming stack
   (`-device virtio-gpu-rutabaga` / gfxstream renderer). Best fit for an Android
   host (it is designed for it), but requires the gfxstream renderer libraries and
   a guest gfxstream driver; the GUI would target the gfxstream API.
 
-Staging rule (per the task): do **not** start these until the VirtIO-GPU 2D path
-is stable (attach_backing resolved + verified rendering). The abstraction in §1
-is designed so an accelerated backend slots in behind `fb_back`/`fb_present` (or
-a richer resource/submit interface) without changing the GUI's backend-agnostic
-contract.
+Staging rule: the VirtIO-GPU 2D path is now stable (attach fixed + rendering
+verified on both QEMU builds), so accelerated backends are unblocked as future
+work. None are usable in the current test environment yet: VirGL/Venus need EGL
++ a DRM render node (`egl-headless` fails in proot), blob resources need
+`/dev/udmabuf`, and rutabaga/gfxstream need the gfxstream renderer libraries.
+The abstraction in §1 is designed so an accelerated backend slots in behind
+`fb_back`/`fb_present` (or a richer resource/submit interface) without changing
+the GUI's backend-agnostic contract.
 
 ## 6. Recommended latency path (orthogonal to backend)
 
