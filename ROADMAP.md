@@ -1,14 +1,20 @@
 # KimiOS roadmap
 
-One pure-Rust userland, three ways to run it. Detailed per-phase write-ups
-(Ph1–Ph52) live in [docs/phases.md](docs/phases.md).
+**Goal: Desktop Lite** — run standard static Linux binaries and native apps on a
+phone (the WSL1 syscall-translation model), efficiently. The **library-OS** is
+the native, no-QEMU realization of that goal; the bare-metal kernel + QEMU was
+the first implementation and remains the foundation. One pure-Rust userland,
+three ways to run it. Detailed per-phase write-ups (Ph1–Ph52) live in
+[docs/phases.md](docs/phases.md).
 
 - **Library-OS (the product):** the userland compiled as a native ARM64 library,
-  hosted directly by iOS / Android. No QEMU. This is the current direction.
+  hosted directly by iOS / Android. No QEMU, native speed. Desktop Lite's binary
+  hosting comes natively via the JIT ELF loader + host Linux-ABI translation.
 - **Bare-metal kernel:** the full EL1 OS the userland was built on; runs on QEMU
-  `virt`. Real silicon (Redmi Note 11, `spes`) blocked on bootloader unlock.
+  `virt` (where the Linux ABI was first proven). Real silicon (Redmi Note 11,
+  `spes`) blocked on bootloader unlock.
 - **QEMU frontend:** [kimios-android](https://github.com/Kimi-syl/kimios-android)
-  emulates the whole kernel on a phone (the pre-library-OS path).
+  emulates the whole kernel on a phone (the pre-library-OS Desktop Lite path).
 
 ## Library-OS status
 
@@ -30,7 +36,7 @@ route to a `kimi_host_syscall` dispatcher; everything above is unchanged.
 | Signing | unsigned (sideload re-sign) | phone debug key (`b1339cd3…`) |
 | Native contract verification (shell, DNS, HTTP fetch; GUI render+touch) | done | done (shared harness) |
 | On-device runtime verification | pending hardware | pending hardware |
-| External ELF/PE `spawn`/`run`/`exec` (JIT loader, mode B) | not yet | not yet |
+| Desktop Lite binary hosting (JIT ELF loader + host Linux-ABI translation) | not yet | not yet |
 
 Verified natively without a device: a `no_std` shell-test staticlib + C
 dispatcher runs the real libkimi shell (file CRUD, nested dirs, RamFS, df,
@@ -80,14 +86,17 @@ DEX interpreter; shared CLI/Terminal shell; touch→display latency instrumentat
    (Ph46) shipped and verified, but Play-Store apps need the full Android runtime
    (Bionic/ART/framework/Binder) — team-scale.
    [docs/android-feasibility.md](docs/android-feasibility.md).
-3. **Ph47+ — "Desktop Lite" (WSL1 model).** A Linux syscall-translation layer
-   (`src/linux.rs`) ran static Linux binaries (musl/glibc, BusyBox 402 applets)
-   and native Rust apps on the kernel; kpkg package manager; ~0.4 s boot. Proved
-   the userland could host real binaries — but still inside QEMU. Now a legacy
-   chapter; the library-OS supersedes it for device use.
-4. **Library-OS (current).** The same userland as a native library on iOS/Android
-   — no QEMU, native speed, host FS/net. The three-primitive `cfg` gate made the
-   port a dispatcher implementation, not an OS rewrite.
+3. **Ph47+ — Desktop Lite adopted as the goal (WSL1 model).** A Linux
+   syscall-translation layer (`src/linux.rs`) ran static Linux binaries
+   (musl/glibc, BusyBox 402 applets) and native Rust apps on the kernel; kpkg
+   package manager; ~0.4 s boot. This proved the model — the first implementation,
+   inside QEMU, with its emulation and display-latency costs.
+4. **Library-OS — Desktop Lite done efficiently (current).** The same userland as
+   a native library on iOS/Android: no QEMU, native speed, host FS/net. The
+   three-primitive `cfg` gate made the port a dispatcher implementation, not an
+   OS rewrite. The JIT ELF loader + host-side Linux syscall translation bring the
+   Desktop Lite binary-hosting capability natively to the device — the goal,
+   achieved the efficient way.
 
 ## Next
 
@@ -96,10 +105,13 @@ Priority is the library-OS product; kernel items continue as the foundation.
 1. **On-device verification** of the iOS/Android ports (render + touch + FS/net
    on real hardware) once a test device is available; fix any platform-shell
    runtime issues.
-2. **JIT ELF loader (mode B)** for both ports: map real aarch64 ELF/PE images and
-   rewrite `svc` (no EL0 vectors on host) so external `spawn`/`run`/`exec` work.
-   StikDebug enables JIT on iPad; Android needs a similar path. This restores the
-   Desktop Lite binary-hosting capability natively on device.
+2. **Desktop Lite natively — JIT ELF loader + host Linux-ABI translation** (the
+   core payoff): map real aarch64 Linux ELF/PE images, rewrite `svc` to call the
+   host dispatcher (no EL0 vectors on host), and translate Linux syscall numbers
+   onto host services (sandbox FS, BSD sockets, host memory) — the same WSL1 model
+   as `src/linux.rs`, but native, no QEMU. StikDebug enables JIT on iPad; Android
+   needs a similar path. Then `run /disk/<binary>` / `kpkg run busybox …` work on
+   the device at native speed.
 3. **Library-OS polish:** richer FS (file picker / import), TLS networking
    (HTTPS browser/kpkg), background audio, performance/battery tuning of the
    render+input loop.

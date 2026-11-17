@@ -1,15 +1,17 @@
 # KimiOS
 
-A phone OS written in Rust whose **entire userland runs natively on iOS and
-Android** — no emulator, no VM. The same code also boots as a bare-metal ARM64
-kernel on QEMU. One codebase, three ways to run it.
+A **Desktop Lite** environment for phones: a WSL1-style layer that runs standard
+statically-linked Linux binaries and native apps directly on the device — no
+Linux kernel, no VM. The goal has stayed the same; the means got much more
+efficient. Instead of emulating a bare-metal kernel under QEMU, the userland now
+runs **natively on iOS and Android as a library-OS**, at native speed.
 
-KimiOS began as a from-scratch `#![no_std]` `#![no_main]` operating system for
-AArch64. The phone GUI, apps and shell it grew are pure computation over a
-framebuffer with a tiny syscall surface — which turned out to be exactly what a
-**library-OS** needs. So the userland now ships as a native ARM64 library hosted
-by a thin platform shell on real devices, at native speed, with no QEMU in the
-loop.
+KimiOS began as a from-scratch `#![no_std]` `#![no_main]` ARM64 kernel with a
+Nothing-OS × Material-3 phone GUI. That userland is pure computation over a
+framebuffer with a tiny syscall surface — exactly what a library-OS needs — so it
+now ships as a native ARM64 library hosted by a thin platform shell on real
+devices. The same code still boots as a bare-metal kernel on QEMU. One codebase,
+three ways to run it.
 
 | Lock screen | Home | Quick settings |
 |:---:|:---:|:---:|
@@ -27,10 +29,29 @@ loop.
 | **Android library-OS** | GUI + apps + shell, native ARM64 | Rust staticlib + C/JNI + Java/SurfaceView shell → APK | builds in CI, signed, fully functional |
 | **Bare-metal kernel** | full OS (EL1 kernel + EL0 userland) | boots on QEMU `virt` (`-kernel` ELF) | working dev target |
 
-The library-OS ports are the headline: KimiOS running directly on a phone/tablet
-CPU, rendering through Metal (iOS) or an `ANativeWindow` framebuffer (Android),
-with the host's filesystem and sockets. The bare-metal kernel is the foundation
-the userland was built on, and still runs the whole OS under QEMU.
+The library-OS ports are how Desktop Lite ships today: KimiOS running directly on
+a phone/tablet CPU, rendering through Metal (iOS) or an `ANativeWindow`
+framebuffer (Android), with the host's filesystem and sockets. The bare-metal
+kernel is the foundation the userland was built on, and still runs the whole OS
+under QEMU.
+
+## The goal: Desktop Lite — without QEMU
+
+Desktop Lite is the WSL1 model: translate a binary's syscalls onto a host layer
+rather than running a full kernel/VM. KimiOS first proved this on the bare-metal
+kernel — `src/linux.rs` translates Linux syscall numbers so static musl/glibc
+binaries and BusyBox run at EL0 (`run /disk/<binary>`, `kpkg run busybox …`).
+That works, but it pays QEMU emulation overhead and a display-transport latency
+floor on every frame and every touch.
+
+The library-OS does the **same thing far more efficiently**: the userland is
+already native, so a Linux binary just needs to be loaded and its syscalls
+translated onto the *host* dispatcher (which implements them with iOS/Android
+APIs — sandbox FS, BSD sockets, host memory). No QEMU, no EL1/MMU, no VNC. The
+missing piece is a **JIT ELF loader** that maps a real aarch64 Linux image and
+rewrites its `svc` instructions to call the dispatcher (there are no EL0 exception
+vectors on a host). With that, Desktop Lite runs real Linux binaries at native
+speed on the device — the goal, achieved the efficient way.
 
 ## The library-OS insight
 
@@ -159,13 +180,17 @@ Full per-phase history: **[docs/phases.md](docs/phases.md)**.
    were built and verified, but running Play-Store apps needs the full Android
    runtime (Bionic/ART/framework/Binder) — team-scale. See
    [docs/android-feasibility.md](docs/android-feasibility.md).
-3. **"Desktop Lite" (Ph47+):** a WSL1-style Linux syscall-translation layer ran
-   static Linux binaries (BusyBox, musl/glibc) on the kernel, with kpkg. This
-   proved the userland could host real binaries — but still inside QEMU.
-4. **Library-OS (current):** the same userland compiled as a native library and
-   hosted directly by iOS/Android. No QEMU, native speed, real device FS/net.
-   The QEMU frontend ([kimios-android](https://github.com/Kimi-syl/kimios-android))
-   remains as the full-kernel emulation path.
+3. **Desktop Lite adopted as the goal (Ph47+).** A WSL1-style Linux
+   syscall-translation layer ran static Linux binaries (BusyBox, musl/glibc) on
+   the kernel, with kpkg — proving the model. This first implementation ran
+   inside QEMU, with the emulation and display-latency costs that come with it.
+4. **Library-OS — Desktop Lite done efficiently (current).** The same userland
+   compiled as a native library and hosted directly by iOS/Android: no QEMU,
+   native speed, real device FS/net. The JIT ELF loader + host-side Linux syscall
+   translation bring the Desktop Lite binary-hosting capability natively to the
+   device. The QEMU frontend
+   ([kimios-android](https://github.com/Kimi-syl/kimios-android)) remains as the
+   full-kernel emulation path and the proving ground for the Linux ABI.
 
 ## Status and honest caveats
 
@@ -174,18 +199,20 @@ Full per-phase history: **[docs/phases.md](docs/phases.md)**.
   via a host harness) and in CI. On-device runtime verification is pending
   hardware access (no test device attached); the contract is proven, the Swift /
   JNI shells are standard platform code.
-- **External binaries on device:** `spawn`/`run`/`exec` of external ELF/PE needs
-  a JIT ELF loader (mode B) — not yet built. Everything compiled-in runs
-  ahead-of-time at native speed. APKs are inspected (not executed); DEX runs on
-  the built-in mini-Dalvik, exactly as on bare metal.
+- **Desktop Lite on device (the next step):** running real Linux binaries
+  natively needs the JIT ELF loader + host-side Linux syscall translation — not
+  yet built. Everything compiled-in (GUI, apps, shell) runs ahead-of-time at
+  native speed today. APKs are inspected (not executed); DEX runs on the built-in
+  mini-Dalvik, exactly as on bare metal.
 - **Bare metal on real silicon** (Redmi Note 11, `spes`) is blocked: locked
   bootloader, boot chain not dumped/verified. QEMU `virt` is the working kernel
   target. See [docs/hardware.md](docs/hardware.md).
-- **Legacy QEMU-era limits** (still true for the kernel path): VirtIO-GPU 2D
-  falls back to ramfb on tested QEMU; the Linux ABI has no `fork`/`execve`
-  (individual BusyBox applets work, interactive `sh` doesn't); Linux binaries
-  must be static non-PIE; SMP is bring-up only. These motivated the library-OS
-  pivot — on a real device the host OS provides all of this.
+- **QEMU-implementation limits** (kernel path): VirtIO-GPU 2D falls back to ramfb
+  on tested QEMU; the Linux ABI has no `fork`/`execve` (individual BusyBox applets
+  work, interactive `sh` doesn't); Linux binaries must be static non-PIE; SMP is
+  bring-up only. These are the costs of doing Desktop Lite under QEMU — the
+  library-OS avoids them, since the host OS supplies real threads, sockets,
+  dynamic linking and storage.
 
 ## Documentation
 
