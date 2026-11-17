@@ -8,6 +8,9 @@
 /ios/app/KimiOS.xcodeproj
 /ios/host-harness/out
 
+# Android library-OS build artifacts
+/android/build
+
 # tooling caches
 /.serena
 /ios/host-harness/shelltest/target
