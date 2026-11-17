@@ -163,13 +163,91 @@ final class KimiHost {
             if a0 > baseAddr + UInt64(heapSize) { return heapBreak }
             heapBreak = a0
             return heapBreak
-        case 12: // SYS_STATS
-            return UInt64(heapSize)
+        case 12: // SYS_STATS (free frames for `mem`)
+            return UInt64(heapSize / 4096)
+
+        // ---- filesystem (sandboxed /disk + RamFS) ----
+        case 4: // SYS_OPEN(path,len)
+            return KimiFS.shared.open(userStr(a0, a1))
+        case 5: // SYS_READ_FILE(fd,offset,buf,len)
+            guard let p = userPtr(a2) else { return 0 }
+            return KimiFS.shared.readFile(a0, offset: a1, into: p, len: a3)
+        case 6: // SYS_CLOSE(fd)
+            return KimiFS.shared.close(a0)
+        case 8: // SYS_LIST(buf,len)
+            guard let p = userPtr(a0) else { return UInt64.max }
+            return KimiFS.shared.list(into: p, len: a1)
+        case 13: // SYS_CREATE(path,len)
+            return KimiFS.shared.create(userStr(a0, a1))
+        case 14: // SYS_WRITE_FILE(fd,offset,buf,len)
+            guard let p = userPtr(a2) else { return 0 }
+            return KimiFS.shared.writeFile(a0, offset: a1, from: p, len: a3)
+        case 15: // SYS_DISKINFO
+            return KimiFS.shared.diskinfo()
+        case 18: // SYS_UNLINK(path,len)
+            return KimiFS.shared.unlink(userStr(a0, a1))
+        case 19: // SYS_FREEBLOCKS
+            return KimiFS.shared.freeblocks()
+        case 25: // SYS_RENAME(old,oldlen,new,newlen)
+            return KimiFS.shared.rename(userStr(a0, a1), userStr(a2, a3))
+        case 27: // SYS_STAT(path,len,out[3])
+            guard let out = UnsafeMutablePointer<UInt64>(bitPattern: UInt(a2)) else { return UInt64.max }
+            return KimiFS.shared.stat(userStr(a0, a1), out: out)
+        case 28: // SYS_LISTDIR(path,len,out,outlen)
+            guard let p = userPtr(a2) else { return UInt64.max }
+            return KimiFS.shared.listdir(userStr(a0, a1), into: p, len: a3)
+        case 29: // SYS_MKDIR(path,len)
+            return KimiFS.shared.mkdir(userStr(a0, a1))
+        case 30: // SYS_RMDIR(path,len)
+            return KimiFS.shared.rmdir(userStr(a0, a1))
+
+        // ---- networking (BSD sockets) ----
+        case 34: // SYS_NET(op,...)
+            return netSyscall(a0, a1, a2, a3, a4)
+
+        // ---- process services (single native GUI process) ----
+        case 23: // SYS_PS(out,capacity) -> one running process record
+            guard a1 >= 1, let out = UnsafeMutablePointer<UInt64>(bitPattern: UInt(a0)) else { return UInt64.max }
+            out[0] = 1; out[1] = 0; out[2] = 2; out[3] = 0   // pid ppid state=run exit
+            return 1
+        case 38: // SYS_GFX_BENCH (no kernel display path to benchmark here)
+            return 0
+        case 7, 9, 35: // SYS_EXEC / SYS_SPAWN / SYS_SPAWN_ARGS
+            // Loading external ELF/PE images needs the JIT ELF loader (mode B);
+            // fail gracefully so the shell reports "spawn failed".
+            return UInt64.max
+        case 10, 24: // SYS_WAIT / SYS_KILL (no child processes)
+            return UInt64.max
         default:
-            // Filesystem / net / process syscalls are stubbed in this first
-            // library-OS build (home, clock, calculator, settings render fine).
             return UInt64.max
         }
+    }
+
+    private func netSyscall(_ op: UInt64, _ a1: UInt64, _ a2: UInt64, _ a3: UInt64, _ a4: UInt64) -> UInt64 {
+        switch Int(op) {
+        case 0: return KimiNet.shared.status()
+        case 1:
+            guard let out = userPtr(a3) else { return UInt64.max }
+            return KimiNet.shared.resolve(userStr(a1, a2), out: out)
+        case 2: return KimiNet.shared.connect(ip: a1, port: a2, timeoutMs: a3)
+        case 3:
+            guard let p = userPtr(a2) else { return 0 }
+            return KimiNet.shared.send(slot: a1, buf: p, len: a3)
+        case 4:
+            guard let p = userPtr(a2) else { return 0 }
+            return KimiNet.shared.recv(slot: a1, buf: p, len: a3, timeoutMs: a4)
+        case 5: return KimiNet.shared.close(slot: a1)
+        default: return UInt64.max
+        }
+    }
+
+    private func userStr(_ ptr: UInt64, _ len: UInt64) -> String {
+        guard len > 0, let p = UnsafeMutableRawPointer(bitPattern: UInt(ptr)) else { return "" }
+        return String(data: Data(bytes: p, count: Int(len)), encoding: .utf8) ?? ""
+    }
+
+    private func userPtr(_ p: UInt64) -> UnsafeMutableRawPointer? {
+        UnsafeMutableRawPointer(bitPattern: UInt(p))
     }
 
     private func present(rect x0: UInt64, _ y0: UInt64, _ x1: UInt64, _ y1: UInt64) {

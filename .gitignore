@@ -10,3 +10,4 @@
 
 # tooling caches
 /.serena
+/ios/host-harness/shelltest/target

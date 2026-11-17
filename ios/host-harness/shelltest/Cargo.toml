@@ -1,0 +1,17 @@
+[package]
+name = "shelltest"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "shelltest"
+path = "src/lib.rs"
+crate-type = ["staticlib"]
+
+[dependencies]
+libkimi = { path = "../../../user/libkimi" }
+
+[profile.release]
+panic = "abort"
+opt-level = 2
+lto = true
