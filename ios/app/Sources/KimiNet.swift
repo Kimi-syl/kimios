@@ -35,7 +35,7 @@ final class KimiNet {
         while let n = node {
             let ai = n.pointee
             if ai.ai_family == AF_INET, let addr = ai.ai_addr {
-                let sin = addr.assumingMemoryBound(to: sockaddr_in.self)
+                let sin = UnsafeMutableRawPointer(addr).assumingMemoryBound(to: sockaddr_in.self)
                 var saddr = sin.pointee.sin_addr.s_addr   // already network order
                 memcpy(out, &saddr, 4)
                 return 0
