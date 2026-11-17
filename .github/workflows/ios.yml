@@ -13,7 +13,7 @@ on:
 jobs:
   build-ipa:
     name: Build KimiOS .ipa (library-OS, native ARM64)
-    runs-on: macos-14
+    runs-on: macos-13
     steps:
       - uses: actions/checkout@v4
 
