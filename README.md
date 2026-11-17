@@ -172,6 +172,26 @@ With QEMU user-mode networking (`-netdev user,id=n0 -device
 virtio-net-device,netdev=n0`) the guest reaches the host loopback at
 `10.0.2.2`; the Android frontend serves its bundled kpkg repo there.
 
+## Library-OS ports: native iOS & Android (no QEMU)
+
+The userland is `no_std` with **no allocator** and talks to the OS only through
+three primitives in `libkimi` (`svc` syscalls, `cntpct`, `wfe` exit), gated by
+`cfg(target_os = "none")`. On a hosted target those route to a C-ABI
+`kimi_host_syscall` dispatcher, so the **exact same GUI/apps/shell** compile as a
+native ARM64 library and run directly on the device — no QEMU, no EL1/MMU.
+
+- **[ios/](ios/README.md)** — Swift/UIKit/Metal shell. Builds an unsigned `.ipa`
+  via GitHub Actions (`macos-latest`). Sandboxed FS + BSD-socket net.
+- **[android/](android/README.md)** — Java/SurfaceView shell + C JNI dispatcher
+  (`ANativeWindow` framebuffer). Builds a signed APK via GitHub Actions
+  (`ubuntu`), using the same debug key as the phone/frontend.
+
+Both are fully functional (filesystem, networking, all built-in apps) and verified
+end-to-end natively (real shell, DNS, HTTP fetch; GUI render + touch). Distinct
+from the QEMU-based [kimios-android](https://github.com/Kimi-syl/kimios-android)
+frontend, which emulates the whole kernel. External ELF `spawn`/`exec` needs a JIT
+loader (future work); everything else runs ahead-of-time at native speed.
+
 ## Current status and honest caveats
 
 - **QEMU `virt` is the working target.** Bare metal (Redmi Note 11, `spes`)
@@ -197,6 +217,9 @@ virtio-net-device,netdev=n0`) the guest reaches the host loopback at
 
 ## Documentation
 
+- [ios/README.md](ios/README.md) — iOS library-OS port (native, no QEMU); `.ipa` CI.
+- [android/README.md](android/README.md) — Android library-OS port (native, no
+  QEMU); signed APK CI.
 - [docs/phases.md](docs/phases.md) — detailed write-up of every phase (Ph1-Ph52).
 - [ROADMAP.md](ROADMAP.md) — terse milestone checklist (QEMU vs bare metal).
 - [docs/graphics-architecture.md](docs/graphics-architecture.md) — display

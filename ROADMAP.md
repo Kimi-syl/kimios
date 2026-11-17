@@ -232,3 +232,8 @@ beyond the console appears.
    secondary cores (needs khaje firmware on spes for hardware).
 5. Block storage beyond QEMU: UFS and the spes partition table (blocked on
    bootloader unlock for bare-metal testing).
+6. Library-OS JIT ELF loader (mode B): the native iOS/Android ports
+   ([ios/](ios/README.md), [android/](android/README.md)) run the compiled-in
+   userland ahead-of-time; loading external ELF/PE binaries (`spawn`/`run`/`exec`)
+   needs a JIT loader that maps real aarch64 images and rewrites `svc` (no EL0
+   vectors on host). StikDebug enables JIT on iPad; Android needs a similar path.
