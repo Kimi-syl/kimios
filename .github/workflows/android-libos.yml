@@ -41,10 +41,10 @@ jobs:
           workspaces: user
 
       - name: Build APK
-        env:
-          ANDROID_SDK: ${{ env.ANDROID_HOME }}
-          ANDROID_NDK: ${{ env.ANDROID_HOME }}/ndk/26.1.10909125
-        run: bash android/build-apk.sh
+        run: |
+          export ANDROID_SDK="$ANDROID_HOME"
+          export ANDROID_NDK="$ANDROID_HOME/ndk/26.1.10909125"
+          bash android/build-apk.sh
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
