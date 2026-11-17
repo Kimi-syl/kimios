@@ -9,6 +9,7 @@
 pub mod apk;
 pub mod dvm;
 pub mod kpkg;
+pub mod shell;
 
 use core::arch::asm;
 
@@ -50,6 +51,23 @@ pub const SYS_SPAWN_ARGS: u64 = 35;
 pub const SYS_FB_BACK: u64 = 36;
 pub const SYS_FB_PRESENT: u64 = 37;
 pub const SYS_GFX_BENCH: u64 = 38;
+pub const SYS_INSTR_MAP: u64 = 39;
+
+/// Latency-mailbox slot indices (shared with the kernel `instr` module and the
+/// Android shared-memory reader).
+pub const IBOX_MAGIC: usize = 0;
+pub const IBOX_SEQ: usize = 1;
+pub const IBOX_CNTFRQ: usize = 2;
+pub const IBOX_HB: usize = 3;
+pub const IBOX_INPUT: usize = 4;
+pub const IBOX_HANDLER: usize = 5;
+pub const IBOX_DRAWN: usize = 6;
+pub const IBOX_PRESENT: usize = 7;
+pub const IBOX_RECT: usize = 8;
+pub const IBOX_IVAL: usize = 9;
+pub const IBOX_ACCUM: usize = 10;
+pub const IBOX_ACK: usize = 11;
+pub const IBOX_FRAME: usize = 12;
 
 pub const EV_KEY: u16 = 1;
 pub const EV_REL: u16 = 2;
@@ -149,11 +167,58 @@ pub fn write(fd: u64, buffer: &[u8]) -> u64 {
 }
 
 pub fn print(text: &str) {
-    write(STDOUT, text.as_bytes());
+    print_bytes(text.as_bytes());
 }
 
 pub fn print_bytes(bytes: &[u8]) {
-    write(STDOUT, bytes);
+    if CAP_ACTIVE.load(core::sync::atomic::Ordering::SeqCst) {
+        capture_push(bytes);
+    } else {
+        write(STDOUT, bytes);
+    }
+}
+
+/// Console capture: while active, `print*` output is appended to an internal
+/// buffer instead of the console, so a GUI can run a command and display its
+/// output itself. Single-threaded per process; not re-entrant.
+const CAP_SIZE: usize = 8192;
+static CAP_ACTIVE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+static mut CAP_LEN: usize = 0;
+static mut CAP_BUF: [u8; CAP_SIZE] = [0; CAP_SIZE];
+
+/// Start redirecting `print*` output into the capture buffer (clears it).
+pub fn capture_begin() {
+    unsafe {
+        CAP_LEN = 0;
+    }
+    CAP_ACTIVE.store(true, core::sync::atomic::Ordering::SeqCst);
+}
+
+/// Stop redirecting; subsequent `print*` output goes to the console again.
+pub fn capture_end() {
+    CAP_ACTIVE.store(false, core::sync::atomic::Ordering::SeqCst);
+}
+
+/// Drain up to `out.len()` captured bytes, resetting the buffer. Returns the
+/// number of bytes copied. Call repeatedly until it returns 0.
+pub fn capture_take(out: &mut [u8]) -> usize {
+    unsafe {
+        let len = CAP_LEN;
+        let n = len.min(out.len());
+        core::ptr::copy_nonoverlapping(CAP_BUF.as_ptr(), out.as_mut_ptr(), n);
+        CAP_LEN = 0;
+        n
+    }
+}
+
+fn capture_push(bytes: &[u8]) {
+    unsafe {
+        let len = CAP_LEN;
+        let n = bytes.len().min(CAP_SIZE - len);
+        let buf = core::ptr::addr_of_mut!(CAP_BUF) as *mut u8;
+        core::ptr::copy_nonoverlapping(bytes.as_ptr(), buf.add(len), n);
+        CAP_LEN = len + n;
+    }
 }
 
 /// Read a line (or up to `buffer.len()` bytes) from stdin.
@@ -511,6 +576,23 @@ pub fn fb_back() -> Option<u64> {
 /// Publish a rectangle of the back buffer to the display (dirty-rect copy).
 pub fn fb_present(x0: u64, y0: u64, x1: u64, y1: u64) {
     syscall4(SYS_FB_PRESENT, x0, y0, x1, y1);
+}
+
+/// Map the latency-instrumentation mailbox; returns its user virtual address.
+pub fn instr_map() -> Option<u64> {
+    let result = syscall3(SYS_INSTR_MAP, 0, 0, 0);
+    if result == ERROR {
+        None
+    } else {
+        Some(result)
+    }
+}
+
+/// Read the ARM generic counter (EL0-accessible), for fine-grained timestamps.
+pub fn cntpct() -> u64 {
+    let v: u64;
+    unsafe { core::arch::asm!("mrs {}, cntpct_el0", out(reg) v, options(nomem, nostack)) };
+    v
 }
 
 /// Run the display-path benchmark; results are printed to the console.

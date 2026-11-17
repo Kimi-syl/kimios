@@ -893,159 +893,31 @@ fn terminal_execute(apps: &mut Apps) {
     while split < line.len() && line.as_bytes()[split] != b' ' {
         split += 1;
     }
-    let (name, rest) = line.split_at(split);
-    let argument = rest.trim();
+    let (name, _rest) = line.split_at(split);
     match name {
-        "help" => {
-            apps.terminal.push("help  ls  cat  echo  date  df  mem  ps");
-            apps.terminal.push("uname  uptime  clear  exit");
-        }
-        "ls" => {
-            let mut buffer = [0u8; 640];
-            let popped = if argument == "/disk" {
-                k::listdir("/disk", &mut buffer).unwrap_or(0)
-            } else {
-                k::list(&mut buffer)
-            };
-            let mut count = 0;
-            for entry in buffer[..popped.min(buffer.len())].split(|&byte| byte == 0) {
-                if entry.is_empty() {
-                    continue;
-                }
-                apps.terminal.push(slice_str(entry));
-                count += 1;
-                if count == 16 {
-                    break;
-                }
-            }
-        }
-        "cat" => {
-            let path = if argument.starts_with('/') {
-                argument
-            } else {
-                apps.terminal.push("usage: cat /file");
-                return;
-            };
-            match k::open(path) {
-                Some(handle) => {
-                    let mut body = [0u8; 512];
-                    let count = k::read_file(handle, 0, &mut body);
-                    k::close(handle);
-                    body[..count].iter_mut().for_each(|byte| {
-                        if *byte == b'\r' || (*byte < 32 && *byte != b'\n' && *byte != b'\t') || *byte > 126 {
-                            *byte = b'.';
-                        }
-                    });
-                    apps.terminal.push(slice_str(&body[..count]));
-                }
-                None => apps.terminal.push("cat: file not found"),
-            }
-        }
-        "echo" => apps.terminal.push(argument),
-        "date" => {
-            let clock = k::rtc().unwrap_or([0, 2026, 1, 1, 0, 0, 0]);
-            let mut buf = [0u8; 20];
-            let text = format_date(clock, &mut buf);
-            apps.terminal.push(text);
-        }
-        "df" => {
-            if let Some(info) = k::diskinfo() {
-                let mut buf = [0u8; 20];
-                let mut buf2 = [0u8; 20];
-                let sectors = unsigned(info >> 32, &mut buf);
-                let files = unsigned(info & 0xffff_ffff, &mut buf2);
-                let mut line = [0u8; 64];
-                let mut used = 0;
-                for part in ["sectors ", sectors, " files ", files] {
-                    for &byte in part.as_bytes() {
-                        if used == line.len() {
-                            break;
-                        }
-                        line[used] = byte;
-                        used += 1;
-                    }
-                }
-                apps.terminal.push(slice_str(&line[..used]));
-                if let Some(free) = k::free_blocks() {
-                    let mut line = [0u8; 40];
-                    let prefix = b"free blocks ";
-                    line[..prefix.len()].copy_from_slice(prefix);
-                    let mut buf2 = [0u8; 20];
-                    let value = unsigned(free, &mut buf2).as_bytes();
-                    line[prefix.len()..prefix.len() + value.len()].copy_from_slice(value);
-                    apps.terminal.push(slice_str(&line[..prefix.len() + value.len()]));
-                }
-            } else {
-                apps.terminal.push("df: no disk mounted");
-            }
-        }
-        "mem" => {
-            let mut buf = [0u8; 20];
-            let free = unsigned(k::free_frames(), &mut buf);
-            let mut line = [0u8; 40];
-            let prefix = b"free frames ";
-            line[..prefix.len()].copy_from_slice(prefix);
-            line[prefix.len()..prefix.len() + free.len()].copy_from_slice(free.as_bytes());
-            apps.terminal.push(slice_str(&line[..prefix.len() + free.len()]));
-        }
-        "ps" => {
-            let mut rows = [0u64; 64];
-            let count = k::ps(&mut rows);
-            apps.terminal.push("PID PPID STATE EXIT");
-            for index in 0..count.min(rows.len() / 4) {
-                let base = index * 4;
-                let state = match rows[base + 2] {
-                    0 => "free",
-                    1 => "ready",
-                    2 => "run",
-                    3 => "block",
-                    _ => "dead",
-                };
-                let mut line = [0u8; 40];
-                let mut used = 0;
-                for piece in [
-                    unsigned(rows[base], &mut [0u8; 20]),
-                    unsigned(rows[base + 1], &mut [0u8; 20]),
-                    state,
-                ] {
-                    for &byte in piece.as_bytes() {
-                        if used == line.len() {
-                            break;
-                        }
-                        line[used] = byte;
-                        used += 1;
-                    }
-                    if used < line.len() {
-                        line[used] = b' ';
-                        used += 1;
-                    }
-                }
-                apps.terminal.push(slice_str(&line[..used]));
-            }
-        }
-        "uname" => apps.terminal.push("KimiOS 0.1 aarch64 bare metal"),
-        "uptime" => {
-            let mut buf = [0u8; 20];
-            let seconds = k::uptime_ms() / 1000;
-            let mut line = [0u8; 32];
-            let prefix = b"up ";
-            line[..prefix.len()].copy_from_slice(prefix);
-            let value = unsigned(seconds, &mut buf);
-            line[prefix.len()..prefix.len() + value.len()].copy_from_slice(value.as_bytes());
-            let suffix = b" seconds";
-            let at = prefix.len() + value.len();
-            line[at..at + suffix.len()].copy_from_slice(suffix);
-            apps.terminal.push(slice_str(&line[..at + suffix.len()]));
-        }
+        "" => {}
         "clear" => apps.terminal.clear(),
         "exit" => apps.terminal.push("Close with the back arrow."),
+        "exec" => apps.terminal.push("exec: use 'run <file>' in the GUI terminal"),
         _ => {
-            let mut message = [0u8; 72];
-            let prefix = b"not found: ";
-            message[..prefix.len()].copy_from_slice(prefix);
-            let shown = name.len().min(48);
-            message[prefix.len()..prefix.len() + shown].copy_from_slice(&name.as_bytes()[..shown]);
-            apps.terminal.push(slice_str(&message[..prefix.len() + shown]));
+            // Same command interpreter as the CLI shell; capture its console
+            // output and render it into the terminal display.
+            k::capture_begin();
+            k::shell::exec(line.as_bytes());
+            let mut out = [0u8; 8192];
+            let n = k::capture_take(&mut out);
+            k::capture_end();
+            for byte in &mut out[..n] {
+                if *byte == b'\n' || *byte == b'\t' {
+                    continue;
+                }
+                if *byte < 32 || *byte > 126 {
+                    *byte = b'.';
+                }
+            }
+            if n > 0 {
+                apps.terminal.push(slice_str(&out[..n]));
+            }
         }
     }
 }
