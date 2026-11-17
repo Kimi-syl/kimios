@@ -8,6 +8,7 @@
 mod apps;
 mod draw;
 mod font_data;
+mod keyboard;
 
 use core::panic::PanicInfo;
 
@@ -208,6 +209,7 @@ struct Ui {
     settings: Settings,
     apps: apps::Apps,
     shift: bool,
+    osk: bool,
     shade: bool,
     paint_bg: bool,
     home_page: usize,
@@ -223,6 +225,7 @@ impl Ui {
             settings: Settings::new(),
             apps: apps::Apps::new(),
             shift: false,
+            osk: false,
             shade: false,
             paint_bg: true,
             home_page: 0,
@@ -389,6 +392,18 @@ fn tapped(screen: &Screen, ui: &mut Ui, point: (i64, i64), clock: [u64; 7]) {
             }
         }
         Scene::App(app) => {
+            let osk_now = ui.osk && apps::text_focused(&ui.apps, app);
+            if osk_now {
+                if let Some(key) = keyboard::hit(app_point) {
+                    osk_key(screen, ui, app, key, clock);
+                    return;
+                }
+                // Swallow taps in the keyboard panel (gaps included) so they
+                // never reach app logic; the gesture bar below still closes.
+                if app_point.1 >= keyboard::TOP && app_point.1 <= 770 {
+                    return;
+                }
+            }
             if back_hit(screen, app_point) {
                 close_app(screen, ui, clock);
                 return;
@@ -397,6 +412,7 @@ fn tapped(screen: &Screen, ui: &mut Ui, point: (i64, i64), clock: [u64; 7]) {
                 render(screen, ui, clock);
                 return;
             }
+            let focused_before = apps::text_focused(&ui.apps, app);
             match app {
                 AppKind::Calculator => {
                     if let Some(index) = calculator_hit(app_point) {
@@ -408,11 +424,48 @@ fn tapped(screen: &Screen, ui: &mut Ui, point: (i64, i64), clock: [u64; 7]) {
                         toggle_settings(&mut ui.settings, row);
                     }
                 }
-                _ => apps::tap(screen, &mut ui.apps, app, app_point, clock),
+                _ => apps::tap(screen, &mut ui.apps, app, app_point, osk_now, clock),
+            }
+            if apps::text_focused(&ui.apps, app)
+                && (!focused_before || apps::field_hit(&ui.apps, app, app_point, osk_now))
+            {
+                ui.osk = true;
             }
             render(screen, ui, clock);
         }
     }
+}
+
+/// Dispatch an on-screen keyboard key through the same path as hardware
+/// keys. Shift is one-shot: the next character consumes it.
+fn osk_key(screen: &Screen, ui: &mut Ui, app: AppKind, key: keyboard::Key, clock: [u64; 7]) {
+    let trace = match key {
+        keyboard::Key::Hide => {
+            ui.osk = false;
+            ui.shift = false;
+            901
+        }
+        keyboard::Key::Shift => {
+            ui.shift = !ui.shift;
+            900
+        }
+        keyboard::Key::Question => {
+            apps::key(&mut ui.apps, app, 53, true);
+            ui.shift = false;
+            902
+        }
+        keyboard::Key::Char(code) => {
+            apps::key(&mut ui.apps, app, code, ui.shift);
+            if ui.shift && code != 14 {
+                ui.shift = false;
+            }
+            code as u64
+        }
+    };
+    k::print("osk: code ");
+    k::print_u64(trace);
+    k::print("\n");
+    render(screen, ui, clock);
 }
 
 fn shade_tap(screen: &Screen, ui: &mut Ui, point: (i64, i64), clock: [u64; 7]) {
@@ -480,6 +533,12 @@ fn unlock(screen: &Screen, ui: &mut Ui, clock: [u64; 7]) {
 fn open_app(screen: &Screen, ui: &mut Ui, app: AppKind, clock: [u64; 7]) {
     let width = screen.width();
     apps::open(&mut ui.apps, app);
+    ui.osk = match app {
+        AppKind::Notes | AppKind::Terminal => true,
+        AppKind::Messages | AppKind::Browser => apps::text_focused(&ui.apps, app),
+        _ => false,
+    };
+    ui.shift = false;
     if ui.settings.animations {
         for step in 0..=6 {
             let offset = width * (100 - ease(step, 6)) / 100;
@@ -514,6 +573,8 @@ fn close_app(screen: &Screen, ui: &mut Ui, clock: [u64; 7]) {
         }
     }
     ui.scene = Scene::Home;
+    ui.osk = false;
+    ui.shift = false;
     ui.paint_bg = true;
     render(screen, ui, clock);
 }
@@ -1025,11 +1086,18 @@ fn draw_app(
     screen.text(x + 78, 48, app.label(), 2, TEXT);
     screen.fill(x, 92, width, 1, 0x0020_2026);
 
+    let osk = x_offset == 0 && ui.osk && apps::text_focused(&ui.apps, app);
     match app {
         AppKind::Calculator => draw_calculator(screen, ui, x),
         AppKind::Clock => draw_clock_app(screen, clock, x),
         AppKind::Settings => draw_settings(screen, &ui.settings, x),
-        _ => apps::draw(screen, &ui.apps, app, clock),
+        _ => apps::draw(screen, &ui.apps, app, clock, osk),
+    }
+    if osk {
+        let pressed = ui
+            .press
+            .map(|p| (p.0, p.1 * 800 / screen.logical_height()));
+        keyboard::draw(screen, ui.shift, pressed);
     }
     draw_home_indicator(screen);
 }

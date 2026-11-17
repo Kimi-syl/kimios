@@ -715,6 +715,43 @@ fn key_event(code: u16, shift: bool) -> Option<(u8, bool)> {
     Some(value)
 }
 
+/// Printable byte a keycode produces (None for backspace/unknown). Used by
+/// the on-screen keyboard to label its keys from the same mapping.
+pub fn key_glyph(code: u16, shift: bool) -> Option<u8> {
+    match key_event(code, shift) {
+        Some((0, true)) => None,
+        Some((byte, _)) => Some(byte),
+        None => None,
+    }
+}
+
+/// Whether the app currently has a focused text field (OSK visibility gate).
+pub fn text_focused(apps: &Apps, app: AppKind) -> bool {
+    match app {
+        AppKind::Notes | AppKind::Terminal => true,
+        AppKind::Messages => apps.messages.open.is_some(),
+        AppKind::Browser => apps.browser.editing,
+        _ => false,
+    }
+}
+
+/// Whether an app-space tap lands on the text field itself (reopens the OSK).
+pub fn field_hit(apps: &Apps, app: AppKind, point: (i64, i64), osk: bool) -> bool {
+    match app {
+        AppKind::Notes => point.0 >= 20 && point.0 <= 460 && point.1 >= 160 && point.1 <= 614,
+        AppKind::Terminal => point.1 > 96 && point.1 < 770,
+        AppKind::Messages => {
+            if apps.messages.open.is_none() {
+                return false;
+            }
+            let y = if osk { 392 } else { 690 };
+            point.0 >= 20 && point.0 <= 460 && point.1 >= y && point.1 <= y + 56
+        }
+        AppKind::Browser => point.0 >= 20 && point.0 < 390 && point.1 >= 104 && point.1 <= 148,
+        _ => false,
+    }
+}
+
 pub fn key(apps: &mut Apps, app: AppKind, code: u16, shift: bool) -> bool {
     match app {
         AppKind::Notes => {
@@ -1064,7 +1101,7 @@ fn button(screen: &Screen, x: i64, y: i64, width: i64, height: i64, label: &str,
     screen.text_centered(x + width / 2, y + height / 2 - 8, label, 2, text_color);
 }
 
-pub fn tap(screen: &Screen, apps: &mut Apps, app: AppKind, point: (i64, i64), _clock: [u64; 7]) {
+pub fn tap(screen: &Screen, apps: &mut Apps, app: AppKind, point: (i64, i64), osk: bool, _clock: [u64; 7]) {
     match app {
         AppKind::Phone => phone_tap(apps, point),
         AppKind::Messages => messages_tap(apps, point),
@@ -1075,7 +1112,7 @@ pub fn tap(screen: &Screen, apps: &mut Apps, app: AppKind, point: (i64, i64), _c
         AppKind::Photos => photos_tap(apps, point),
         AppKind::Files => files_tap(apps, point),
         AppKind::Weather => weather_tap(apps, point),
-        AppKind::Browser => browser_tap(apps, point),
+        AppKind::Browser => browser_tap(apps, point, osk),
         AppKind::Apk => apk_tap(apps, point),
         AppKind::Dvm => dvm_tap(apps, point),
         _ => {}
@@ -1311,19 +1348,19 @@ fn weather_tap(apps: &mut Apps, point: (i64, i64)) {
     }
 }
 
-pub fn draw(screen: &Screen, apps: &Apps, app: AppKind, clock: [u64; 7]) {
+pub fn draw(screen: &Screen, apps: &Apps, app: AppKind, clock: [u64; 7], osk: bool) {
     match app {
         AppKind::Phone => draw_phone(screen, &apps.phone),
-        AppKind::Messages => draw_messages(screen, &apps.messages),
+        AppKind::Messages => draw_messages(screen, &apps.messages, osk),
         AppKind::Camera => draw_camera(screen, &apps.camera),
         AppKind::Music => draw_music(screen, &apps.music),
-        AppKind::Notes => draw_notes(screen, &apps.notes),
+        AppKind::Notes => draw_notes(screen, &apps.notes, osk),
         AppKind::Maps => draw_maps(screen, &apps.maps),
         AppKind::Photos => draw_photos(screen, &apps.photos, apps.camera.shots),
         AppKind::Files => draw_files(screen, &apps.files),
         AppKind::Weather => draw_weather(screen, &apps.weather, clock),
-        AppKind::Terminal => draw_terminal(screen, &apps.terminal),
-        AppKind::Browser => draw_browser(screen, &apps.browser),
+        AppKind::Terminal => draw_terminal(screen, &apps.terminal, osk),
+        AppKind::Browser => draw_browser(screen, &apps.browser, osk),
         AppKind::Apk => draw_apk(screen, &apps.apk),
         AppKind::Dvm => draw_dvm(screen, &apps.dvm),
         _ => {}
@@ -1380,7 +1417,7 @@ fn draw_phone(screen: &Screen, phone: &Phone) {
     screen.text_centered(420, 598, "DEL", 1, MUTED);
 }
 
-fn draw_messages(screen: &Screen, messages: &Messages) {
+fn draw_messages(screen: &Screen, messages: &Messages, osk: bool) {
     let width = screen.width();
     screen.fill(0, 93, width, screen.height() - 93, BLACK);
     match messages.open {
@@ -1407,18 +1444,28 @@ fn draw_messages(screen: &Screen, messages: &Messages) {
                 1 => &THREAD_B,
                 _ => &THREAD_C,
             };
+            let draft_y = if osk { 392 } else { 690 };
             for (order, text) in thread.iter().enumerate() {
+                if osk && order + 2 < thread.len() {
+                    continue;
+                }
+                if osk && y > draft_y - 72 {
+                    break;
+                }
                 let mine = order % 2 == 1;
                 y = bubble(screen, text, y, mine);
             }
             for order in 0..messages.sent_count {
+                if osk && y > draft_y - 72 {
+                    break;
+                }
                 y = bubble(screen, slice_str(&messages.sent[order][..messages.sent_len[order]]), y, true);
             }
-            screen.round_rect(20, 690, width - 40, 56, 28, SURFACE);
+            screen.round_rect(20, draft_y, width - 40, 56, 28, SURFACE);
             if messages.draft_len == 0 {
-                screen.text(38, 708, "Type a message and press Enter", 1, MUTED);
+                screen.text(38, draft_y + 18, "Type a message and press Enter", 1, MUTED);
             } else {
-                screen.text(38, 706, slice_str(&messages.draft[..messages.draft_len.min(20)]), 2, TEXT);
+                screen.text(38, draft_y + 16, slice_str(&messages.draft[..messages.draft_len.min(20)]), 2, TEXT);
             }
         }
     }
@@ -1550,12 +1597,14 @@ fn draw_play_button(screen: &Screen, cx: i64, cy: i64, playing: bool) {
     }
 }
 
-fn draw_notes(screen: &Screen, notes: &Notes) {
+fn draw_notes(screen: &Screen, notes: &Notes, osk: bool) {
     let width = screen.width();
     screen.fill(0, 93, width, screen.height() - 93, BLACK);
     screen.text(24, 110, "notes.txt", 2, TEXT);
     button(screen, 340, 104, 116, 44, "SAVE", RED, TEXT);
-    screen.round_rect(20, 160, width - 40, 454, 26, SURFACE);
+    let panel_height = if osk { 260 } else { 454 };
+    let text_limit = if osk { 386 } else { 580 };
+    screen.round_rect(20, 160, width - 40, panel_height, 26, SURFACE);
     let mut x = 40i64;
     let mut y = 180i64;
     let mut line_length = 0;
@@ -1571,7 +1620,7 @@ fn draw_notes(screen: &Screen, notes: &Notes) {
             y += 15;
             line_length = 0;
         }
-        if y > 580 {
+        if y > text_limit {
             break;
         }
         let ch = [byte];
@@ -1579,12 +1628,15 @@ fn draw_notes(screen: &Screen, notes: &Notes) {
         x += 8;
         line_length += 1;
     }
+    let status_y = if osk { 430 } else { 626 };
     if notes.status_len > 0 {
-        screen.text(24, 626, slice_str(&notes.status[..notes.status_len]), 1, GREEN);
+        screen.text(24, status_y, slice_str(&notes.status[..notes.status_len]), 1, GREEN);
     } else {
-        screen.text(24, 626, "Typed text is saved with SAVE", 1, MUTED);
+        screen.text(24, status_y, "Typed text is saved with SAVE", 1, MUTED);
     }
-    screen.text(24, 654, "Enter adds a line, backspace deletes", 1, MUTED);
+    if !osk {
+        screen.text(24, 654, "Enter adds a line, backspace deletes", 1, MUTED);
+    }
 }
 
 fn draw_maps(screen: &Screen, maps: &Maps) {
@@ -1818,27 +1870,32 @@ fn draw_weather(screen: &Screen, weather: &Weather, clock: [u64; 7]) {
     screen.text(24, 730, "Updated from the RTC", 1, MUTED);
 }
 
-fn draw_terminal(screen: &Screen, terminal: &Terminal) {
+fn draw_terminal(screen: &Screen, terminal: &Terminal, osk: bool) {
     let width = screen.width();
     screen.fill(0, 93, width, screen.height() - 93, BLACK);
-    let start = terminal.count.saturating_sub(TERM_LINES);
+    let max_lines = if osk { 24 } else { TERM_LINES };
+    let separator_y = if osk { 416 } else { 684 };
+    let input_y = if osk { 430 } else { 700 };
+    let start = terminal.count.saturating_sub(max_lines);
     let mut y = 108i64;
     for index in start..terminal.count {
         let length = terminal.line_len[index] as usize;
         screen.text_mono(20, y, slice_str(&terminal.lines[index][..length]), 1, TEXT);
         y += 13;
     }
-    screen.fill(20, 684, width - 40, 1, OUTLINE);
-    screen.text_mono(20, 700, "$", 2, RED);
+    screen.fill(20, separator_y, width - 40, 1, OUTLINE);
+    screen.text_mono(20, input_y, "$", 2, RED);
     let shown = terminal.input_len.min(52);
-    screen.text_mono(44, 700, slice_str(&terminal.input[..shown]), 2, TEXT);
+    screen.text_mono(44, input_y, slice_str(&terminal.input[..shown]), 2, TEXT);
     if terminal.input_len == 0 {
-        screen.text_mono(44, 700, "type a command", 2, 0x0050_505a);
+        screen.text_mono(44, input_y, "type a command", 2, 0x0050_505a);
     }
-    screen.text_mono(20, 744, "help  ls  cat  date  df  mem  ps  uptime  clear", 1, MUTED);
+    if !osk {
+        screen.text_mono(20, 744, "help  ls  cat  date  df  mem  ps  uptime  clear", 1, MUTED);
+    }
 }
 
-fn browser_tap(apps: &mut Apps, point: (i64, i64)) {
+fn browser_tap(apps: &mut Apps, point: (i64, i64), osk: bool) {
     let width = 480i64;
     if point.0 >= width - 84 && point.0 <= width - 20 && point.1 >= 104 && point.1 <= 148 {
         browser_go(apps);
@@ -1849,7 +1906,8 @@ fn browser_tap(apps: &mut Apps, point: (i64, i64)) {
         browser.editing = true;
         return;
     }
-    if point.1 >= 700 && point.1 <= 740 {
+    let scroll_y = if osk { 410 } else { 700 };
+    if point.1 >= scroll_y && point.1 <= scroll_y + 40 {
         if point.0 >= width - 110 && point.0 <= width - 66 {
             browser.scroll = browser.scroll.saturating_sub(5);
             return;
@@ -2226,7 +2284,7 @@ fn html_to_lines(html: &[u8], browser: &mut Browser) {
     browser.title_len = title_len;
 }
 
-fn draw_browser(screen: &Screen, browser: &Browser) {
+fn draw_browser(screen: &Screen, browser: &Browser, osk: bool) {
     let width = screen.width();
     screen.fill(0, 93, width, screen.height() - 93, BLACK);
 
@@ -2246,7 +2304,8 @@ fn draw_browser(screen: &Screen, browser: &Browser) {
     }
 
     let mut y = 196i64;
-    let end = (browser.scroll + 34).min(browser.line_count);
+    let visible_lines = if osk { 15 } else { 34 };
+    let end = (browser.scroll + visible_lines).min(browser.line_count);
     for index in browser.scroll..end {
         let length = browser.line_len[index] as usize;
         screen.text(20, y, slice_str(&browser.lines[index][..length]), 1, TEXT);
@@ -2254,14 +2313,17 @@ fn draw_browser(screen: &Screen, browser: &Browser) {
     }
     if browser.line_count == 0 {
         screen.text_centered(width / 2, 380, "Type a host and press GO", 2, MUTED);
-        screen.text_centered(width / 2, 416, "e.g. example.com", 1, 0x0050_505a);
+        if !osk {
+            screen.text_centered(width / 2, 416, "e.g. example.com", 1, 0x0050_505a);
+        }
     }
 
-    screen.round_rect(width - 110, 700, 44, 40, 12, SURFACE_HI);
-    screen.text_centered(width - 88, 710, "up", 1, TEXT);
-    screen.round_rect(width - 60, 700, 44, 40, 12, SURFACE_HI);
-    screen.text_centered(width - 38, 710, "dn", 1, TEXT);
-    screen.text(20, 712, slice_str(&browser.status[..browser.status_len]), 1, MUTED);
+    let scroll_y = if osk { 410 } else { 700 };
+    screen.round_rect(width - 110, scroll_y, 44, 40, 12, SURFACE_HI);
+    screen.text_centered(width - 88, scroll_y + 10, "up", 1, TEXT);
+    screen.round_rect(width - 60, scroll_y, 44, 40, 12, SURFACE_HI);
+    screen.text_centered(width - 38, scroll_y + 10, "dn", 1, TEXT);
+    screen.text(20, scroll_y + 12, slice_str(&browser.status[..browser.status_len]), 1, MUTED);
 }
 
 fn apk_tap(apps: &mut Apps, point: (i64, i64)) {
