@@ -657,6 +657,9 @@ pub fn exec(input: &[u8]) {
     } else if command == &b"node"[..] || command == &b"nodejs"[..] {
         let arg = core::str::from_utf8(trim(argument)).unwrap_or("");
         linux_guest("usr/bin/node", arg);
+    } else if command == &b"npm"[..] || command == &b"npx"[..] {
+        let arg = core::str::from_utf8(trim(argument)).unwrap_or("");
+        linux_guest(core::str::from_utf8(command).unwrap_or("npm"), arg);
     } else if command == &b"python"[..] || command == &b"python3"[..] {
         let arg = core::str::from_utf8(trim(argument)).unwrap_or("");
         linux_guest("usr/bin/python3", arg);

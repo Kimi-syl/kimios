@@ -250,11 +250,25 @@ static uint64_t fs_linux_run(uint64_t a0) {
     int is_node = strstr(base, "node") != NULL;
     int is_py = strstr(base, "python") != NULL;
     int is_sh = strcmp(base, "sh") == 0 || strcmp(base, "busybox") == 0;
-    char *argv[8]; int n = 0; argv[n++] = exe;
-    if (arg[0]) {
-        if (is_node) { argv[n++] = "-e"; argv[n++] = arg; }
-        else if (is_py || is_sh) { argv[n++] = "-c"; argv[n++] = arg; }
-        else { argv[n++] = arg; }
+    int is_npm = strcmp(base, "npm") == 0 || strcmp(base, "npx") == 0;
+    static char npmcli[600];
+    static char tokbuf[4096];
+    char *argv[64]; int n = 0;
+    if (is_npm) {
+        snprintf(exe, sizeof exe, "%s/usr/bin/node", sysroot);
+        snprintf(npmcli, sizeof npmcli, "%s/usr/lib/node_modules/npm/bin/%s-cli.js", sysroot, base);
+        argv[n++] = exe; argv[n++] = npmcli;
+        strncpy(tokbuf, arg, sizeof tokbuf - 1); tokbuf[sizeof tokbuf - 1] = 0;
+        char *save = NULL;
+        for (char *t = strtok_r(tokbuf, " \t", &save); t && n < 60; t = strtok_r(NULL, " \t", &save))
+            if (*t) argv[n++] = t;
+    } else {
+        argv[n++] = exe;
+        if (arg[0]) {
+            if (is_node) { argv[n++] = "-e"; argv[n++] = arg; }
+            else if (is_py || is_sh) { argv[n++] = "-c"; argv[n++] = arg; }
+            else { argv[n++] = arg; }
+        }
     }
     argv[n] = NULL;
     char *envp[16]; int e = 0;
@@ -263,6 +277,22 @@ static uint64_t fs_linux_run(uint64_t a0) {
     snprintf(sslfile, sizeof sslfile, "SSL_CERT_FILE=%s/etc/ssl/certs/ca-certificates.crt", sysroot);
     snprintf(ssldir, sizeof ssldir, "SSL_CERT_DIR=%s/etc/ssl/certs", sysroot);
     envp[e++] = sslfile; envp[e++] = ssldir;
+    // ICU data (node Intl.Collator etc.): absolute /usr/share/icu path is absent
+    // on Android; point ICU_DATA at the sysroot's versioned data dir.
+    char icudata[700]; icudata[0] = 0;
+    char icudir[600]; snprintf(icudir, sizeof icudir, "%s/usr/share/icu", sysroot);
+    DIR *id = opendir(icudir);
+    if (id) {
+        struct dirent *ie;
+        while ((ie = readdir(id))) {
+            if (ie->d_name[0] != '.') {
+                snprintf(icudata, sizeof icudata, "ICU_DATA=%s/%s", icudir, ie->d_name);
+                break;
+            }
+        }
+        closedir(id);
+    }
+    if (icudata[0]) envp[e++] = icudata;
     if (is_py) {
         snprintf(phome, sizeof phome, "PYTHONHOME=%s/usr", sysroot);
         snprintf(ppath, sizeof ppath, "PYTHONPATH=%s/usr/lib/python3.14:%s/usr/lib/python3.14/lib-dynload", sysroot, sysroot);

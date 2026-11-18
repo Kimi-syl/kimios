@@ -227,17 +227,27 @@ static uint64_t build_stack(uint64_t stack_top, uint64_t phdr, uint64_t phent,
     cur -= (long)strlen(plat) + 1;
     memcpy(buf + cur, plat, strlen(plat) + 1);
 
+    // Lay argv then envp strings ASCENDING and contiguous (kernel convention).
+    // libuv's uv_set_process_title (node `process.title`, set by npm) computes
+    // the argv block size as argv[last]+len - argv[0]; a descending layout
+    // underflows it to a negative memset size and crashes. argv[0] must be the
+    // lowest string address, with argv[1..] and envp[0..] following upward.
     long env_off[128];
-    for (int i = 0; i < envc; i++) {
-        long l = (long)strlen(envp[i]) + 1;
-        cur -= l; env_off[i] = cur; memcpy(buf + cur, envp[i], l);
-    }
     long arg_off[64];
+    long strbytes = 0;
+    for (int i = 0; i < argc; i++) strbytes += (long)strlen(argv[i] ? argv[i] : "") + 1;
+    for (int i = 0; i < envc; i++) strbytes += (long)strlen(envp[i]) + 1;
+    long pos = cur - strbytes;
     for (int i = 0; i < argc; i++) {
         const char *s = argv[i] ? argv[i] : "";
         long l = (long)strlen(s) + 1;
-        cur -= l; arg_off[i] = cur; memcpy(buf + cur, s, l);
+        arg_off[i] = pos; memcpy(buf + pos, s, l); pos += l;
     }
+    for (int i = 0; i < envc; i++) {
+        long l = (long)strlen(envp[i]) + 1;
+        env_off[i] = pos; memcpy(buf + pos, envp[i], l); pos += l;
+    }
+    cur -= strbytes;
 
     // auxv pairs (terminated by AT_NULL)
     uint64_t auxv[][2] = {

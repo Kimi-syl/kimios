@@ -387,8 +387,9 @@ struct TarSink<'a> {
     pad_remaining: usize,
     handle: Option<u64>,
     offset: usize,
-    longname: [u8; 256],
+    longname: [u8; 1024],
     longname_len: usize,
+    pax: bool,
     pub files: usize,
     pub links: usize,
 }
@@ -431,7 +432,7 @@ impl<'a> TarSink<'a> {
     fn new(dest: &'a str) -> Self {
         TarSink {
             dest, hdr: [0; 512], hdr_len: 0, file_remaining: 0, pad_remaining: 0,
-            handle: None, offset: 0, longname: [0; 256], longname_len: 0, files: 0, links: 0,
+            handle: None, offset: 0, longname: [0; 1024], longname_len: 0, pax: false, files: 0, links: 0,
         }
     }
 
@@ -528,8 +529,20 @@ impl<'a> TarSink<'a> {
                 self.file_remaining = size;
                 self.pad_remaining = (512 - (size % 512)) % 512;
                 self.longname_len = 0;
+                self.pax = false;
                 self.handle = None;
                 // mark: collect into longname via a flag using offset==usize::MAX
+                self.offset = usize::MAX;
+            }
+            b'x' | b'g' => {
+                // PAX extended header: data holds "<len> key=value\n" records;
+                // the "path=" record carries the real (long) name of the next
+                // entry, whose ustar name field is truncated to 100 bytes.
+                self.file_remaining = size;
+                self.pad_remaining = (512 - (size % 512)) % 512;
+                self.longname_len = 0;
+                self.pax = true;
+                self.handle = None;
                 self.offset = usize::MAX;
             }
             b'0' | 0 => self.start_file(&name[..nl], size),
@@ -599,6 +612,30 @@ impl Sink for TarSink<'_> {
                         // trim trailing NUL from long name
                         while self.longname_len > 0 && self.longname[self.longname_len - 1] == 0 {
                             self.longname_len -= 1;
+                        }
+                        if self.pax {
+                            // PAX records are "<len> key=value\n"; pull the
+                            // "path=" value (the real name) to the front.
+                            let ln = self.longname_len;
+                            let mut found = false;
+                            let mut i = 0;
+                            while i + 6 <= ln {
+                                if &self.longname[i..i + 6] == b" path=" {
+                                    let start = i + 6;
+                                    let mut end = start;
+                                    while end < ln && self.longname[end] != b'\n' {
+                                        end += 1;
+                                    }
+                                    self.longname.copy_within(start..end, 0);
+                                    self.longname_len = end - start;
+                                    found = true;
+                                    break;
+                                }
+                                i += 1;
+                            }
+                            if !found {
+                                self.longname_len = 0;
+                            }
                         }
                         self.offset = 0;
                     }

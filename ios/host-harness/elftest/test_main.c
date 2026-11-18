@@ -16,7 +16,7 @@ int main(int argc, char **argv) {
     if (argc < 3) { fprintf(stderr, "usage: %s exe sysroot [arg] [flag]\n", argv[0]); return 2; }
     const char *exe = argv[1];
     const char *sr = argv[2];
-    char lib[1024], ph[1024], pp[2048], path[1024];
+    char lib[1024], ph[1024], pp[2048], path[1024], icu[1024]; snprintf(icu,sizeof icu,"ICU_DATA=%s/usr/share/icu/78.1",sr);
     snprintf(lib, sizeof lib, "LD_LIBRARY_PATH=%s/lib:%s/usr/lib", sr, sr);
     snprintf(ph, sizeof ph, "PYTHONHOME=%s/usr", sr);
     snprintf(pp, sizeof pp, "PYTHONPATH=%s/usr/lib/python3.14:%s/usr/lib/python3.14/lib-dynload", sr, sr);
@@ -25,7 +25,7 @@ int main(int argc, char **argv) {
     av[n++] = (char *)exe;
     for (int i = 3; i < argc && n < 30; i++) av[n++] = argv[i];
     av[n] = NULL;
-    char *ev[] = { lib, ph, pp, path, "LANG=C.UTF-8", "PYTHONDONTWRITEBYTECODE=1",
+    char *ev[] = { lib, ph, pp, path, icu, "LANG=C.UTF-8", "PYTHONDONTWRITEBYTECODE=1",
                    "HOME=/tmp", "TMPDIR=/tmp", NULL };
     int in = -1, out = -1;
     pid_t pid = kimi_guest_spawn(exe, sr, av, ev, &in, &out);
