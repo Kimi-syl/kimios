@@ -64,6 +64,19 @@ public class MainActivity extends Activity
             }, "kimi-kpkg").start();
             return;
         }
+        final String inst = intent.getStringExtra("install");
+        if (inst != null) {
+            final String dest = intent.getStringExtra("dest");
+            new Thread(new Runnable() {
+                @Override public void run() {
+                    KimiBridge.nativeKpkgUpdate();
+                    String d = dest != null ? dest : "/disk/fonts/" + inst + ".kfont";
+                    int r = KimiBridge.nativeInstall(inst, d);
+                    android.util.Log.i("KimiOS-guest", "install " + inst + " result=" + r);
+                }
+            }, "kimi-install").start();
+            return;
+        }
         final String lb = intent.getStringExtra("linux");
         if (lb != null) {
             final String la = intent.getStringExtra("arg");

@@ -507,3 +507,16 @@ Java_com_kimios_libos_KimiBridge_nativeKpkgUpdate(JNIEnv *env, jclass cls) {
     LOG("kpkg update result=%llu", (unsigned long long)r);
     return (jint)r;
 }
+
+extern uint64_t kimi_test_install(uint64_t, uint64_t);
+JNIEXPORT jint JNICALL
+Java_com_kimios_libos_KimiBridge_nativeInstall(JNIEnv *env, jclass cls, jstring jname, jstring jdest) {
+    (void)cls;
+    const char *name = (*env)->GetStringUTFChars(env, jname, NULL);
+    const char *dest = (*env)->GetStringUTFChars(env, jdest, NULL);
+    uint64_t r = kimi_test_install((uint64_t)(uintptr_t)name, (uint64_t)(uintptr_t)dest);
+    LOG("kpkg install %s -> %s result=%llu", name, dest, (unsigned long long)r);
+    (*env)->ReleaseStringUTFChars(env, jname, name);
+    (*env)->ReleaseStringUTFChars(env, jdest, dest);
+    return (jint)r;
+}

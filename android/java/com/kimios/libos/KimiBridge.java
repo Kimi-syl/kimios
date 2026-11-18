@@ -23,6 +23,9 @@ public final class KimiBridge {
     /** Test hook: fetch+cache the kpkg repo from GitHub (1 = success). */
     public static native int nativeKpkgUpdate();
 
+    /** Test hook: install a repo asset to a /disk path (1 = success). */
+    public static native int nativeInstall(String name, String dest);
+
     /** Called from C (SYS_FETCH_URL): GET url (HTTP/HTTPS) and write the body to
      *  the absolute sandbox path dest. Returns bytes written, or -1 on error. */
     public static long nativeFetchUrl(String url, String dest) {
