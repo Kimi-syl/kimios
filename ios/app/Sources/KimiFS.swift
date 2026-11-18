@@ -114,7 +114,7 @@ final class KimiFS {
         case .disk(let rel):
             // Efficient positional read (no whole-file load) for large packages.
             guard let url = diskURL(rel), !isDir(url),
-                  let fh = FileHandle(forReadingFrom: url) else { return 0 }
+                  let fh = try? FileHandle(forReadingFrom: url) else { return 0 }
             defer { fh.closeFile() }
             fh.seek(toFileOffset: offset)
             let d = fh.readData(ofLength: Int(len))
@@ -131,7 +131,7 @@ final class KimiFS {
         let off = Int(offset), n = Int(len)
         let chunk = Data(bytes: buf, count: n)
         // Sequential append fast path (streaming extraction): no whole-file read.
-        if let fh = FileHandle(forWritingTo: url) {
+        if let fh = try? FileHandle(forWritingTo: url) {
             let size = Int(fh.seekToEndOfFile())
             if off == size {
                 fh.seek(toFileOffset: offset)
