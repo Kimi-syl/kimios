@@ -205,6 +205,7 @@ uint64_t kimi_host_syscall(uint64_t n,uint64_t a0,uint64_t a1,uint64_t a2,uint64
     case 28: str_arg(a0,a1,path,sizeof path);return fs_listdir(path,(void*)a2,a3);
     case 29: str_arg(a0,a1,path,sizeof path);return fs_mkdir(path);
     case 30: str_arg(a0,a1,path,sizeof path);return fs_rmdir(path);
+    case 40: { char target[256]; str_arg(a0,a1,target,sizeof target); str_arg(a2,a3,path,sizeof path); if(strncmp(path,"/disk/",6))return ERROR; char p[512];disk_path(path+6,p,sizeof p);unlink(p);return symlink(target,p)==0?0:ERROR; }
     case 23: {if(a1<1)return ERROR;uint64_t*o=(uint64_t*)a0;o[0]=1;o[1]=0;o[2]=2;o[3]=0;return 1;}
     case 34:
         switch(a0){

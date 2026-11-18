@@ -224,6 +224,7 @@ static uint64_t fs_stat(const char *path, uint64_t *out) {
 static uint64_t fs_unlink(const char *path) { if (strncmp(path, "/disk/", 6)) return ERROR; const char *rel = path + 6; if (!safe_rel(rel)) return ERROR; char p[512]; disk_path(rel, p, sizeof p); if (is_dir(p)) return ERROR; return unlink(p) == 0 ? 0 : ERROR; }
 static uint64_t fs_mkdir(const char *path) { const char *rel; if (!strcmp(path, "/disk")) rel = ""; else if (!strncmp(path, "/disk/", 6)) rel = path + 6; else return ERROR; char p[512]; disk_path(rel, p, sizeof p); if (is_dir(p)) return 0; return mkdir(p, 0755) == 0 ? 0 : ERROR; }
 static uint64_t fs_rmdir(const char *path) { if (strncmp(path, "/disk/", 6)) return ERROR; char p[512]; disk_path(path + 6, p, sizeof p); if (!is_dir(p)) return ERROR; return rmdir(p) == 0 ? 0 : ERROR; }
+static uint64_t fs_symlink(const char *target, const char *path) { if (strncmp(path, "/disk/", 6)) return ERROR; const char *rel = path + 6; if (!safe_rel(rel)) return ERROR; char p[512]; disk_path(rel, p, sizeof p); unlink(p); return symlink(target, p) == 0 ? 0 : ERROR; }
 static uint64_t fs_rename(const char *o, const char *n) { if (strncmp(o, "/disk/", 6) || strncmp(n, "/disk/", 6)) return ERROR; char op[512], np[512]; disk_path(o + 6, op, sizeof op); disk_path(n + 6, np, sizeof np); if (!file_exists(op) || file_exists(np)) return ERROR; return rename(op, np) == 0 ? 0 : ERROR; }
 static uint64_t disk_file_count(void) { uint64_t n = 0; DIR *d = opendir(diskRoot); if (d) { struct dirent *e; while ((e = readdir(d))) if (e->d_name[0] != '.') n++; closedir(d); } return n; }
 
@@ -297,6 +298,7 @@ uint64_t kimi_host_syscall(uint64_t n, uint64_t a0, uint64_t a1, uint64_t a2, ui
     case 28: str_arg(a0, a1, path, sizeof path); return fs_listdir(path, (void *)a2, a3);
     case 29: str_arg(a0, a1, path, sizeof path); return fs_mkdir(path);
     case 30: str_arg(a0, a1, path, sizeof path); return fs_rmdir(path);
+    case 40: { char target[256]; str_arg(a0, a1, target, sizeof target); str_arg(a2, a3, path, sizeof path); return fs_symlink(target, path); }
     case 23: { if (a1 < 1) return ERROR; uint64_t *o = (uint64_t *)a0; o[0] = 1; o[1] = 0; o[2] = 2; o[3] = 0; return 1; }
     case 12: return 2048;
     case 22: return 0;

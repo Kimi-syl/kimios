@@ -66,6 +66,7 @@ pub const SYS_FB_BACK: u64 = 36;
 pub const SYS_FB_PRESENT: u64 = 37;
 pub const SYS_GFX_BENCH: u64 = 38;
 pub const SYS_INSTR_MAP: u64 = 39;
+pub const SYS_SYMLINK: u64 = 40;
 
 /// Latency-mailbox slot indices (shared with the kernel `instr` module and the
 /// Android shared-memory reader).
@@ -536,6 +537,18 @@ pub fn mkdir(path: &str) -> bool {
 /// Remove an empty `/disk/...` directory.
 pub fn rmdir(path: &str) -> bool {
     syscall3(SYS_RMDIR, path.as_ptr() as u64, path.len() as u64, 0) == 0
+}
+
+/// Create a symlink `link -> target` (host FS only; bare-metal KimiFS has no
+/// symlink inode type and returns ERROR). `target` is stored verbatim.
+pub fn symlink(target: &str, link: &str) -> bool {
+    syscall4(
+        SYS_SYMLINK,
+        target.as_ptr() as u64,
+        target.len() as u64,
+        link.as_ptr() as u64,
+        link.len() as u64,
+    ) == 0
 }
 
 /// File metadata: `(kind, size)` where kind 0 is RamFS and 1 is a disk file.

@@ -534,10 +534,35 @@ impl<'a> TarSink<'a> {
             }
             b'0' | 0 => self.start_file(&name[..nl], size),
             _ => {
-                // symlinks/hardlinks/pax headers/etc: skip data. KimiFS has no
-                // symlink inode type, so links are counted but not created.
+                // Symlinks (typeflag '2'): linkname is h[157..257]. Create them
+                // on the libOS host FS (Android/iOS sandbox); bare-metal KimiFS
+                // has no symlink inode type so k::symlink returns ERROR and the
+                // link is counted-but-skipped exactly as before.
                 if typeflag == b'2' {
-                    self.links += 1;
+                    let ln = &h[157..257];
+                    let le = ln.iter().position(|&b| b == 0).unwrap_or(ln.len());
+                    let mut created = false;
+                    if let Ok(target) = core::str::from_utf8(&ln[..le]) {
+                        let mut path = [0u8; 256];
+                        let mut n = 0;
+                        let db = self.dest.as_bytes();
+                        let dbl = db.len().min(path.len() - 2);
+                        path[..dbl].copy_from_slice(&db[..dbl]);
+                        n += dbl;
+                        path[n] = b'/';
+                        n += 1;
+                        let nm = if name[..nl].starts_with(b"./") { &name[2..nl] } else { &name[..nl] };
+                        let take = nm.len().min(path.len() - n - 1);
+                        path[n..n + take].copy_from_slice(&nm[..take]);
+                        n += take;
+                        if let Ok(lp) = core::str::from_utf8(&path[..n]) {
+                            if let Some(slash) = lp.rfind('/') {
+                                mkdir_p(&lp[..slash]);
+                            }
+                            created = k::symlink(target, lp);
+                        }
+                    }
+                    if created { self.files += 1; } else { self.links += 1; }
                 }
                 self.file_remaining = size;
                 self.pad_remaining = (512 - (size % 512)) % 512;
