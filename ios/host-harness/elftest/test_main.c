@@ -21,9 +21,9 @@ int main(int argc, char **argv) {
     snprintf(ph, sizeof ph, "PYTHONHOME=%s/usr", sr);
     snprintf(pp, sizeof pp, "PYTHONPATH=%s/usr/lib/python3.14:%s/usr/lib/python3.14/lib-dynload", sr, sr);
     snprintf(path, sizeof path, "PATH=%s/usr/bin:%s/bin", sr, sr);
-    char *av[8]; int n = 0;
+    char *av[32]; int n = 0;
     av[n++] = (char *)exe;
-    if (argc > 3) { av[n++] = (argc > 4 ? argv[4] : "-c"); av[n++] = argv[3]; }
+    for (int i = 3; i < argc && n < 30; i++) av[n++] = argv[i];
     av[n] = NULL;
     char *ev[] = { lib, ph, pp, path, "LANG=C.UTF-8", "PYTHONDONTWRITEBYTECODE=1",
                    "HOME=/tmp", "TMPDIR=/tmp", NULL };
