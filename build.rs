@@ -84,6 +84,15 @@ fn main() {
 
     fs::write(out_dir.join("hello.exe"), build_pe())
         .expect("failed to write generated PE image");
+
+    // Dynamic-loader test fixtures (dynamic musl hello + musl libc/ldso).
+    for (src, dst) in [
+        ("tests/dynamic/hello_dyn", "hello_dyn.elf"),
+        ("tests/dynamic/libc.so", "musl_libc.so"),
+    ] {
+        fs::copy(src, out_dir.join(dst))
+            .unwrap_or_else(|_| panic!("failed to copy {} into OUT_DIR", src));
+    }
 }
 
 const PE_IMAGE_BASE: u64 = 0x6200_0000;

@@ -19,7 +19,7 @@ const INDEX: &str = "/disk/alpine/APKINDEX";
 const REPO: &str = "/disk/alpine/repo.cfg";
 const SYSROOT: &str = "/disk/alpine/root";
 const TMP: &str = "/disk/alpine/pkg.apk";
-const DEFAULT_ROOT: &str = "http://dl-cdn.alpinelinux.org/alpine/v3.20";
+const DEFAULT_ROOT: &str = "http://dl-cdn.alpinelinux.org/alpine/latest-stable";
 const ARCH: &str = "aarch64";
 
 // ---------------------------------------------------------------------------
@@ -967,6 +967,13 @@ fn pkg_filename(p: &Pkg, out: &mut [u8; 128]) -> usize {
 
 /// Install a package and its dependency closure into the sysroot.
 pub fn install(name: &str) -> bool {
+    // Convenience aliases; `nodejs` in Alpine is the LTS line (nodejs-current is
+    // the latest non-LTS). latest-stable repo keeps these at the current LTS.
+    let name = match name {
+        "node" | "nodejs-lts" | "node-lts" => "nodejs",
+        "python" | "python3-lts" => "python3",
+        _ => name,
+    };
     if k::stat(INDEX).is_none() {
         k::print("apk: no index — run `kpkg apk-update` first\n");
         return false;

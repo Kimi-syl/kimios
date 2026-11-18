@@ -156,8 +156,11 @@ pub fn is_linux(image: &[u8]) -> bool {
         return false; // ELF64 only
     }
     let e_type = u16::from_le_bytes([image[16], image[17]]);
+    if e_type == 3 {
+        return true; // ET_DYN: PIE / dynamic Linux ELF (musl interpreter)
+    }
     if e_type != 2 {
-        return false; // ET_EXEC; PIE (ET_DYN) needs relocation, unsupported
+        return false; // ET_EXEC only besides PIE
     }
     let e_phoff = u64::from_le_bytes(image[32..40].try_into().unwrap());
     let e_phentsize = u16::from_le_bytes([image[54], image[55]]) as u64;
@@ -201,6 +204,9 @@ fn load_linux_aligned(
     argv: &[&str],
 ) -> Result<LinuxImage, &'static str> {
     let elf = ElfFile::new(image).map_err(|_| "not a valid ELF file")?;
+    if u16::from_le_bytes([image[16], image[17]]) == 3 {
+        return load_linux_dynamic(image, space, argv);
+    }
     let entry = elf.header.pt2.entry_point();
     let phoff = elf.header.pt2.ph_offset();
     let phentsize = elf.header.pt2.ph_entry_size() as u64;
@@ -277,7 +283,7 @@ fn load_linux_aligned(
     }
 
     let stack_top = LINUX_STACK_VA + LINUX_STACK_PAGES * PAGE_SIZE;
-    let sp = build_linux_stack(space, stack_top, phdr_va, phentsize, phnum, entry, argv);
+    let sp = build_linux_stack(space, stack_top, phdr_va, phentsize, phnum, entry, 0, argv);
     let brk = (data_end + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
 
     println!(
@@ -297,6 +303,7 @@ fn build_linux_stack(
     phent: u64,
     phnum: u64,
     entry: u64,
+    at_base: u64,
     argv: &[&str],
 ) -> u64 {
     let mut buf = [0u8; 4096];
@@ -342,7 +349,7 @@ fn build_linux_stack(
         (4, phent),      // AT_PHENT
         (5, phnum),      // AT_PHNUM
         (6, PAGE_SIZE),  // AT_PAGESZ
-        (7, 0),          // AT_BASE (static: no interpreter)
+        (7, at_base),    // AT_BASE (interpreter base; 0 for static)
         (8, 0),          // AT_FLAGS
         (9, entry),      // AT_ENTRY
         (11, 0),         // AT_UID
@@ -381,4 +388,168 @@ fn build_linux_stack(
     let sp = base + argc_off as u64;
     space.write_bytes(sp, &buf[cur..]);
     sp
+}
+
+// ---------------------------------------------------------------------------
+// Dynamic (PIE + musl interpreter) Linux loader.
+//
+// The kernel maps the executable and its PT_INTERP (musl ldso / libc.so) at
+// fixed bases, builds an auxv with AT_PHDR/AT_BASE/AT_ENTRY, and jumps to the
+// interpreter entry. musl's ldso then self-relocates, loads DT_NEEDED libraries
+// and relocates the executable using syscalls (mmap/mprotect/openat/…).
+// ---------------------------------------------------------------------------
+
+const LINUX_EXEC_BASE: u64 = 0x0040_0000;
+const LINUX_INTERP_BASE: u64 = 0x4000_0000;
+
+/// Load PT_LOAD segments of `elf` at `base`, returning
+/// (entry_rel, phdr_va_abs, data_end_abs, phent, phnum).
+fn load_segments(
+    elf: &ElfFile,
+    image: &[u8],
+    space: &mut mmu::AddressSpace,
+    base: u64,
+) -> Result<(u64, u64, u64, u64, u64), &'static str> {
+    let entry = elf.header.pt2.entry_point();
+    let phoff = elf.header.pt2.ph_offset();
+    let phent = elf.header.pt2.ph_entry_size() as u64;
+    let phnum = elf.header.pt2.ph_count() as u64;
+    let mut data_end = 0u64;
+    let mut phdr_va = 0u64;
+    let mut found = false;
+    for program in elf.program_iter() {
+        if program.get_type() != Ok(Type::Load) {
+            continue;
+        }
+        let off = program.offset();
+        let va = program.virtual_addr();
+        let fsz = program.file_size() as usize;
+        let msz = program.mem_size() as usize;
+        let exe = program.flags().is_execute();
+        if msz == 0 {
+            continue;
+        }
+        if off + fsz as u64 > image.len() as u64 {
+            return Err("segment extends past end of file");
+        }
+        let hva = base + va;
+        if !found && off <= phoff && phoff < off + fsz as u64 {
+            phdr_va = hva + (phoff - off);
+            found = true;
+        }
+        data_end = data_end.max(hva + msz as u64);
+        let first = hva & !(PAGE_SIZE - 1);
+        let last = (hva + msz as u64 + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+        let mut page = first;
+        while page < last {
+            let frame = space.alloc_frame().ok_or("out of physical memory")?;
+            unsafe {
+                core::ptr::write_bytes(frame as *mut u8, 0, PAGE_SIZE as usize);
+            }
+            let cs = page.max(hva);
+            let ce = (page + PAGE_SIZE).min(hva + fsz as u64);
+            if cs < ce {
+                let so = (off + (cs - hva)) as usize;
+                let doff = (cs - page) as usize;
+                let cnt = (ce - cs) as usize;
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        image.as_ptr().add(so),
+                        (frame as *mut u8).add(doff),
+                        cnt,
+                    );
+                }
+            }
+            space.map_page(page, frame, exe);
+            page += PAGE_SIZE;
+        }
+    }
+    Ok((entry, phdr_va, data_end, phent, phnum))
+}
+
+/// Read a Linux absolute path (e.g. "/lib/ld-musl-aarch64.so.1") from RamFS or
+/// the Alpine sysroot at /disk/alpine/root. Returns a static slice (RamFS data
+/// is static; sysroot files are read into a leaked kernel-heap buffer).
+fn read_linux_file(path: &str) -> Result<&'static [u8], &'static str> {
+    if let Some(f) = crate::ramfs::index_of(path).and_then(crate::ramfs::file_at) {
+        return Ok(f.data);
+    }
+    // sysroot fallback: alpine/root + path
+    let mut sb = [0u8; 160];
+    let prefix = b"alpine/root";
+    sb[..prefix.len()].copy_from_slice(prefix);
+    let mut n = prefix.len();
+    let pb = path.as_bytes();
+    let take = pb.len().min(sb.len() - n - 1);
+    sb[n..n + take].copy_from_slice(&pb[..take]);
+    n += take;
+    let sp = core::str::from_utf8(&sb[..n]).map_err(|_| "bad sysroot path")?;
+    let inode = crate::diskfs::lookup(sp).ok_or("interpreter not found")?;
+    let (_, size, _) = crate::diskfs::stat(sp).ok_or("interp stat failed")?;
+    let size = size as usize;
+    let layout = core::alloc::Layout::from_size_align(size.max(1), 16).map_err(|_| "bad size")?;
+    let buf = crate::allocator::alloc(layout).ok_or("oom for interpreter")?;
+    let slice = unsafe { core::slice::from_raw_parts_mut(buf.as_ptr(), size) };
+    let got = crate::diskfs::read(inode, 0, slice);
+    if got < size {
+        return Err("short interpreter read");
+    }
+    Ok(unsafe { core::slice::from_raw_parts(buf.as_ptr(), size) })
+}
+
+fn load_linux_dynamic(
+    image: &[u8],
+    space: &mut mmu::AddressSpace,
+    argv: &[&str],
+) -> Result<LinuxImage, &'static str> {
+    let elf = ElfFile::new(image).map_err(|_| "not a valid ELF file")?;
+    let (entry_rel, phdr_va, data_end, phent, phnum) =
+        load_segments(&elf, image, space, LINUX_EXEC_BASE)?;
+
+    // PT_INTERP -> interpreter path
+    let mut interp_path = "";
+    for program in elf.program_iter() {
+        if program.get_type() == Ok(Type::Interp) {
+            let off = program.offset() as usize;
+            let fsz = program.file_size() as usize;
+            if off + fsz > image.len() {
+                return Err("bad interp segment");
+            }
+            let end = image[off..off + fsz].iter().position(|&b| b == 0).unwrap_or(fsz);
+            interp_path = core::str::from_utf8(&image[off..off + end]).map_err(|_| "bad interp path")?;
+            break;
+        }
+    }
+    if interp_path.is_empty() {
+        return Err("PIE without interpreter (static-PIE unsupported)");
+    }
+    let interp_raw = read_linux_file(interp_path)?;
+    // xmas-elf/zero requires natural alignment; RamFS data is byte-aligned.
+    let ilayout = core::alloc::Layout::from_size_align(interp_raw.len(), 16)
+        .map_err(|_| "bad interpreter size")?;
+    let iali = crate::allocator::alloc(ilayout).ok_or("oom for interpreter buffer")?;
+    let interp_image = unsafe {
+        core::ptr::copy_nonoverlapping(interp_raw.as_ptr(), iali.as_ptr(), interp_raw.len());
+        core::slice::from_raw_parts(iali.as_ptr(), interp_raw.len())
+    };
+    let interp_elf = ElfFile::new(interp_image).map_err(|_| "bad interpreter ELF")?;
+    let (ientry_rel, _, _, _, _) = load_segments(&interp_elf, interp_image, space, LINUX_INTERP_BASE)?;
+    unsafe { crate::allocator::dealloc(iali); }
+
+    for index in 0..LINUX_STACK_PAGES {
+        let frame = space.alloc_frame().ok_or("out of memory for stack")?;
+        unsafe {
+            core::ptr::write_bytes(frame as *mut u8, 0, PAGE_SIZE as usize);
+        }
+        space.map_page(LINUX_STACK_VA + index * PAGE_SIZE, frame, false);
+    }
+    let stack_top = LINUX_STACK_VA + LINUX_STACK_PAGES * PAGE_SIZE;
+    let exec_entry = LINUX_EXEC_BASE + entry_rel;
+    let sp = build_linux_stack(space, stack_top, phdr_va, phent, phnum, exec_entry, LINUX_INTERP_BASE, argv);
+    let brk = (data_end + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+    println!(
+        "  [linux-dyn] interp={} exec_base={:#x} interp_base={:#x} entry={:#x} sp={:#x}",
+        interp_path, LINUX_EXEC_BASE, LINUX_INTERP_BASE, LINUX_INTERP_BASE + ientry_rel, sp
+    );
+    Ok(LinuxImage { entry: LINUX_INTERP_BASE + ientry_rel, sp, brk })
 }

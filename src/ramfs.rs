@@ -51,7 +51,10 @@ static BADPTR_ELF: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/badptr.elf"
 
 static STRESS_ELF: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/stress.elf"));
 
-static FILES: [File; 16] = [
+static HELLO_DYN: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/hello_dyn.elf"));
+static MUSL_LIBC: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/musl_libc.so"));
+
+static FILES: [File; 19] = [
     File {
         name: "/init",
         data: INIT_ELF,
@@ -115,6 +118,18 @@ static FILES: [File; 16] = [
     File {
         name: "/motd",
         data: b"Welcome to KimiOS!\nThis file lives in RamFS.\n",
+    },
+    File {
+        name: "/hello_dyn",
+        data: HELLO_DYN,
+    },
+    File {
+        name: "/lib/ld-musl-aarch64.so.1",
+        data: MUSL_LIBC,
+    },
+    File {
+        name: "/lib/libc.so",
+        data: MUSL_LIBC,
     },
 ];
 

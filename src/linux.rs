@@ -61,6 +61,7 @@ const L_UNAME: u64 = 160;
 const L_GETRLIMIT: u64 = 163;
 const L_SETRLIMIT: u64 = 164;
 const L_UMASK: u64 = 166;
+const L_PRCTL: u64 = 167;
 const L_GETTIMEOFDAY: u64 = 169;
 const L_GETPID: u64 = 172;
 const L_GETUID: u64 = 174;
@@ -330,6 +331,7 @@ pub fn dispatch(frame: &mut ExceptionFrame, number: u64) -> Option<u64> {
         L_CLOCK_GETTIME => Some(l_clock_gettime(a0, a1)),
         L_GETTIMEOFDAY => Some(l_gettimeofday(a0)),
         L_GETRANDOM => Some(l_getrandom(a0, a1)),
+        L_PRCTL => Some(0), // musl PR_SET_NAME/PR_SET_VMA etc. tolerate success
         L_UNAME => Some(l_uname(a0)),
         L_FSTAT => Some(l_fstat_fd(a0, a1)),
         L_NEWFSTATAT => Some(l_newfstatat(a0, a1, a2)),
