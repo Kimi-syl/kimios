@@ -15,10 +15,14 @@ pub const TOP: i64 = 452;
 pub enum Key {
     /// Linux keycode, dispatched with the current shift state.
     Char(u16),
+    /// Linux keycode with a forced shift state (symbol-layer keys).
+    Sym(u16, bool),
     Shift,
     Hide,
-    /// Always sends '?' (keycode 53 with shift).
-    Question,
+    /// Switch to the symbol layer.
+    Symbols,
+    /// Switch back to the letter layer.
+    Letters,
 }
 
 const ROW_Y: [i64; 5] = [468, 526, 588, 650, 712];
@@ -41,10 +45,39 @@ const ROW3: [Key; 9] = [
     Key::Char(48), Key::Char(49), Key::Char(50), Key::Char(14),
 ];
 const ROW4: [Key; 6] = [
-    Key::Hide, Key::Question, Key::Char(51), Key::Char(57), Key::Char(52), Key::Char(28),
+    Key::Hide, Key::Symbols, Key::Char(51), Key::Char(57), Key::Char(52), Key::Char(28),
 ];
 
-fn row_keys(row: usize) -> &'static [Key] {
+// Symbol layer: !@#$%^&*() / -_=+[]{}\| / ;:'"`~/?, — gives the coding and
+// terminal punctuation (- and _ included) the letter layer lacks.
+const SYM_ROW0: [Key; 10] = [
+    Key::Sym(2, true), Key::Sym(3, true), Key::Sym(4, true), Key::Sym(5, true), Key::Sym(6, true),
+    Key::Sym(7, true), Key::Sym(8, true), Key::Sym(9, true), Key::Sym(10, true), Key::Sym(11, true),
+];
+const SYM_ROW1: [Key; 10] = [
+    Key::Sym(12, false), Key::Sym(12, true), Key::Sym(13, false), Key::Sym(13, true),
+    Key::Sym(26, false), Key::Sym(27, false), Key::Sym(26, true), Key::Sym(27, true),
+    Key::Sym(43, false), Key::Sym(43, true),
+];
+const SYM_ROW2: [Key; 9] = [
+    Key::Sym(39, false), Key::Sym(39, true), Key::Sym(40, false), Key::Sym(40, true),
+    Key::Sym(41, false), Key::Sym(41, true), Key::Sym(53, false), Key::Sym(53, true),
+    Key::Sym(51, false),
+];
+const SYM_ROW4: [Key; 6] = [
+    Key::Hide, Key::Letters, Key::Char(51), Key::Char(57), Key::Char(52), Key::Char(28),
+];
+
+fn row_keys(row: usize, symbols: bool) -> &'static [Key] {
+    if symbols {
+        return match row {
+            0 => &SYM_ROW0,
+            1 => &SYM_ROW1,
+            2 => &SYM_ROW2,
+            3 => &ROW3,
+            _ => &SYM_ROW4,
+        };
+    }
     match row {
         0 => &ROW0,
         1 => &ROW1,
@@ -75,12 +108,12 @@ fn key_rect(row: usize, index: usize) -> (i64, i64, i64, i64) {
 }
 
 /// The key under an app-space point, if any.
-pub fn hit(point: (i64, i64)) -> Option<Key> {
+pub fn hit(point: (i64, i64), symbols: bool) -> Option<Key> {
     if point.1 < TOP {
         return None;
     }
     for row in 0..5usize {
-        for (index, key) in row_keys(row).iter().enumerate() {
+        for (index, key) in row_keys(row, symbols).iter().enumerate() {
             let (x, y, w, h) = key_rect(row, index);
             if point.0 >= x && point.0 < x + w && point.1 >= y && point.1 < y + h {
                 return Some(*key);
@@ -90,12 +123,12 @@ pub fn hit(point: (i64, i64)) -> Option<Key> {
     None
 }
 
-pub fn draw(screen: &Screen, shift: bool, pressed: Option<(i64, i64)>) {
+pub fn draw(screen: &Screen, shift: bool, symbols: bool, pressed: Option<(i64, i64)>) {
     screen.round_rect(0, TOP, 480, 800 - TOP, 16, PANEL());
     screen.round_rect(220, TOP + 5, 40, 4, 2, 0x0050_505a);
 
     for row in 0..5usize {
-        for (index, key) in row_keys(row).iter().enumerate() {
+        for (index, key) in row_keys(row, symbols).iter().enumerate() {
             let (x, y, w, h) = key_rect(row, index);
             let is_pressed = pressed.map_or(false, |p| {
                 p.0 >= x && p.0 < x + w && p.1 >= y && p.1 < y + h
@@ -103,7 +136,7 @@ pub fn draw(screen: &Screen, shift: bool, pressed: Option<(i64, i64)>) {
             let mut color = match key {
                 Key::Shift if shift => RED_DIM(),
                 Key::Char(28) => RED(),
-                Key::Shift | Key::Hide | Key::Question | Key::Char(14) => SURFACE_MAX(),
+                Key::Shift | Key::Hide | Key::Symbols | Key::Letters | Key::Char(14) => SURFACE_MAX(),
                 _ => SURFACE_HI(),
             };
             if is_pressed {
@@ -121,7 +154,16 @@ pub fn draw(screen: &Screen, shift: bool, pressed: Option<(i64, i64)>) {
                 }
                 Key::Char(57) => screen.text_centered(cx, cy - 5, "space", 1, MUTED()),
                 Key::Char(28) => screen.text_centered(cx, cy - 5, "ENTER", 1, TEXT()),
-                Key::Question => screen.text_centered(cx, cy - 8, "?", 2, TEXT()),
+                Key::Symbols => screen.text_centered(cx, cy - 5, "?123", 1, TEXT()),
+                Key::Letters => screen.text_centered(cx, cy - 5, "ABC", 1, TEXT()),
+                Key::Sym(code, sh) => {
+                    if let Some(byte) = apps::key_glyph(*code, *sh) {
+                        let label = [byte];
+                        if let Ok(text) = core::str::from_utf8(&label) {
+                            screen.text_centered(cx, cy - 8, text, 2, TEXT());
+                        }
+                    }
+                }
                 Key::Char(code) => {
                     if let Some(byte) = apps::key_glyph(*code, shift) {
                         let label = [byte];
@@ -153,4 +195,21 @@ fn draw_shift(screen: &Screen, cx: i64, cy: i64, color: u32) {
     screen.line(cx - 4, cy, cx - 4, cy + 9, 2, color);
     screen.line(cx + 4, cy, cx + 4, cy + 9, 2, color);
     screen.line(cx - 4, cy + 9, cx + 4, cy + 9, 2, color);
+}
+
+/// Host-only functional check of the symbol layer: returns a bitmask (63 = all
+/// pass) verifying -/_ keys hit-test and map correctly and the layer toggles.
+#[cfg(not(target_os = "none"))]
+pub fn self_test() -> u64 {
+    let mut ok = 0u64;
+    let (x0, y0, w0, h0) = key_rect(1, 0);
+    let (x1, y1, w1, h1) = key_rect(1, 1);
+    if hit((x0 + w0 / 2, y0 + h0 / 2), true) == Some(Key::Sym(12, false)) { ok |= 1; }
+    if hit((x1 + w1 / 2, y1 + h1 / 2), true) == Some(Key::Sym(12, true)) { ok |= 2; }
+    if apps::key_glyph(12, false) == Some(b'-') { ok |= 4; }
+    if apps::key_glyph(12, true) == Some(b'_') { ok |= 8; }
+    let (xs, ys, ws, hs) = key_rect(4, 1);
+    if hit((xs + ws / 2, ys + hs / 2), false) == Some(Key::Symbols) { ok |= 16; }
+    if hit((xs + ws / 2, ys + hs / 2), true) == Some(Key::Letters) { ok |= 32; }
+    ok
 }

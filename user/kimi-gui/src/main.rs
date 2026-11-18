@@ -227,6 +227,7 @@ struct Ui {
     settings: Settings,
     apps: apps::Apps,
     shift: bool,
+    symbols: bool,
     osk: bool,
     shade: bool,
     paint_bg: bool,
@@ -243,6 +244,7 @@ impl Ui {
             settings: Settings::new(),
             apps: apps::Apps::new(),
             shift: false,
+            symbols: false,
             osk: false,
             shade: false,
             paint_bg: true,
@@ -341,6 +343,13 @@ pub extern "C" fn kimi_test_load(theme_path: u64, font_path: u64) -> u64 {
     let of = font_store::load(f, "pixel-bold");
     if of { theme::apply_font(4); }
     (ot as u64) | ((of as u64) << 1)
+}
+
+/// Host-only test hook: verify the OSK symbol layer (63 = all checks pass).
+#[no_mangle]
+#[cfg(not(target_os = "none"))]
+pub extern "C" fn kimi_test_osk() -> u64 {
+    keyboard::self_test()
 }
 
 fn handle(screen: &Screen, ui: &mut Ui, event: k::InputEvent, clock: [u64; 7]) -> bool {
@@ -458,7 +467,7 @@ fn tapped(screen: &Screen, ui: &mut Ui, point: (i64, i64), clock: [u64; 7]) {
         Scene::App(app) => {
             let osk_now = ui.osk && apps::text_focused(&ui.apps, app);
             if osk_now {
-                if let Some(key) = keyboard::hit(app_point) {
+                if let Some(key) = keyboard::hit(app_point, ui.symbols) {
                     osk_key(screen, ui, app, key, clock);
                     return;
                 }
@@ -507,16 +516,26 @@ fn osk_key(screen: &Screen, ui: &mut Ui, app: AppKind, key: keyboard::Key, clock
         keyboard::Key::Hide => {
             ui.osk = false;
             ui.shift = false;
+            ui.symbols = false;
             901
         }
         keyboard::Key::Shift => {
             ui.shift = !ui.shift;
             900
         }
-        keyboard::Key::Question => {
-            apps::key(&mut ui.apps, app, 53, true);
+        keyboard::Key::Symbols => {
+            ui.symbols = true;
             ui.shift = false;
             902
+        }
+        keyboard::Key::Letters => {
+            ui.symbols = false;
+            ui.shift = false;
+            903
+        }
+        keyboard::Key::Sym(code, sh) => {
+            apps::key(&mut ui.apps, app, code, sh);
+            code as u64
         }
         keyboard::Key::Char(code) => {
             apps::key(&mut ui.apps, app, code, ui.shift);
@@ -1166,7 +1185,7 @@ fn draw_app(
         let pressed = ui
             .press
             .map(|p| (p.0, p.1 * 800 / screen.logical_height()));
-        keyboard::draw(screen, ui.shift, pressed);
+        keyboard::draw(screen, ui.shift, ui.symbols, pressed);
     }
     draw_home_indicator(screen);
 }
