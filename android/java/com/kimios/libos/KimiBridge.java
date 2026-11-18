@@ -12,5 +12,10 @@ public final class KimiBridge {
     public static native void nativeTouch(int x, int y, int down);
     public static native void nativeMove(int x, int y);
 
+    /** Run a Linux ELF guest natively (forked child on the Android kernel).
+     *  Returns the guest exit code. Blocks; call from a background thread. */
+    public static native int nativeRunElf(String exe, String sysroot,
+                                          String[] argv, String[] envp);
+
     private KimiBridge() {}
 }

@@ -43,6 +43,30 @@ public class MainActivity extends Activity
         view.setOnTouchListener(this);
 
         KimiBridge.nativeInit(getFilesDir().getAbsolutePath());
+        maybeRunGuest(getIntent());
+    }
+
+    @Override
+    protected void onNewIntent(android.content.Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        maybeRunGuest(intent);
+    }
+
+    private void maybeRunGuest(android.content.Intent intent) {
+        if (intent == null) return;
+        final String g = intent.getStringExtra("guest");
+        if (g == null) return;
+        String a = intent.getStringExtra("arg");
+        if (a == null) a = "node".equals(g) ? "console.log('hello from node')"
+                                            : "print('hello from python')";
+        final String arg = a;
+        new Thread(new Runnable() {
+            @Override public void run() {
+                int code = KimiGuest.run(getFilesDir(), g, arg);
+                android.util.Log.i("KimiOS-guest", "guest " + g + " exit=" + code);
+            }
+        }, "kimi-guest").start();
     }
 
     @Override public void surfaceCreated(SurfaceHolder holder) {

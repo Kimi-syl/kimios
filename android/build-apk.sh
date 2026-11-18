@@ -52,7 +52,8 @@ else
   SYSLIB="$PREBUILT/sysroot/usr/lib/aarch64-linux-android/26"
 fi
 "$CC" $CFLAGS -shared -fPIC -O2 -o "$OUT/libkimios.so" \
-  "$ANDROID_DIR/jni/kimios_jni.c" "$RUSTLIB" -L"$SYSLIB" -landroid -llog
+  "$ANDROID_DIR/jni/kimios_jni.c" "$ANDROID_DIR/jni/kimi_elf.c" "$RUSTLIB" \
+  -L"$SYSLIB" -landroid -llog
 
 echo "[3/7] javac + d8"
 rm -rf "$OUT/classes" "$OUT/dex"; mkdir -p "$OUT/classes" "$OUT/dex"
