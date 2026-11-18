@@ -257,8 +257,12 @@ static uint64_t fs_linux_run(uint64_t a0) {
         else { argv[n++] = arg; }
     }
     argv[n] = NULL;
-    char *envp[12]; int e = 0;
+    char *envp[16]; int e = 0;
     envp[e++] = lib; envp[e++] = path; envp[e++] = home; envp[e++] = tmp; envp[e++] = "LANG=C.UTF-8";
+    char sslfile[700], ssldir[600];
+    snprintf(sslfile, sizeof sslfile, "SSL_CERT_FILE=%s/etc/ssl/certs/ca-certificates.crt", sysroot);
+    snprintf(ssldir, sizeof ssldir, "SSL_CERT_DIR=%s/etc/ssl/certs", sysroot);
+    envp[e++] = sslfile; envp[e++] = ssldir;
     if (is_py) {
         snprintf(phome, sizeof phome, "PYTHONHOME=%s/usr", sysroot);
         snprintf(ppath, sizeof ppath, "PYTHONPATH=%s/usr/lib/python3.14:%s/usr/lib/python3.14/lib-dynload", sysroot, sysroot);

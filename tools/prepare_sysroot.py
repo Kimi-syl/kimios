@@ -37,6 +37,23 @@ def main():
         f.write("nameserver 1.1.1.1\nnameserver 8.8.8.8\noptions timeout:2 attempts:2\n")
     with open(os.path.join(etc, "hosts"), "w") as f:
         f.write("127.0.0.1 localhost\n::1 localhost\n")
+    # Bundle CA certificates: apkg skips Alpine's update-ca-certificates script,
+    # so concatenate the Mozilla trust store into the OpenSSL bundle path. The
+    # guest loader sets SSL_CERT_FILE/SSL_CERT_DIR to these sysroot paths
+    # (Android has no /etc/ssl, so OpenSSL's default absolute paths fail).
+    import glob
+    mozilla = os.path.join(sr, "usr", "share", "ca-certificates", "mozilla")
+    crts = sorted(glob.glob(os.path.join(mozilla, "*.crt")))
+    if crts:
+        sslcerts = os.path.join(etc, "ssl", "certs")
+        os.makedirs(sslcerts, exist_ok=True)
+        bundle = os.path.join(sslcerts, "ca-certificates.crt")
+        with open(bundle, "wb") as out:
+            for c in crts:
+                with open(c, "rb") as inp:
+                    out.write(inp.read())
+                    out.write(b"\n")
+        print(f"bundled {len(crts)} CA certs -> etc/ssl/certs/ca-certificates.crt")
     print(f"patched ld-musl: resolv.conf x{n1}, hosts x{n2}; wrote etc/resolv.conf + etc/hosts")
     if n1 == 0:
         print("WARNING: '/etc/resolv.conf' string not found (already patched, or different musl?)")

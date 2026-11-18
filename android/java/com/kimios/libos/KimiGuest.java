@@ -15,6 +15,8 @@ public final class KimiGuest {
         String sr = sysroot(filesDir);
         String lib = sr + "/usr/lib:" + sr + "/lib";
         String bin = sr + "/usr/bin:" + sr + "/bin";
+        String sslfile = "SSL_CERT_FILE=" + sr + "/etc/ssl/certs/ca-certificates.crt";
+        String ssldir = "SSL_CERT_DIR=" + sr + "/etc/ssl/certs";
         new File(filesDir, "home").mkdirs();
         new File(filesDir, "tmp").mkdirs();
         String exe;
@@ -31,6 +33,7 @@ public final class KimiGuest {
                 "TMPDIR=" + filesDir + "/tmp",
                 "LANG=C.UTF-8",
                 "PYTHONDONTWRITEBYTECODE=1",
+                sslfile, ssldir,
             };
         } else if ("node".equals(which)) {
             exe = sr + "/usr/bin/node";
@@ -38,6 +41,7 @@ public final class KimiGuest {
             envp = new String[] {
                 "LD_LIBRARY_PATH=" + lib, "PATH=" + bin,
                 "HOME=" + filesDir + "/home", "TMPDIR=" + filesDir + "/tmp", "LANG=C.UTF-8",
+                sslfile, ssldir,
             };
         } else {
             exe = sr + "/hello_dyn";

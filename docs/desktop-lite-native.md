@@ -246,6 +246,15 @@ TLS). Verified on host: `python urllib` HTTP **200** and HTTPS **200**, and
 `node fetch("https://example.com")` **200**. Run `prepare_sysroot.py` on the
 sysroot before deploying (it is idempotent).
 
+**HTTPS / CA certificates.** OpenSSL's default trust store is the absolute
+`/etc/ssl/certs` (absent on Android), and apkg skips Alpine's
+`update-ca-certificates` post-install script, so the bundle is initially empty.
+`prepare_sysroot.py` concatenates `usr/share/ca-certificates/mozilla/*.crt` into
+`etc/ssl/certs/ca-certificates.crt`, and the loader sets `SSL_CERT_FILE` /
+`SSL_CERT_DIR` to those sysroot paths. **Verified on the Andarium device:
+`python urllib` HTTPS 200 and `node fetch` HTTPS 200** (DNS, HTTP, HTTPS all
+working natively).
+
 ## 7. Build, deploy, verify
 
 ### Build the APK
