@@ -55,6 +55,15 @@ public class MainActivity extends Activity
 
     private void maybeRunGuest(android.content.Intent intent) {
         if (intent == null) return;
+        if (intent.getStringExtra("kpkg") != null) {
+            new Thread(new Runnable() {
+                @Override public void run() {
+                    int r = KimiBridge.nativeKpkgUpdate();
+                    android.util.Log.i("KimiOS-guest", "kpkg update result=" + r);
+                }
+            }, "kimi-kpkg").start();
+            return;
+        }
         final String lb = intent.getStringExtra("linux");
         if (lb != null) {
             final String la = intent.getStringExtra("arg");

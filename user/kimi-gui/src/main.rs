@@ -346,6 +346,13 @@ pub extern "C" fn kimi_test_osk() -> u64 {
     keyboard::self_test()
 }
 
+/// Host-only test hook: fetch+cache the kpkg repo (1 = success).
+#[no_mangle]
+#[cfg(not(target_os = "none"))]
+pub extern "C" fn kimi_test_kpkg() -> u64 {
+    k::kpkg::update_quiet("") as u64
+}
+
 fn handle(screen: &Screen, ui: &mut Ui, event: k::InputEvent, clock: [u64; 7]) -> bool {
     let (width, height) = (screen.width(), screen.height());
 

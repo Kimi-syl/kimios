@@ -498,3 +498,12 @@ Java_com_kimios_libos_KimiBridge_nativeLinuxRun(JNIEnv *env, jclass cls, jstring
     (*env)->ReleaseStringUTFChars(env, jarg, arg);
     return (jint)code;
 }
+
+extern uint64_t kimi_test_kpkg(void);
+JNIEXPORT jint JNICALL
+Java_com_kimios_libos_KimiBridge_nativeKpkgUpdate(JNIEnv *env, jclass cls) {
+    (void)env; (void)cls;
+    uint64_t r = kimi_test_kpkg();
+    LOG("kpkg update result=%llu", (unsigned long long)r);
+    return (jint)r;
+}

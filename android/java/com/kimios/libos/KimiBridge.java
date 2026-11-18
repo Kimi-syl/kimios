@@ -20,6 +20,9 @@ public final class KimiBridge {
     /** Run an Alpine sysroot binary via SYS_LINUX_RUN (shell node/python path). */
     public static native int nativeLinuxRun(String bin, String arg);
 
+    /** Test hook: fetch+cache the kpkg repo from GitHub (1 = success). */
+    public static native int nativeKpkgUpdate();
+
     /** Called from C (SYS_FETCH_URL): GET url (HTTP/HTTPS) and write the body to
      *  the absolute sandbox path dest. Returns bytes written, or -1 on error. */
     public static long nativeFetchUrl(String url, String dest) {
