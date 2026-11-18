@@ -14,8 +14,33 @@ pub struct Glyph {
 
 pub struct Font {
     pub em: u16,
-    pub glyphs: &'static [Glyph; 95],
+    pub ascent: i16,
+    pub descent: i16,
+    pub glyphs: &'static [Glyph],
+    /// Sorted (codepoint, glyph_index) map. Empty => implicit ASCII 0x20..=0x7e
+    /// indexed by `glyphs[cp - 0x20]` (the built-in atlases). Non-empty =>
+    /// arbitrary Unicode coverage (`.kfont` v2 downloadable fonts).
+    pub cmap: &'static [(u32, u16)],
     pub alpha: &'static [u8],
+}
+
+impl Font {
+    /// Resolve a Unicode codepoint to its glyph, via cmap or ASCII fallback.
+    pub fn glyph_for(&self, cp: u32) -> Option<&Glyph> {
+        if !self.cmap.is_empty() {
+            match self.cmap.binary_search_by_key(&cp, |&(c, _)| c) {
+                Ok(i) => {
+                    let idx = self.cmap[i].1 as usize;
+                    if idx < self.glyphs.len() { Some(&self.glyphs[idx]) } else { None }
+                }
+                Err(_) => None,
+            }
+        } else if (0x20..=0x7e).contains(&cp) {
+            Some(&self.glyphs[(cp - 0x20) as usize])
+        } else {
+            None
+        }
+    }
 }
 
 
@@ -117,7 +142,7 @@ pub static SANS_GLYPHS: [Glyph; 95] = [
     Glyph { advance: 54, x0: 0, y0: 47, w: 54, h: 43, offset: 474826 },
 ];
 pub static SANS_ALPHA: &[u8] = include_bytes!("sans.bin");
-pub static SANS: Font = Font { em: 128, glyphs: &SANS_GLYPHS, alpha: SANS_ALPHA };
+pub static SANS: Font = Font { em: 128, ascent: 100, descent: 28, glyphs: &SANS_GLYPHS, cmap: &[], alpha: SANS_ALPHA };
 
 pub static DOT_GLYPHS: [Glyph; 95] = [
     Glyph { advance: 26, x0: 0, y0: 0, w: 0, h: 0, offset: 0 },
@@ -217,7 +242,7 @@ pub static DOT_GLYPHS: [Glyph; 95] = [
     Glyph { advance: 77, x0: 0, y0: 25, w: 77, h: 71, offset: 519803 },
 ];
 pub static DOT_ALPHA: &[u8] = include_bytes!("dot.bin");
-pub static DOT: Font = Font { em: 128, glyphs: &DOT_GLYPHS, alpha: DOT_ALPHA };
+pub static DOT: Font = Font { em: 128, ascent: 100, descent: 28, glyphs: &DOT_GLYPHS, cmap: &[], alpha: DOT_ALPHA };
 
 pub static MONO_GLYPHS: [Glyph; 95] = [
     Glyph { advance: 35, x0: 0, y0: 0, w: 0, h: 0, offset: 0 },
@@ -317,7 +342,7 @@ pub static MONO_GLYPHS: [Glyph; 95] = [
     Glyph { advance: 35, x0: 0, y0: 23, w: 35, h: 22, offset: 140455 },
 ];
 pub static MONO_ALPHA: &[u8] = include_bytes!("mono.bin");
-pub static MONO: Font = Font { em: 64, glyphs: &MONO_GLYPHS, alpha: MONO_ALPHA };
+pub static MONO: Font = Font { em: 64, ascent: 50, descent: 14, glyphs: &MONO_GLYPHS, cmap: &[], alpha: MONO_ALPHA };
 
 pub static PIXEL_GLYPHS: [Glyph; 95] = [
     Glyph { advance: 9, x0: 0, y0: 0, w: 8, h: 8, offset: 0 },
@@ -417,4 +442,4 @@ pub static PIXEL_GLYPHS: [Glyph; 95] = [
     Glyph { advance: 9, x0: 0, y0: 0, w: 8, h: 8, offset: 6016 },
 ];
 pub static PIXEL_ALPHA: &[u8] = include_bytes!("pixel.bin");
-pub static PIXEL: Font = Font { em: 8, glyphs: &PIXEL_GLYPHS, alpha: PIXEL_ALPHA };
+pub static PIXEL: Font = Font { em: 8, ascent: 8, descent: 0, glyphs: &PIXEL_GLYPHS, cmap: &[], alpha: PIXEL_ALPHA };

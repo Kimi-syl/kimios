@@ -223,6 +223,29 @@ falls through to `ERROR` (unchanged). `TarSink` now creates typeflag-`'2'` links
 on the host. After the fix a fresh install reports **0 symlinks skipped** and
 both runtimes execute with no manual steps.
 
+## 6.1 Guest networking (the musl resolv.conf shim)
+
+The guest issues real socket syscalls to the Android kernel, so TCP/UDP work —
+but **musl's `getaddrinfo` reads `/etc/resolv.conf`**, which Android does not
+provide (it resolves via `netd`/bionic instead). The OS browser works because it
+uses the host's bionic resolver; a musl guest would fail DNS with no
+`/etc/resolv.conf`.
+
+Fix (`tools/prepare_sysroot.py` + loader `chdir`):
+
+1. Patch `lib/ld-musl-aarch64.so.1`, replacing the absolute strings
+   `/etc/resolv.conf` and `/etc/hosts` with relative `etc/resolv.conf` /
+   `etc/hosts` (same byte length, NUL-padded → ELF offsets preserved).
+2. Write `<sysroot>/etc/resolv.conf` (public nameservers 1.1.1.1 / 8.8.8.8) and
+   `etc/hosts`.
+3. The loader `chdir(sysroot)`s the child before entry, so musl resolves
+   `etc/resolv.conf` relative to the sysroot.
+
+The guest's own **OpenSSL** then provides HTTPS (the host browser/kpkg has no
+TLS). Verified on host: `python urllib` HTTP **200** and HTTPS **200**, and
+`node fetch("https://example.com")` **200**. Run `prepare_sysroot.py` on the
+sysroot before deploying (it is idempotent).
+
 ## 7. Build, deploy, verify
 
 ### Build the APK

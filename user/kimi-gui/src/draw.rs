@@ -383,12 +383,11 @@ impl Screen {
     ) -> i64 {
         let em = font.em as i64;
         let mut pen = x;
-        for byte in text.bytes() {
-            if byte < 0x20 || byte > 0x7e {
+        for ch in text.chars() {
+            let Some(glyph) = font.glyph_for(ch as u32) else {
                 pen += size * 4 / 10;
                 continue;
-            }
-            let glyph = &font.glyphs[(byte - 0x20) as usize];
+            };
             if glyph.w > 0 && glyph.h > 0 {
                 self.draw_font_glyph(font, glyph, pen, y, size, color);
             }
@@ -456,12 +455,11 @@ impl Screen {
     pub fn font_width(text: &str, size: i64, font: &Font) -> i64 {
         let em = font.em as i64;
         let mut width = 0i64;
-        for byte in text.bytes() {
-            if byte < 0x20 || byte > 0x7e {
-                width += size * 4 / 10;
-                continue;
+        for ch in text.chars() {
+            match font.glyph_for(ch as u32) {
+                Some(g) => width += g.advance as i64 * size / em,
+                None => width += size * 4 / 10,
             }
-            width += font.glyphs[(byte - 0x20) as usize].advance as i64 * size / em;
         }
         width
     }

@@ -47,15 +47,46 @@ Install destinations: themes → `/disk/themes/<name>.theme`, fonts →
 accent_dim, green, panel`. Parsed by `theme::load_theme_file`.
 
 ### `.kfont`
-Compact bitmap font (little-endian):
+Compact bitmap font (little-endian), two versions:
+
+**v1 — `KFONT001`** (ASCII bitmap):
 - magic `KFONT001` (8 bytes)
 - `em: u16`, `glyph_count: u16` (= 95, ASCII 0x20..0x7e)
 - 95 glyph records, **16-byte stride**: `advance: u16, x0: i16, y0: i16,
   w: u16, h: u16, offset: u32` (+ 2 padding bytes)
 - alpha atlas: `w*h` coverage bytes per glyph at `offset` (0..255).
 
-Parsed by `font_store::load`. The bundled `pixel-bold` / `pixel-wide` are 8×8
-variants generated from the public-domain font8x8.
+**v2 — `KFONT002`** (real outline fonts rasterized to an atlas, arbitrary Unicode):
+- header (32 bytes): magic `KFONT002`, `em: u16`, `ascent: i16`, `descent: i16`,
+  `line_gap: u16`, `glyph_count: u16`, `cmap_count: u16`, `flags: u16`
+  (bit0 = monospace), reserved, `atlas_len: u32`, reserved.
+- `glyph_count` records, same 16-byte stride as v1.
+- `cmap_count` pairs, **8-byte stride**: `codepoint: u32, glyph_index: u16` (+2 pad),
+  sorted by codepoint (the renderer binary-searches it).
+- alpha atlas (`atlas_len` bytes).
+
+Both parsed by `font_store::load` (v1 stays backward-compatible). The renderer
+(`draw.rs`) iterates Unicode `chars` and resolves each via `Font::glyph_for`
+(cmap, or ASCII fallback for the built-in atlases), scaling bilinearly to any
+on-screen size. Caps: 512 glyphs, 128 KiB atlas (fixed BSS buffers, no allocator).
+
+The bundled `pixel-bold` / `pixel-wide` are v1 8×8 variants from the public-domain
+font8x8. **`iosevka`** is v2: the [Iosevka](https://github.com/be5invis/Iosevka)
+coding monospace face (OFL-1.1), 352 glyphs (ASCII + Latin-1 + box-drawing),
+rasterized at 28 px.
+
+### Convert a TTF/OTF to `.kfont` v2
+
+`tools/kfont_convert.py` (needs Pillow/FreeType) rasterizes any outline font:
+
+```bash
+python3 tools/kfont_convert.py Iosevka-Regular.ttc iosevka.kfont \
+    --size 28 --cp 0x20-0xFF,0x2500-0x257F --name Iosevka
+```
+
+`--size` is the reference em (the GUI downscales bilinearly, so a modest size
+stays sharp); `--cp` selects codepoint ranges. It emits metrics, a sorted cmap
+and the alpha atlas. Reduce `--size`/`--cp` if the atlas exceeds 128 KiB.
 
 ## Regenerate the bitmap fonts
 

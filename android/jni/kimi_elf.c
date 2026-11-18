@@ -446,6 +446,9 @@ pid_t kimi_guest_spawn(const char *exe, const char *sysroot,
         k_sys(SYS_close, outpipe[1], 0, 0, 0, 0, 0);
         for (int fd = 3; fd < 1024; fd++) k_sys(SYS_close, fd, 0, 0, 0, 0, 0);
         install_sigsys_shim();
+        // cwd = sysroot so musl reads the relative "etc/resolv.conf" shim
+        // (Android has no /etc/resolv.conf; see tools/prepare_sysroot.py).
+        k_sys(SYS_chdir, (long)sysroot, 0, 0, 0, 0, 0);
         kimi_image img;
         if (kimi_elf_load(exe, sysroot, argv, envp, &img) != 0)
             k_sys(SYS_exit, 127, 0, 0, 0, 0, 0);

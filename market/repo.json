@@ -44,6 +44,13 @@
       "run": false
     },
     {
+      "name": "iosevka",
+      "desc": "Iosevka \u2014 coding monospace (TTF, 352 glyphs)",
+      "kind": "font",
+      "file": "fonts/iosevka.kfont",
+      "run": false
+    },
+    {
       "name": "hello",
       "desc": "Static Linux hello world",
       "kind": "app",
