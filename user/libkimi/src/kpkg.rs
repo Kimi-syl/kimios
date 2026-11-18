@@ -67,7 +67,7 @@ fn find(data: &[u8], needle: &[u8]) -> Option<usize> {
 fn json_str<'a>(data: &'a [u8], key: &str) -> Option<&'a [u8]> {
     let kb = key.as_bytes();
     let mut pat = [0u8; 48];
-    if kb.len() + 4 > pat.len() {
+    if kb.len() + 3 > pat.len() {
         return None;
     }
     pat[0] = b'"';
@@ -77,10 +77,15 @@ fn json_str<'a>(data: &'a [u8], key: &str) -> Option<&'a [u8]> {
     n += 1;
     pat[n] = b':';
     n += 1;
-    pat[n] = b'"';
-    n += 1;
     let pos = find(data, &pat[..n])?;
-    let start = pos + n;
+    let mut start = pos + n;
+    while start < data.len() && matches!(data[start], b' ' | b'\t' | b'\n' | b'\r') {
+        start += 1;
+    }
+    if start >= data.len() || data[start] != b'"' {
+        return None;
+    }
+    start += 1;
     let end = start + data[start..].iter().position(|&b| b == b'"')?;
     Some(&data[start..end])
 }
@@ -88,7 +93,7 @@ fn json_str<'a>(data: &'a [u8], key: &str) -> Option<&'a [u8]> {
 fn json_true(data: &[u8], key: &str) -> bool {
     let kb = key.as_bytes();
     let mut pat = [0u8; 48];
-    if kb.len() + 6 > pat.len() {
+    if kb.len() + 3 > pat.len() {
         return false;
     }
     pat[0] = b'"';
@@ -98,9 +103,12 @@ fn json_true(data: &[u8], key: &str) -> bool {
     n += 1;
     pat[n] = b':';
     n += 1;
-    pat[n..n + 4].copy_from_slice(b"true");
-    n += 4;
-    find(data, &pat[..n]).is_some()
+    let Some(pos) = find(data, &pat[..n]) else { return false };
+    let mut start = pos + n;
+    while start < data.len() && matches!(data[start], b' ' | b'\t' | b'\n' | b'\r') {
+        start += 1;
+    }
+    data[start..].starts_with(b"true")
 }
 
 /// Invoke `f` on each `{...}` package object (delimited by a "name" field).

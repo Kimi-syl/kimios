@@ -353,6 +353,20 @@ pub extern "C" fn kimi_test_kpkg() -> u64 {
     k::kpkg::update_quiet("") as u64
 }
 
+/// Host-only test hook: install a repo asset to dest (1 = success).
+#[no_mangle]
+#[cfg(not(target_os = "none"))]
+pub extern "C" fn kimi_test_install(name: u64, dest: u64) -> u64 {
+    unsafe fn cstr(p: *const u8) -> &'static str {
+        let mut n = 0;
+        while *p.add(n) != 0 { n += 1; }
+        core::str::from_utf8(core::slice::from_raw_parts(p, n)).unwrap_or("")
+    }
+    let nm = unsafe { cstr(name as *const u8) };
+    let ds = unsafe { cstr(dest as *const u8) };
+    k::kpkg::install_to(nm, ds) as u64
+}
+
 fn handle(screen: &Screen, ui: &mut Ui, event: k::InputEvent, clock: [u64; 7]) -> bool {
     let (width, height) = (screen.width(), screen.height());
 

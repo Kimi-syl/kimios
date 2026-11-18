@@ -224,7 +224,7 @@ uint64_t kimi_host_syscall(uint64_t n,uint64_t a0,uint64_t a1,uint64_t a2,uint64
     case 22: return 0;
     case 42: { char url[512]; str_arg(a0,a1,url,sizeof url); str_arg(a2,a3,path,sizeof path);
         if(strncmp(path,"/disk/",6))return ERROR; char p[512]; disk_path(path+6,p,sizeof p);
-        char cmd[1200]; snprintf(cmd,sizeof cmd,"curl -sL '%s' -o '%s'",url,p);
+        char cmd[1200]; snprintf(cmd,sizeof cmd,"mkdir -p \"$(dirname '%s')\" && curl -sL '%s' -o '%s'",p,url,p);
         if(system(cmd)!=0)return ERROR; struct stat st; if(stat(p,&st)!=0)return ERROR; return (uint64_t)st.st_size; }
     default: fprintf(stderr,"[host] unhandled syscall %llu\n",(unsigned long long)n);return ERROR;
     }
@@ -237,6 +237,10 @@ int main(void){
   extern uint64_t kimi_test_kpkg(void);
   uint64_t r=kimi_test_kpkg();
   fprintf(stderr,"[host] kimi_test_kpkg result=%llu (1=OK) disk=%s\n",(unsigned long long)r,diskRoot);
-  char cmd[600];snprintf(cmd,sizeof cmd,"head -c 100 %s/repo.json",diskRoot);system(cmd);fprintf(stderr,"\n");
-  return r==1?0:1;
+  extern uint64_t kimi_test_install(uint64_t,uint64_t);
+  uint64_t ir=kimi_test_install((uint64_t)(uintptr_t)"iosevka",(uint64_t)(uintptr_t)"/disk/fonts/iosevka.kfont");
+  char fp[600];snprintf(fp,sizeof fp,"%s/fonts/iosevka.kfont",diskRoot);
+  struct stat st; long sz=stat(fp,&st)==0?(long)st.st_size:-1;
+  fprintf(stderr,"[host] install iosevka result=%llu size=%ld (expect 124566)\n",(unsigned long long)ir,sz);
+  return (r==1&&ir==1&&sz==124566)?0:1;
 }
