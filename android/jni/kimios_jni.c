@@ -39,6 +39,11 @@ static ANativeWindow *window;
 static char diskRoot[512];
 static uint64_t start_ns;
 static int gui_started;
+static JavaVM *g_vm;
+
+JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *reserved) {
+    (void)reserved; g_vm = vm; return JNI_VERSION_1_6;
+}
 
 // ===================== time =====================
 static uint64_t now_ns(void) {
@@ -226,6 +231,37 @@ static uint64_t fs_mkdir(const char *path) { const char *rel; if (!strcmp(path, 
 static uint64_t fs_rmdir(const char *path) { if (strncmp(path, "/disk/", 6)) return ERROR; char p[512]; disk_path(path + 6, p, sizeof p); if (!is_dir(p)) return ERROR; return rmdir(p) == 0 ? 0 : ERROR; }
 static uint64_t fs_symlink(const char *target, const char *path) { if (strncmp(path, "/disk/", 6)) return ERROR; const char *rel = path + 6; if (!safe_rel(rel)) return ERROR; char p[512]; disk_path(rel, p, sizeof p); unlink(p); return symlink(target, p) == 0 ? 0 : ERROR; }
 
+// SYS_FETCH_URL: GET url (HTTP/HTTPS) via Java HttpURLConnection, write body to
+// the sandbox file dest. Lets kpkg reach HTTPS repos (GitHub raw) with no TLS
+// stack in the userland. Runs on the GUI thread (attached to the JVM here).
+static uint64_t fs_fetch_url(const char *url, const char *dest) {
+    if (strncmp(dest, "/disk/", 6)) return ERROR;
+    const char *rel = dest + 6;
+    if (!safe_rel(rel)) return ERROR;
+    char p[512]; disk_path(rel, p, sizeof p);
+    if (!g_vm) return ERROR;
+    JNIEnv *env = NULL;
+    if ((*g_vm)->GetEnv(g_vm, (void **)&env, JNI_VERSION_1_6) != JNI_OK) {
+        if ((*g_vm)->AttachCurrentThread(g_vm, &env, NULL) != JNI_OK) return ERROR;
+    }
+    uint64_t result = ERROR;
+    jclass cls = (*env)->FindClass(env, "com/kimios/libos/KimiBridge");
+    if (cls) {
+        jmethodID mid = (*env)->GetStaticMethodID(env, cls, "nativeFetchUrl", "(Ljava/lang/String;Ljava/lang/String;)J");
+        if (mid) {
+            jstring ju = (*env)->NewStringUTF(env, url);
+            jstring jd = (*env)->NewStringUTF(env, p);
+            jlong n = (*env)->CallStaticLongMethod(env, cls, mid, ju, jd);
+            (*env)->DeleteLocalRef(env, ju);
+            (*env)->DeleteLocalRef(env, jd);
+            if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+            else if (n >= 0) result = (uint64_t)n;
+        }
+    }
+    if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+    return result;
+}
+
 // SYS_LINUX_RUN: run an Alpine sysroot binary natively (kimi_elf.c), capture stdout.
 static uint64_t str_arg(uint64_t p, uint64_t len, char *out, size_t cap);
 struct linux_run_req { uint64_t bin_ptr, bin_len, arg_ptr, arg_len, out_ptr, out_cap, out_len, code; };
@@ -379,6 +415,7 @@ uint64_t kimi_host_syscall(uint64_t n, uint64_t a0, uint64_t a1, uint64_t a2, ui
     case 30: str_arg(a0, a1, path, sizeof path); return fs_rmdir(path);
     case 40: { char target[256]; str_arg(a0, a1, target, sizeof target); str_arg(a2, a3, path, sizeof path); return fs_symlink(target, path); }
     case 41: return fs_linux_run(a0);
+    case 42: { char url[512]; str_arg(a0, a1, url, sizeof url); str_arg(a2, a3, path, sizeof path); return fs_fetch_url(url, path); }
     case 23: { if (a1 < 1) return ERROR; uint64_t *o = (uint64_t *)a0; o[0] = 1; o[1] = 0; o[2] = 2; o[3] = 0; return 1; }
     case 12: return 2048;
     case 22: return 0;

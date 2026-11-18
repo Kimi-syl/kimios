@@ -98,6 +98,7 @@ impl Screen {
         self.logical_height
     }
 
+    #[allow(dead_code)]
     pub fn pixel(&self, x: i64, y: i64) -> u32 {
         let px = self.map_x(x).clamp(0, self.physical_width - 1);
         let py = self.map_y(y).clamp(0, self.physical_height - 1);

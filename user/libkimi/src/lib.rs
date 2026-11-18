@@ -68,6 +68,7 @@ pub const SYS_GFX_BENCH: u64 = 38;
 pub const SYS_INSTR_MAP: u64 = 39;
 pub const SYS_SYMLINK: u64 = 40;
 pub const SYS_LINUX_RUN: u64 = 41;
+pub const SYS_FETCH_URL: u64 = 42;
 
 /// Latency-mailbox slot indices (shared with the kernel `instr` module and the
 /// Android shared-memory reader).
@@ -586,6 +587,22 @@ pub fn linux_run(bin: &str, arg: &str, out: &mut [u8]) -> Option<(u64, usize)> {
     } else {
         Some((req.code, req.out_len as usize))
     }
+}
+
+/// High-level URL fetch (libOS host): GET `url` (HTTP or HTTPS) and write the
+/// response body to the `/disk/...` file `dest`. Returns bytes written, or None
+/// if the host cannot fetch (bare metal falls back to raw-socket HTTP). This is
+/// how kpkg reaches HTTPS repos (e.g. GitHub raw) without a TLS stack in the
+/// userland.
+pub fn fetch_url(url: &str, dest: &str) -> Option<u64> {
+    let r = syscall4(
+        SYS_FETCH_URL,
+        url.as_ptr() as u64,
+        url.len() as u64,
+        dest.as_ptr() as u64,
+        dest.len() as u64,
+    );
+    if r == ERROR { None } else { Some(r) }
 }
 
 /// File metadata: `(kind, size)` where kind 0 is RamFS and 1 is a disk file.

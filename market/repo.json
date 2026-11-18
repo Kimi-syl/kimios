@@ -1,5 +1,5 @@
 {
-  "base": "http://10.0.2.2:8080",
+  "base": "https://raw.githubusercontent.com/Kimi-syl/kimios/main/market",
   "packages": [
     {
       "name": "nord",

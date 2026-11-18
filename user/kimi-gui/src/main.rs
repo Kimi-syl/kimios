@@ -60,9 +60,6 @@ const CLOCK_Y: [i64; 60] = [
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum AppKind {
-    Phone,
-    Messages,
-    Camera,
     Music,
     Clock,
     Settings,
@@ -79,10 +76,7 @@ enum AppKind {
     Market,
 }
 
-const GRID: [AppKind; 12] = [
-    AppKind::Phone,
-    AppKind::Messages,
-    AppKind::Camera,
+const GRID: [AppKind; 9] = [
     AppKind::Music,
     AppKind::Clock,
     AppKind::Calculator,
@@ -104,9 +98,9 @@ fn page_apps(page: usize) -> &'static [AppKind] {
 }
 
 const DOCK: [AppKind; 4] = [
-    AppKind::Phone,
-    AppKind::Messages,
-    AppKind::Camera,
+    AppKind::Terminal,
+    AppKind::Browser,
+    AppKind::Files,
     AppKind::Settings,
 ];
 
@@ -580,8 +574,8 @@ fn shade_tap(screen: &Screen, ui: &mut Ui, point: (i64, i64), clock: [u64; 7]) {
         return;
     }
     if point.1 >= 396 && point.1 <= 520 {
-        // Tapping a notification opens Messages/System stubs; just dismiss
-        // the shade so the launcher is visible.
+        // Tapping a notification just dismisses the shade so the launcher
+        // is visible.
         toggle_shade(screen, ui, clock, false);
         return;
     }
@@ -618,7 +612,7 @@ fn open_app(screen: &Screen, ui: &mut Ui, app: AppKind, clock: [u64; 7]) {
     apps::open(&mut ui.apps, app);
     ui.osk = match app {
         AppKind::Notes | AppKind::Terminal => true,
-        AppKind::Messages | AppKind::Browser => apps::text_focused(&ui.apps, app),
+        AppKind::Browser => apps::text_focused(&ui.apps, app),
         _ => false,
     };
     ui.shift = false;
@@ -780,15 +774,6 @@ fn draw_lock(screen: &Screen, clock: [u64; 7], y_offset: i64) {
         screen,
         28,
         screen.sy(260) + y_offset,
-        RED(),
-        "Messages",
-        "3 new messages",
-        "now",
-    );
-    notification_card(
-        screen,
-        28,
-        screen.sy(366) + y_offset,
         0x00b8_c4ff,
         "System",
         "KimiOS 0.1 is up to date",
@@ -923,40 +908,12 @@ fn draw_app_icon(screen: &Screen, app: AppKind, cx: i64, cy: i64, size: i64, pre
     );
     let glyph = if app == AppKind::Music { RED() } else { TEXT() };
     draw_glyph(screen, app, cx, cy, size, glyph);
-    if app == AppKind::Messages {
-        screen.circle(cx + size / 2 - 5, cy - size / 2 + 5, 6, RED());
-        screen.circle(cx + size / 2 - 5, cy - size / 2 + 5, 2, BLACK());
-    }
 }
 
 fn draw_glyph(screen: &Screen, app: AppKind, cx: i64, cy: i64, size: i64, color: u32) {
     let s = size;
     let thin = (s / 16).max(2);
     match app {
-        AppKind::Phone => {
-            screen.line(cx - s / 7, cy - s / 7, cx + s / 9, cy + s / 8, s / 8, color);
-            screen.circle(cx - s / 7, cy - s / 7, s / 10, color);
-            screen.circle(cx + s / 8, cy + s / 8, s / 10, color);
-        }
-        AppKind::Messages => {
-            screen.round_rect(cx - s / 4, cy - s / 5, s / 2, s / 3, s / 12, color);
-            screen.line(cx - s / 12, cy + s / 8, cx - s / 5, cy + s / 4, s / 12, color);
-            screen.line(cx - s / 12, cy + s / 8, cx + s / 20, cy + s / 10, s / 12, color);
-        }
-        AppKind::Camera => {
-            screen.round_rect(cx - s / 3, cy - s / 6, s * 2 / 3, s / 2, s / 10, color);
-            screen.round_rect(
-                cx - s / 3 + 2,
-                cy - s / 6 + 2,
-                s * 2 / 3 - 4,
-                s / 2 - 4,
-                s / 12,
-                SURFACE_HI(),
-            );
-            screen.fill(cx - s / 6, cy - s / 3, s / 5, s / 12, color);
-            screen.ring(cx, cy + s / 24, s / 5, 2, color);
-            screen.circle(cx, cy + s / 24, s / 9, SURFACE_HI());
-        }
         AppKind::Music => {
             screen.circle(cx - s / 10, cy + s / 6, s / 9, color);
             screen.line(cx - s / 20, cy + s / 8, cx - s / 20, cy - s / 5, s / 12, color);
@@ -1482,15 +1439,6 @@ fn draw_shade(screen: &Screen, ui: &Ui, clock: [u64; 7], y_offset: i64) {
         screen,
         24,
         y_offset + 390,
-        RED(),
-        "Messages",
-        "3 new messages",
-        "now",
-    );
-    notification_card(
-        screen,
-        24,
-        y_offset + 490,
         0x00b8_c4ff,
         "System",
         "KimiOS 0.1 is up to date",
@@ -1620,9 +1568,6 @@ fn home_hit(screen: &Screen, point: (i64, i64), page: usize) -> Option<AppKind> 
 impl AppKind {
     fn label(self) -> &'static str {
         match self {
-            AppKind::Phone => "Phone",
-            AppKind::Messages => "Messages",
-            AppKind::Camera => "Camera",
             AppKind::Music => "Music",
             AppKind::Clock => "Clock",
             AppKind::Settings => "Settings",

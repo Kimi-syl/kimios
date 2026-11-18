@@ -15,7 +15,7 @@ use crate::{
     net_tcp_send, open, print, print_bytes, print_u64, read_file, spawn, stat, wait, write_file,
 };
 
-const DEFAULT_BASE: &str = "http://10.0.2.2:8080";
+const DEFAULT_BASE: &str = "https://raw.githubusercontent.com/Kimi-syl/kimios/main/market";
 const REPO_PATH: &str = "/disk/repo.json";
 const BIN_DIR: &str = "/disk/bin";
 
@@ -23,6 +23,36 @@ static mut REPO: [u8; 8192] = [0; 8192];
 
 fn repo_buf() -> &'static mut [u8] {
     unsafe { &mut *core::ptr::addr_of_mut!(REPO) }
+}
+
+/// Join base + suffix into `buf` as a full URL string.
+fn join_url<'a>(base: &'a str, suffix: &str, buf: &'a mut [u8; 256]) -> &'a str {
+    let mut n = 0usize;
+    for piece in [base.as_bytes(), suffix.as_bytes()] {
+        let take = piece.len().min(buf.len() - n);
+        buf[n..n + take].copy_from_slice(&piece[..take]);
+        n += take;
+    }
+    core::str::from_utf8(&buf[..n]).unwrap_or(base)
+}
+
+/// Fetch `url` into the `/disk/...` file `dest`. Prefers the host high-level
+/// fetch (HTTP/HTTPS via SYS_FETCH_URL); falls back to raw-socket HTTP streaming
+/// on bare metal. Returns true on success.
+fn fetch_to(url: &str, dest: &str) -> bool {
+    if let Some(n) = crate::fetch_url(url, dest) {
+        return n > 0;
+    }
+    let mut hb = [0u8; 64];
+    let Some((host, port, path)) = parse_url(url, &mut hb) else { return false };
+    let Some(handle) = create(dest) else { return false };
+    let mut offset = 0u64;
+    let ok = http_body(host, port, path, |chunk| {
+        let w = write_file(handle, offset as usize, chunk);
+        offset += w as u64;
+    });
+    close(handle);
+    ok.is_some() && offset > 0
 }
 
 // -- tiny JSON helpers (compact repo.json: {"key":"value",...}) -------------
@@ -222,42 +252,19 @@ fn read_repo() -> Option<usize> {
 
 pub fn update(base_url: &str) {
     let base = if base_url.is_empty() { DEFAULT_BASE } else { base_url };
-    let mut host_buf = [0u8; 64];
-    let Some((host, port, prefix)) = parse_url(base, &mut host_buf) else {
-        print("kpkg: bad URL\n");
-        return;
-    };
-    let mut path = [0u8; 160];
-    let mut plen = 0usize;
-    for piece in [prefix.as_bytes(), b"/repo.json"] {
-        if plen + piece.len() > path.len() {
-            break;
-        }
-        path[plen..plen + piece.len()].copy_from_slice(piece);
-        plen += piece.len();
-    }
-    let path_str = core::str::from_utf8(&path[..plen]).unwrap_or("/repo.json");
-
+    let mut ub = [0u8; 256];
+    let url = join_url(base, "/repo.json", &mut ub);
     print("kpkg: fetching ");
-    print(base);
-    print("/repo.json ...\n");
-    let mut got = 0usize;
-    let ok = http_body(host, port, path_str, |chunk| {
-        let n = chunk.len().min(repo_buf().len() - got);
-        repo_buf()[got..got + n].copy_from_slice(&chunk[..n]);
-        got += n;
-    });
-    if ok.is_none() || got == 0 {
-        print("kpkg: fetch failed (is the repo server reachable over HTTP?)\n");
+    print(url);
+    print(" ...\n");
+    if !fetch_to(url, REPO_PATH) {
+        print("kpkg: fetch failed (repo reachable? HTTPS needs the libOS host)\n");
         return;
-    }
-    // Cache to /disk/repo.json.
-    if let Some(handle) = create(REPO_PATH) {
-        write_file(handle, 0, &repo_buf()[..got]);
-        close(handle);
     }
     let mut count = 0usize;
-    foreach_package(&repo_buf()[..got], |_| count += 1);
+    if let Some(n) = read_repo() {
+        foreach_package(&repo_buf()[..n], |_| count += 1);
+    }
     print("kpkg: repo updated, ");
     print_u64(count as u64);
     print(" packages available\n");
@@ -528,28 +535,9 @@ pub fn each_package(mut f: impl FnMut(&Package)) {
 /// Fetch + cache repo.json; returns true on success (quiet, for the GUI).
 pub fn update_quiet(base_url: &str) -> bool {
     let base = if base_url.is_empty() { DEFAULT_BASE } else { base_url };
-    let mut host_buf = [0u8; 64];
-    let Some((host, port, prefix)) = parse_url(base, &mut host_buf) else { return false };
-    let mut path = [0u8; 160];
-    let mut plen = 0usize;
-    for piece in [prefix.as_bytes(), b"/repo.json"] {
-        if plen + piece.len() > path.len() { break; }
-        path[plen..plen + piece.len()].copy_from_slice(piece);
-        plen += piece.len();
-    }
-    let path_str = core::str::from_utf8(&path[..plen]).unwrap_or("/repo.json");
-    let mut got = 0usize;
-    let ok = http_body(host, port, path_str, |chunk| {
-        let n = chunk.len().min(repo_buf().len() - got);
-        repo_buf()[got..got + n].copy_from_slice(&chunk[..n]);
-        got += n;
-    });
-    if ok.is_none() || got == 0 { return false; }
-    if let Some(handle) = create(REPO_PATH) {
-        write_file(handle, 0, &repo_buf()[..got]);
-        close(handle);
-    }
-    true
+    let mut ub = [0u8; 256];
+    let url = join_url(base, "/repo.json", &mut ub);
+    fetch_to(url, REPO_PATH)
 }
 
 /// Download a package's asset file to an arbitrary destination path. Unlike
@@ -577,25 +565,14 @@ pub fn install_to(name: &str, dest: &str) -> bool {
     });
     if !found || file_len == 0 { return false; }
 
-    let mut host_buf = [0u8; 64];
-    let Some((host, port, prefix)) = parse_url(base_str, &mut host_buf) else { return false };
-    let mut path = [0u8; 160];
-    let mut plen = 0usize;
-    for piece in [prefix.as_bytes(), b"/", &file[..file_len]] {
-        if plen + piece.len() > path.len() { break; }
-        path[plen..plen + piece.len()].copy_from_slice(piece);
-        plen += piece.len();
-    }
-    let path_str = core::str::from_utf8(&path[..plen]).unwrap_or("/");
-
-    let Some(handle) = create(dest) else { return false };
-    let mut offset = 0u64;
-    let ok = http_body(host, port, path_str, |chunk| {
-        let w = write_file(handle, offset as usize, chunk);
-        offset += w as u64;
-    });
-    close(handle);
-    ok.is_some() && offset > 0
+    let mut sb = [0u8; 96];
+    sb[0] = b'/';
+    let fl = file_len.min(sb.len() - 1);
+    sb[1..1 + fl].copy_from_slice(&file[..fl]);
+    let suffix = core::str::from_utf8(&sb[..1 + fl]).unwrap_or("/");
+    let mut ub = [0u8; 256];
+    let url = join_url(base_str, suffix, &mut ub);
+    fetch_to(url, dest)
 }
 
 // -- helpers exposed for the Alpine apk backend -----------------------------

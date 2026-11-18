@@ -7,32 +7,6 @@ use crate::theme::{BLACK, SURFACE, SURFACE_HI, SURFACE_MAX, OUTLINE, TEXT, MUTED
 const TERM_WIDTH: usize = 50;
 const TERM_LINES: usize = 40;
 
-pub struct Phone {
-    digits: [u8; 16],
-    len: usize,
-    in_call: bool,
-    started: u64,
-    mute: bool,
-    speaker: bool,
-}
-
-pub struct Messages {
-    open: Option<usize>,
-    draft: [u8; 64],
-    draft_len: usize,
-    sent: [[u8; 64]; 3],
-    sent_len: [usize; 3],
-    sent_count: usize,
-}
-
-pub struct Camera {
-    shots: u32,
-    front: bool,
-    flash: bool,
-    status: [u8; 48],
-    status_len: usize,
-}
-
 pub struct Music {
     track: usize,
     playing: bool,
@@ -189,9 +163,6 @@ impl DvmApp {
 }
 
 pub struct Apps {
-    pub phone: Phone,
-    pub messages: Messages,
-    pub camera: Camera,
     pub music: Music,
     pub notes: Notes,
     pub maps: Maps,
@@ -205,38 +176,6 @@ pub struct Apps {
     pub market: Market,
 }
 
-const KEY_LABELS: [&str; 12] = [
-    "1", "2", "3", "4", "5", "6", "7", "8", "9", "*", "0", "#",
-];
-
-const THREAD_NAMES: [&str; 3] = ["Ada", "Kimi Team", "Rust Weekly"];
-const THREAD_TIMES: [&str; 3] = ["now", "2m", "1h"];
-const THREAD_PREVIEW: [&str; 3] = [
-    "Are we still on for tonight?",
-    "Build 0.1 is up to date",
-    "This week in bare metal",
-];
-const THREAD_A: [&str; 6] = [
-    "Hey, are we still on for tonight?",
-    "Yes! Just finishing the UI.",
-    "The new lock screen looks sharp.",
-    "Thanks. Now every app works.",
-    "Even the terminal?",
-    "Even the terminal.",
-];
-const THREAD_B: [&str; 5] = [
-    "KimiOS 0.1 is ready",
-    "All apps now render at 1080p.",
-    "The kernel console is still there.",
-    "Press ESC in the GUI to reach it.",
-    "Nice work.",
-];
-const THREAD_C: [&str; 4] = [
-    "This week in bare metal",
-    "Rust without an allocator",
-    "A tour of the virtio input ring",
-    "Plus: writing a tiny compositor",
-];
 const TRACKS: [(&str, &str); 3] = [
     ("KimiOS Sessions", "Nothing OS / Ambient"),
     ("Bare Metal", "Kimi Sound System"),
@@ -284,28 +223,6 @@ fn signed(value: i64, buffer: &mut [u8; 20]) -> &str {
 fn two(value: u64, buffer: &mut [u8; 2]) {
     buffer[0] = b'0' + (value / 10) as u8 % 10;
     buffer[1] = b'0' + (value % 10) as u8;
-}
-
-impl Phone {
-    fn push(&mut self, digit: u8) {
-        if self.len < self.digits.len() {
-            self.digits[self.len] = digit;
-            self.len += 1;
-        }
-    }
-
-    fn number(&self) -> &str {
-        slice_str(&self.digits[..self.len])
-    }
-
-    fn call_seconds(&self) -> u64 {
-        if self.in_call {
-            let now = k::uptime_ms();
-            now.saturating_sub(self.started) / 1000
-        } else {
-            0
-        }
-    }
 }
 
 impl Music {
@@ -528,29 +445,6 @@ impl Apps {
         terminal.push("KimiOS terminal 0.1");
         terminal.push("Type help for commands.");
         Self {
-            phone: Phone {
-                digits: [0u8; 16],
-                len: 0,
-                in_call: false,
-                started: 0,
-                mute: false,
-                speaker: false,
-            },
-            messages: Messages {
-                open: None,
-                draft: [0u8; 64],
-                draft_len: 0,
-                sent: [[0u8; 64]; 3],
-                sent_len: [0usize; 3],
-                sent_count: 0,
-            },
-            camera: Camera {
-                shots: 0,
-                front: false,
-                flash: false,
-                status: [0u8; 48],
-                status_len: 0,
-            },
             music: Music {
                 track: 0,
                 playing: true,
@@ -612,7 +506,6 @@ pub fn open(apps: &mut Apps, app: AppKind) {
     match app {
         AppKind::Notes => apps.notes.load(),
         AppKind::Files => apps.files.refresh(),
-        AppKind::Camera => apps.camera.status_len = 0,
         AppKind::Browser => apps.browser.editing = apps.browser.line_count == 0,
         AppKind::Apk => apps.apk.refresh(),
         AppKind::Dvm => apps.dvm.refresh(),
@@ -638,14 +531,6 @@ pub fn back(apps: &mut Apps, app: AppKind) -> bool {
                 false
             }
         }
-        AppKind::Messages => {
-            if apps.messages.open.take().is_some() {
-                apps.messages.draft_len = 0;
-                true
-            } else {
-                false
-            }
-        }
         AppKind::Photos => {
             if apps.photos.selected.take().is_some() {
                 true
@@ -655,14 +540,6 @@ pub fn back(apps: &mut Apps, app: AppKind) -> bool {
         }
         AppKind::Files => {
             if apps.files.preview.take().is_some() {
-                true
-            } else {
-                false
-            }
-        }
-        AppKind::Phone => {
-            if apps.phone.in_call {
-                apps.phone.in_call = false;
                 true
             } else {
                 false
@@ -723,24 +600,16 @@ pub fn key_glyph(code: u16, shift: bool) -> Option<u8> {
 pub fn text_focused(apps: &Apps, app: AppKind) -> bool {
     match app {
         AppKind::Notes | AppKind::Terminal => true,
-        AppKind::Messages => apps.messages.open.is_some(),
         AppKind::Browser => apps.browser.editing,
         _ => false,
     }
 }
 
 /// Whether an app-space tap lands on the text field itself (reopens the OSK).
-pub fn field_hit(apps: &Apps, app: AppKind, point: (i64, i64), osk: bool) -> bool {
+pub fn field_hit(_apps: &Apps, app: AppKind, point: (i64, i64), _osk: bool) -> bool {
     match app {
         AppKind::Notes => point.0 >= 20 && point.0 <= 460 && point.1 >= 160 && point.1 <= 614,
         AppKind::Terminal => point.1 > 96 && point.1 < 770,
-        AppKind::Messages => {
-            if apps.messages.open.is_none() {
-                return false;
-            }
-            let y = if osk { 392 } else { 690 };
-            point.0 >= 20 && point.0 <= 460 && point.1 >= y && point.1 <= y + 56
-        }
         AppKind::Browser => point.0 >= 20 && point.0 < 390 && point.1 >= 104 && point.1 <= 148,
         _ => false,
     }
@@ -756,40 +625,6 @@ pub fn key(apps: &mut Apps, app: AppKind, code: u16, shift: bool) -> bool {
                 }
                 Some((byte, _)) => {
                     apps.notes.push(byte);
-                    true
-                }
-                None => false,
-            }
-        }
-        AppKind::Messages => {
-            if apps.messages.open.is_none() {
-                return false;
-            }
-            match key_event(code, shift) {
-                Some((0, true)) => {
-                    if apps.messages.draft_len > 0 {
-                        apps.messages.draft_len -= 1;
-                    }
-                    true
-                }
-                Some((b'\n', _)) => {
-                    if apps.messages.draft_len > 0 && apps.messages.sent_count < 3 {
-                        let index = apps.messages.sent_count;
-                        let length = apps.messages.draft_len.min(64);
-                        apps.messages.sent[index][..length]
-                            .copy_from_slice(&apps.messages.draft[..length]);
-                        apps.messages.sent_len[index] = length;
-                        apps.messages.sent_count += 1;
-                    }
-                    apps.messages.draft_len = 0;
-                    true
-                }
-                Some((byte, _)) => {
-                    if apps.messages.draft_len < apps.messages.draft.len() {
-                        let index = apps.messages.draft_len;
-                        apps.messages.draft[index] = byte;
-                        apps.messages.draft_len += 1;
-                    }
                     true
                 }
                 None => false,
@@ -967,11 +802,8 @@ fn button(screen: &Screen, x: i64, y: i64, width: i64, height: i64, label: &str,
     screen.text_centered(x + width / 2, y + height / 2 - 8, label, 2, text_color);
 }
 
-pub fn tap(screen: &Screen, apps: &mut Apps, app: AppKind, point: (i64, i64), osk: bool, _clock: [u64; 7]) {
+pub fn tap(_screen: &Screen, apps: &mut Apps, app: AppKind, point: (i64, i64), osk: bool, _clock: [u64; 7]) {
     match app {
-        AppKind::Phone => phone_tap(apps, point),
-        AppKind::Messages => messages_tap(apps, point),
-        AppKind::Camera => camera_tap(screen, apps, point),
         AppKind::Music => music_tap(apps, point),
         AppKind::Notes => notes_tap(apps, point),
         AppKind::Maps => maps_tap(apps, point),
@@ -983,141 +815,6 @@ pub fn tap(screen: &Screen, apps: &mut Apps, app: AppKind, point: (i64, i64), os
         AppKind::Dvm => dvm_tap(apps, point),
         AppKind::Market => market_tap(apps, point),
         _ => {}
-    }
-}
-
-fn phone_tap(apps: &mut Apps, point: (i64, i64)) {
-    if apps.phone.in_call {
-        if point.1 >= 620 && point.1 <= 700 {
-            if point.0 >= 180 && point.0 <= 300 {
-                apps.phone.in_call = false;
-            } else if point.0 < 120 {
-                apps.phone.mute = !apps.phone.mute;
-            } else if point.0 > 360 {
-                apps.phone.speaker = !apps.phone.speaker;
-            }
-        }
-        return;
-    }
-    if point.1 >= 560 && point.1 <= 626 && point.0 >= 120 && point.0 <= 360 {
-        if apps.phone.len > 0 {
-            apps.phone.in_call = true;
-            apps.phone.started = k::uptime_ms();
-            apps.phone.mute = false;
-            apps.phone.speaker = false;
-        }
-        return;
-    }
-    if point.1 >= 590 && point.1 <= 660 && point.0 >= 388 && point.0 <= 452 {
-        apps.phone.len = 0;
-        return;
-    }
-    for row in 0..4i64 {
-        for column in 0..3i64 {
-            let x = 78 + column * 112;
-            let y = 232 + row * 80;
-            if point.0 >= x && point.0 < x + 100 && point.1 >= y && point.1 < y + 68 {
-                let index = (row * 3 + column) as usize;
-                if index < KEY_LABELS.len() {
-                    let label = KEY_LABELS[index].as_bytes()[0];
-                    apps.phone.push(label);
-                }
-            }
-        }
-    }
-}
-
-fn messages_tap(apps: &mut Apps, point: (i64, i64)) {
-    if apps.messages.open.is_some() {
-        return;
-    }
-    if point.1 >= 130 {
-        for index in 0..3 {
-            let y = 130 + index as i64 * 104;
-            if point.0 >= 20 && point.0 < 460 && point.1 >= y && point.1 < y + 92 {
-                apps.messages.open = Some(index);
-                apps.messages.draft_len = 0;
-                return;
-            }
-        }
-    }
-}
-
-fn camera_tap(screen: &Screen, apps: &mut Apps, point: (i64, i64)) {
-    let dx = point.0 - 240;
-    let dy = point.1 - 690;
-    if dx * dx + dy * dy <= 44 * 44 {
-        camera_shoot(screen, apps);
-        return;
-    }
-    if point.0 < 160 && point.1 > 650 {
-        apps.camera.front = !apps.camera.front;
-    } else if point.0 > 320 && point.1 > 650 {
-        apps.camera.flash = !apps.camera.flash;
-    }
-}
-
-fn camera_shoot(screen: &Screen, apps: &mut Apps) {
-    let index = apps.camera.shots + 1;
-    let mut path = [0u8; 40];
-    let prefix = b"/disk/camera-";
-    path[..prefix.len()].copy_from_slice(prefix);
-    let mut number = [0u8; 20];
-    let text = unsigned(index as u64, &mut number);
-    path[prefix.len()..prefix.len() + text.len()].copy_from_slice(text.as_bytes());
-    let at = prefix.len() + text.len();
-    path[at] = b'.';
-    path[at + 1] = b'p';
-    path[at + 2] = b'p';
-    path[at + 3] = b'm';
-    let path_text = slice_str(&path[..at + 4]);
-    let mut saved = false;
-    if let Some(handle) = k::create(path_text) {
-        let header = b"P6\n64 114\n255\n";
-        let mut image = [0u8; 64 * 114 * 3 + 14];
-        image[..header.len()].copy_from_slice(header);
-        let mut offset = header.len();
-        for y in 0..114i64 {
-            for x in 0..64i64 {
-                let pixel = screen.pixel(x * 17, y * 17);
-                image[offset] = (pixel & 0xff) as u8;
-                image[offset + 1] = ((pixel >> 8) & 0xff) as u8;
-                image[offset + 2] = ((pixel >> 16) & 0xff) as u8;
-                offset += 3;
-            }
-        }
-        let mut written = 0usize;
-        let mut ok = true;
-        while written < offset {
-            let end = (written + 8192).min(offset);
-            let count = k::write_file(handle, written, &image[written..end]);
-            if count != end - written {
-                ok = false;
-                break;
-            }
-            written = end;
-        }
-        k::close(handle);
-        saved = ok;
-        if ok {
-            apps.camera.shots = index;
-        }
-    }
-    let status: &[u8] = if saved {
-        let mut message = [0u8; 48];
-        let prefix = b"Saved ";
-        message[..prefix.len()].copy_from_slice(prefix);
-        let shown = path_text.len().min(40);
-        message[prefix.len()..prefix.len() + shown].copy_from_slice(&path[..shown]);
-        apps.camera.status = message;
-        apps.camera.status_len = prefix.len() + shown;
-        b""
-    } else {
-        b"No disk mounted"
-    };
-    if !saved {
-        apps.camera.status_len = status.len().min(48);
-        apps.camera.status[..apps.camera.status_len].copy_from_slice(&status[..apps.camera.status_len]);
     }
 }
 
@@ -1217,13 +914,10 @@ fn weather_tap(apps: &mut Apps, point: (i64, i64)) {
 
 pub fn draw(screen: &Screen, apps: &Apps, app: AppKind, clock: [u64; 7], osk: bool) {
     match app {
-        AppKind::Phone => draw_phone(screen, &apps.phone),
-        AppKind::Messages => draw_messages(screen, &apps.messages, osk),
-        AppKind::Camera => draw_camera(screen, &apps.camera),
         AppKind::Music => draw_music(screen, &apps.music),
         AppKind::Notes => draw_notes(screen, &apps.notes, osk),
         AppKind::Maps => draw_maps(screen, &apps.maps),
-        AppKind::Photos => draw_photos(screen, &apps.photos, apps.camera.shots),
+        AppKind::Photos => draw_photos(screen, &apps.photos),
         AppKind::Files => draw_files(screen, &apps.files),
         AppKind::Weather => draw_weather(screen, &apps.weather, clock),
         AppKind::Terminal => draw_terminal(screen, &apps.terminal, osk),
@@ -1232,183 +926,6 @@ pub fn draw(screen: &Screen, apps: &Apps, app: AppKind, clock: [u64; 7], osk: bo
         AppKind::Dvm => draw_dvm(screen, &apps.dvm),
         AppKind::Market => draw_market(screen, &apps.market),
         _ => {}
-    }
-}
-
-fn draw_phone(screen: &Screen, phone: &Phone) {
-    let width = screen.width();
-    screen.fill(0, 93, width, screen.height() - 93, BLACK());
-    if phone.in_call {
-        screen.text_centered(width / 2, 150, phone.number(), 3, TEXT());
-        screen.text_centered(width / 2, 200, "In call", 1, MUTED());
-        let mut time = [0u8; 8];
-        let seconds = phone.call_seconds();
-        time[0] = b'0' + (seconds / 600) as u8 % 10;
-        time[1] = b'0' + (seconds / 60) as u8 % 10;
-        time[2] = b':';
-        time[3] = b'0' + (seconds / 10) as u8 % 10;
-        time[4] = b'0' + seconds as u8 % 10;
-        screen.text_centered(width / 2, 250, slice_str(&time[..5]), 3, TEXT());
-        screen.circle(width / 2, 350, 34, SURFACE_MAX());
-        screen.circle(width / 2, 350, 18, RED_DIM());
-        screen.text_centered(width / 2, 410, "Calling over Wi-Fi", 1, MUTED());
-        for (x, label, active) in [
-            (84, "Mute", phone.mute),
-            (240, "Speaker", phone.speaker),
-            (396, "End", false),
-        ] {
-            let color = if label == "End" { RED() } else if active { RED_DIM() } else { SURFACE_HI() };
-            screen.round_rect(x - 40, 620, 80, 80, 40, color);
-            screen.text_centered(x, 654, label, 1, TEXT());
-        }
-        return;
-    }
-    screen.round_rect(20, 112, width - 40, 88, 28, SURFACE());
-    let number = phone.number();
-    if number.is_empty() {
-        screen.text_centered(width / 2, 138, "Enter number", 2, MUTED());
-    } else {
-        screen.text_centered(width / 2, 134, number, 3, TEXT());
-    }
-    for row in 0..4i64 {
-        for column in 0..3i64 {
-            let x = 78 + column * 112;
-            let y = 232 + row * 80;
-            let index = (row * 3 + column) as usize;
-            let label = KEY_LABELS[index];
-            screen.circle(x + 50, y + 34, 32, SURFACE());
-            screen.text_centered(x + 50, y + 22, label, 3, TEXT());
-        }
-    }
-    button(screen, 120, 560, 240, 66, "Call", GREEN(), BLACK());
-    screen.round_rect(388, 590, 64, 32, 16, SURFACE());
-    screen.text_centered(420, 598, "DEL", 1, MUTED());
-}
-
-fn draw_messages(screen: &Screen, messages: &Messages, osk: bool) {
-    let width = screen.width();
-    screen.fill(0, 93, width, screen.height() - 93, BLACK());
-    match messages.open {
-        None => {
-            for index in 0..3 {
-                let y = 130 + index as i64 * 104;
-                screen.round_rect(20, y, width - 40, 92, 26, SURFACE());
-                screen.circle(58, y + 46, 22, if index == 0 { RED_DIM() } else { SURFACE_MAX() });
-                screen.text(58, y + 36, &THREAD_NAMES[index][..1], 2, if index == 0 { RED() } else { TEXT() });
-                screen.text(94, y + 20, THREAD_NAMES[index], 2, TEXT());
-                screen.text(94, y + 48, THREAD_PREVIEW[index], 1, MUTED());
-                screen.text(width - 28 - Screen::text_width(THREAD_TIMES[index], 1), y + 22, THREAD_TIMES[index], 1, MUTED());
-                if index == 0 {
-                    screen.circle(width - 36, y + 62, 5, RED());
-                }
-            }
-        }
-        Some(index) => {
-            screen.text(24, 106, THREAD_NAMES[index], 2, TEXT());
-            screen.text(24, 132, "online", 1, MUTED());
-            let mut y = 164i64;
-            let thread: &[&str] = match index {
-                0 => &THREAD_A,
-                1 => &THREAD_B,
-                _ => &THREAD_C,
-            };
-            let draft_y = if osk { 392 } else { 690 };
-            for (order, text) in thread.iter().enumerate() {
-                if osk && order + 2 < thread.len() {
-                    continue;
-                }
-                if osk && y > draft_y - 72 {
-                    break;
-                }
-                let mine = order % 2 == 1;
-                y = bubble(screen, text, y, mine);
-            }
-            for order in 0..messages.sent_count {
-                if osk && y > draft_y - 72 {
-                    break;
-                }
-                y = bubble(screen, slice_str(&messages.sent[order][..messages.sent_len[order]]), y, true);
-            }
-            screen.round_rect(20, draft_y, width - 40, 56, 28, SURFACE());
-            if messages.draft_len == 0 {
-                screen.text(38, draft_y + 18, "Type a message and press Enter", 1, MUTED());
-            } else {
-                screen.text(38, draft_y + 16, slice_str(&messages.draft[..messages.draft_len.min(20)]), 2, TEXT());
-            }
-        }
-    }
-}
-
-fn bubble(screen: &Screen, text: &str, y: i64, mine: bool) -> i64 {
-    let width = screen.width();
-    let bytes = text.as_bytes();
-    let mut ranges = [(0usize, 0usize); 3];
-    let mut lines = 0usize;
-    let mut start = 0usize;
-    while start < bytes.len() && lines < 3 {
-        let mut end = (start + 18).min(bytes.len());
-        if end < bytes.len() {
-            if let Some(space) = bytes[start..end].iter().rposition(|&byte| byte == b' ') {
-                if space > 0 {
-                    end = start + space;
-                }
-            }
-        }
-        ranges[lines] = (start, end);
-        lines += 1;
-        start = end;
-        while start < bytes.len() && bytes[start] == b' ' {
-            start += 1;
-        }
-    }
-    let lines = lines.max(1);
-    let height = 18 + lines as i64 * 24;
-    let mut widest = 0i64;
-    for index in 0..lines {
-        let (start, end) = ranges[index];
-        widest = widest.max(Screen::text_width(slice_str(&bytes[start..end]), 2));
-    }
-    let bubble_width = (widest + 32).clamp(80, 360).min(width - 48);
-    let x = if mine { width - 24 - bubble_width } else { 24 };
-    let color = if mine { RED_DIM() } else { SURFACE_HI() };
-    screen.round_rect(x, y, bubble_width, height, 20, color);
-    for index in 0..lines {
-        let (start, end) = ranges[index];
-        screen.text(x + 16, y + 14 + index as i64 * 24, slice_str(&bytes[start..end]), 2, TEXT());
-    }
-    y + height + 12
-}
-
-fn draw_camera(screen: &Screen, camera: &Camera) {
-    let width = screen.width();
-    let top = if camera.front { 0x0020_2430 } else { 0x0010_1c2c };
-    let bottom = if camera.front { 0x0060_5060 } else { 0x00d0_7040 };
-    screen.gradient(0, 93, width, 527, top, bottom);
-    screen.circle(if camera.front { 100 } else { 360 }, 210, 58, 0x00f0_d080);
-    screen.circle(140, 520, 210, 0x0040_6048);
-    screen.circle(400, 560, 260, 0x0030_4838);
-    screen.circle(240, 620, 330, 0x0028_3830);
-    for index in 1..3 {
-        let x = width * index / 3;
-        screen.fill(x, 93, 1, 527, 0x40ff_ffff);
-        let y = 93 + 527 * index / 3;
-        screen.fill(0, y, width, 1, 0x40ff_ffff);
-    }
-    screen.round_rect(18, 106, 86, 28, 14, 0x8000_0000);
-    screen.text(30, 114, if camera.front { "FRONT" } else { "12MP" }, 1, TEXT());
-    screen.round_rect(width - 104, 106, 86, 28, 14, 0x8000_0000);
-    screen.text(width - 92, 114, if camera.flash { "FLASH" } else { "AUTO" }, 1, TEXT());
-    screen.circle(240, 690, 38, SURFACE_MAX());
-    screen.ring(240, 690, 38, 3, TEXT());
-    screen.circle(240, 690, 28, TEXT());
-    screen.round_rect(84, 668, 44, 44, 22, SURFACE_HI());
-    screen.text_centered(106, 680, "F", 2, TEXT());
-    screen.round_rect(352, 668, 44, 44, 22, SURFACE_HI());
-    screen.text_centered(374, 680, "L", 2, TEXT());
-    if camera.status_len > 0 {
-        screen.text_centered(240, 748, slice_str(&camera.status[..camera.status_len]), 1, GREEN());
-    } else {
-        screen.text_centered(240, 748, "Tap the shutter to save a PPM", 1, MUTED());
     }
 }
 
@@ -1572,7 +1089,7 @@ fn draw_maps(screen: &Screen, maps: &Maps) {
     }
 }
 
-fn draw_photos(screen: &Screen, photos: &Photos, shots: u32) {
+fn draw_photos(screen: &Screen, photos: &Photos) {
     let width = screen.width();
     screen.fill(0, 93, width, screen.height() - 93, BLACK());
     if let Some(index) = photos.selected {
@@ -1593,10 +1110,6 @@ fn draw_photos(screen: &Screen, photos: &Photos, shots: u32) {
         draw_photo(screen, index, x, y, 208, 144);
         screen.text(x + 6, y + 148 - 18, "img", 1, TEXT());
     }
-    let mut buf = [0u8; 20];
-    let shots_text = unsigned(shots as u64, &mut buf);
-    screen.text(24, 620, "Camera shots:", 1, MUTED());
-    screen.text(156, 620, shots_text, 1, TEXT());
     screen.text(24, 648, "Tap a photo to open it", 1, MUTED());
 }
 
