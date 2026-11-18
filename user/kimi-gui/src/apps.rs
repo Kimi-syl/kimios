@@ -9,21 +9,39 @@ const TERM_LINES: usize = 40;
 
 pub struct Music {
     track: usize,
+    count: usize,
+    names: [[u8; 48]; 16],
+    name_len: [u8; 16],
     playing: bool,
-    elapsed: u64,
-    started: u64,
+    pos_ms: u64,
+    dur_ms: u64,
+    scroll: usize,
+    status: [u8; 48],
+    status_len: usize,
 }
 
 pub struct Notes {
-    text: [u8; 512],
+    text: [u8; 1024],
     len: usize,
-    loaded: bool,
-    status: [u8; 32],
+    editing: Option<usize>,
+    count: usize,
+    titles: [[u8; 32]; 16],
+    title_len: [u8; 16],
+    paths: [[u8; 48]; 16],
+    path_len: [u8; 16],
+    scroll: usize,
+    status: [u8; 48],
     status_len: usize,
 }
 
 pub struct Maps {
     pin: Option<(i64, i64)>,
+    has_fix: bool,
+    lat: i64,
+    lon: i64,
+    accuracy: u64,
+    status: [u8; 64],
+    status_len: usize,
 }
 
 pub struct Photos {
@@ -31,22 +49,36 @@ pub struct Photos {
 }
 
 pub struct Files {
-    disk: bool,
+    dir: [u8; 128],
+    dir_len: usize,
     count: usize,
-    names: [[u8; 28]; 24],
-    name_len: [u8; 24],
-    paths: [[u8; 48]; 24],
-    path_len: [u8; 24],
-    sizes: [u64; 24],
+    names: [[u8; 48]; 64],
+    name_len: [u8; 64],
+    paths: [[u8; 128]; 64],
+    path_len: [u8; 64],
+    sizes: [u64; 64],
+    is_dir: [bool; 64],
+    scroll: usize,
     preview: Option<usize>,
     body: [u8; 768],
     body_len: usize,
     binary: bool,
+    status: [u8; 48],
+    status_len: usize,
 }
 
 pub struct Weather {
     fahrenheit: bool,
-    day: usize,
+    has_fix: bool,
+    has_data: bool,
+    temp: i64,
+    wind: i64,
+    code: u64,
+    lat: i64,
+    lon: i64,
+    accuracy: u64,
+    status: [u8; 64],
+    status_len: usize,
 }
 
 pub struct Terminal {
@@ -176,13 +208,6 @@ pub struct Apps {
     pub market: Market,
 }
 
-const TRACKS: [(&str, &str); 3] = [
-    ("KimiOS Sessions", "Nothing OS / Ambient"),
-    ("Bare Metal", "Kimi Sound System"),
-    ("Night Shift", "Ambient Works"),
-];
-const TRACK_MS: [u64; 3] = [215_000, 184_000, 241_000];
-
 fn slice_str(bytes: &[u8]) -> &str {
     core::str::from_utf8(bytes).unwrap_or("")
 }
@@ -225,75 +250,422 @@ fn two(value: u64, buffer: &mut [u8; 2]) {
     buffer[1] = b'0' + (value % 10) as u8;
 }
 
+fn push_str(dst: &mut [u8], used: &mut usize, src: &[u8]) {
+    let take = src.len().min(dst.len() - *used);
+    dst[*used..*used + take].copy_from_slice(&src[..take]);
+    *used += take;
+}
+
+fn coord_x10k(value: f64) -> i64 {
+    (value * 10_000.0 + if value < 0.0 { -0.5 } else { 0.5 }) as i64
+}
+
+fn location_fix() -> Option<(i64, i64, u64)> {
+    let fields = k::location()?;
+    if fields[3] == 0 {
+        return None;
+    }
+    let lat = f64::from_bits(fields[0]);
+    let lon = f64::from_bits(fields[1]);
+    Some((coord_x10k(lat), coord_x10k(lon), fields[2]))
+}
+
+fn format_coord(x10k: i64, buffer: &mut [u8; 24]) -> &str {
+    let negative = x10k < 0;
+    let magnitude = x10k.unsigned_abs();
+    let mut whole = magnitude / 10_000;
+    let mut fraction = magnitude % 10_000;
+    let mut index = buffer.len();
+    for _ in 0..4 {
+        index -= 1;
+        buffer[index] = b'0' + (fraction % 10) as u8;
+        fraction /= 10;
+    }
+    index -= 1;
+    buffer[index] = b'.';
+    loop {
+        index -= 1;
+        buffer[index] = b'0' + (whole % 10) as u8;
+        whole /= 10;
+        if whole == 0 {
+            break;
+        }
+    }
+    if negative {
+        index -= 1;
+        buffer[index] = b'-';
+    }
+    slice_str(&buffer[index..])
+}
+
+fn format_tenths(value: i64, buffer: &mut [u8; 20]) -> &str {
+    let negative = value < 0;
+    let magnitude = value.unsigned_abs();
+    let mut whole = magnitude / 10;
+    let mut index = buffer.len();
+    index -= 1;
+    buffer[index] = b'0' + (magnitude % 10) as u8;
+    index -= 1;
+    buffer[index] = b'.';
+    loop {
+        index -= 1;
+        buffer[index] = b'0' + (whole % 10) as u8;
+        whole /= 10;
+        if whole == 0 {
+            break;
+        }
+    }
+    if negative {
+        index -= 1;
+        buffer[index] = b'-';
+    }
+    slice_str(&buffer[index..])
+}
+
+fn round_tenths(value: i64) -> i64 {
+    if value >= 0 {
+        (value + 5) / 10
+    } else {
+        -((-value + 5) / 10)
+    }
+}
+
+fn format_ms(ms: u64, buffer: &mut [u8; 12]) -> &str {
+    let total = ms / 1000;
+    let minutes = total / 60;
+    let seconds = total % 60;
+    let mut used = 0;
+    let mut num = [0u8; 20];
+    push_str(buffer, &mut used, unsigned(minutes, &mut num).as_bytes());
+    push_str(buffer, &mut used, b":");
+    if seconds < 10 {
+        push_str(buffer, &mut used, b"0");
+    }
+    push_str(buffer, &mut used, unsigned(seconds, &mut num).as_bytes());
+    slice_str(&buffer[..used])
+}
+
+fn json_find(data: &[u8], key: &[u8]) -> Option<usize> {
+    if key.len() + 2 > data.len() {
+        return None;
+    }
+    let mut i = 0;
+    while i + key.len() + 2 <= data.len() {
+        if data[i] == b'"'
+            && &data[i + 1..i + 1 + key.len()] == key
+            && data[i + 1 + key.len()] == b'"'
+        {
+            return Some(i + key.len() + 2);
+        }
+        i += 1;
+    }
+    None
+}
+
+fn json_num_x10(data: &[u8], key: &[u8]) -> Option<i64> {
+    let mut i = json_find(data, key)?;
+    while i < data.len() && (data[i] == b' ' || data[i] == b':') {
+        i += 1;
+    }
+    let negative = i < data.len() && data[i] == b'-';
+    if negative {
+        i += 1;
+    }
+    let mut whole = 0i64;
+    let mut digits = 0;
+    while i < data.len() && data[i].is_ascii_digit() {
+        whole = whole.saturating_mul(10).saturating_add((data[i] - b'0') as i64);
+        digits += 1;
+        i += 1;
+    }
+    if digits == 0 {
+        return None;
+    }
+    let mut tenth = 0i64;
+    if i < data.len() && data[i] == b'.' {
+        i += 1;
+        if i < data.len() && data[i].is_ascii_digit() {
+            tenth = (data[i] - b'0') as i64;
+        }
+    }
+    let value = whole.saturating_mul(10).saturating_add(tenth);
+    Some(if negative { -value } else { value })
+}
+
+fn weather_text(code: u64) -> &'static str {
+    match code {
+        0 => "Clear",
+        1 => "Mainly clear",
+        2 => "Partly cloudy",
+        3 => "Overcast",
+        45 | 48 => "Fog",
+        51 | 53 | 55 => "Drizzle",
+        56 | 57 => "Freezing drizzle",
+        61 | 63 | 65 => "Rain",
+        66 | 67 => "Freezing rain",
+        71 | 73 | 75 => "Snow",
+        77 => "Snow grains",
+        80 | 81 | 82 => "Showers",
+        85 | 86 => "Snow showers",
+        95 => "Thunderstorm",
+        96 | 99 => "Thunderstorm, hail",
+        _ => "Unknown",
+    }
+}
+
 impl Music {
-    fn elapsed(&self) -> u64 {
-        if self.playing {
-            self.elapsed + k::uptime_ms().saturating_sub(self.started)
+    fn set_status(&mut self, text: &str) {
+        self.status_len = text.len().min(self.status.len());
+        self.status[..self.status_len].copy_from_slice(&text.as_bytes()[..self.status_len]);
+    }
+
+    fn refresh(&mut self) {
+        let _ = k::mkdir("/disk/music");
+        self.count = 0;
+        self.scroll = 0;
+        let mut buffer = [0u8; 2048];
+        if let Some(n) = k::listdir("/disk/music", &mut buffer) {
+            for name in buffer[..n].split(|&b| b == 0) {
+                if name.is_empty() || name.last() == Some(&b'/') || self.count >= 16 {
+                    continue;
+                }
+                let lower: [u8; 48] = {
+                    let mut tmp = [0u8; 48];
+                    let len = name.len().min(48);
+                    for i in 0..len {
+                        tmp[i] = name[i].to_ascii_lowercase();
+                    }
+                    tmp
+                };
+                let len = name.len().min(48);
+                let audio = lower[..len].ends_with(b".mp3")
+                    || lower[..len].ends_with(b".wav")
+                    || lower[..len].ends_with(b".ogg")
+                    || lower[..len].ends_with(b".m4a")
+                    || lower[..len].ends_with(b".flac");
+                if !audio || name.len() > 47 {
+                    continue;
+                }
+                let i = self.count;
+                self.names[i][..name.len()].copy_from_slice(name);
+                self.name_len[i] = name.len() as u8;
+                self.count += 1;
+            }
+        }
+        if self.track >= self.count {
+            self.track = 0;
+        }
+        if self.scroll + 4 > self.count {
+            self.scroll = self.count.saturating_sub(4);
+        }
+    }
+
+    fn sync(&mut self) {
+        if let Some(q) = k::audio_query() {
+            self.pos_ms = q[0];
+            self.dur_ms = q[1];
+            self.playing = q[2] != 0;
+        }
+    }
+
+    fn play_track(&mut self, index: usize) {
+        if index >= self.count {
+            return;
+        }
+        let mut path = [0u8; 80];
+        let mut used = 0;
+        push_str(&mut path, &mut used, b"/disk/music/");
+        push_str(&mut path, &mut used, &self.names[index][..self.name_len[index] as usize]);
+        if k::audio_play(slice_str(&path[..used])) {
+            self.track = index;
+            self.playing = true;
+            self.status_len = 0;
+            self.sync();
         } else {
-            self.elapsed
+            self.set_status("Playback failed");
         }
     }
 
     fn toggle(&mut self) {
         if self.playing {
-            self.elapsed = self.elapsed();
+            k::audio_pause();
             self.playing = false;
-        } else {
-            self.started = k::uptime_ms();
-            self.playing = true;
+        } else if self.count > 0 {
+            if k::audio_resume() {
+                self.playing = true;
+            } else {
+                self.play_track(self.track);
+            }
         }
-    }
-
-    fn select(&mut self, index: usize) {
-        self.track = index;
-        self.elapsed = 0;
-        self.started = k::uptime_ms();
-        self.playing = true;
+        self.sync();
     }
 
     fn next(&mut self) {
-        self.select((self.track + 1) % TRACKS.len());
+        if self.count > 0 {
+            self.play_track((self.track + 1) % self.count);
+        }
     }
 
     fn previous(&mut self) {
-        self.select((self.track + TRACKS.len() - 1) % TRACKS.len());
+        if self.count > 0 {
+            self.play_track((self.track + self.count - 1) % self.count);
+        }
     }
 }
 
-pub fn track_info(track: usize) -> (&'static str, &'static str) {
-    TRACKS[track % TRACKS.len()]
-}
-
-pub fn track_progress(music: &Music) -> i64 {
-    let duration = TRACK_MS[music.track % TRACK_MS.len()];
-    ((music.elapsed().min(duration) * 1000 / duration) as i64).clamp(0, 1000)
-}
-
-pub fn home_music(music: &Music) -> (&'static str, &'static str, bool, i64) {
-    let (title, subtitle) = track_info(music.track);
-    (title, subtitle, music.playing, track_progress(music))
+pub fn home_music(music: &Music) -> (&str, &str, bool, i64) {
+    if music.count == 0 {
+        return ("No tracks", "Import music to begin", false, 0);
+    }
+    let title = slice_str(&music.names[music.track][..music.name_len[music.track] as usize]);
+    let (pos, dur, playing) = match k::audio_query() {
+        Some(q) => (q[0], q[1], q[2] != 0),
+        None => (music.pos_ms, music.dur_ms, music.playing),
+    };
+    let progress = if dur > 0 {
+        ((pos.min(dur) * 1000 / dur) as i64).clamp(0, 1000)
+    } else {
+        0
+    };
+    (title, "/disk/music", playing, progress)
 }
 
 pub fn home_music_toggle(apps: &mut Apps) {
     apps.music.toggle();
 }
 
+pub fn home_weather(weather: &Weather) -> Option<(i64, &'static str)> {
+    if !weather.has_data {
+        return None;
+    }
+    let temp = if weather.fahrenheit {
+        round_tenths(weather.temp * 9 / 5 + 320)
+    } else {
+        round_tenths(weather.temp)
+    };
+    Some((temp, weather_text(weather.code)))
+}
+
 impl Notes {
-    fn load(&mut self) {
-        if self.loaded {
+    fn set_status(&mut self, text: &str) {
+        self.status_len = text.len().min(self.status.len());
+        self.status[..self.status_len].copy_from_slice(&text.as_bytes()[..self.status_len]);
+    }
+
+    fn refresh(&mut self) {
+        let _ = k::mkdir("/disk/notes");
+        let mut buffer = [0u8; 1024];
+        let mut n = k::listdir("/disk/notes", &mut buffer).unwrap_or(0);
+        if buffer[..n].iter().all(|&b| b == 0) && k::stat("/disk/notes.txt").is_some() {
+            let mut old = [0u8; 1024];
+            if let Some(handle) = k::open("/disk/notes.txt") {
+                let got = k::read_file(handle, 0, &mut old);
+                k::close(handle);
+                if let Some(handle) = k::create("/disk/notes/1.txt") {
+                    k::write_file(handle, 0, &old[..got]);
+                    k::close(handle);
+                    k::unlink("/disk/notes.txt");
+                }
+            }
+            n = k::listdir("/disk/notes", &mut buffer).unwrap_or(0);
+        }
+        self.count = 0;
+        self.scroll = 0;
+        for name in buffer[..n].split(|&b| b == 0) {
+            if name.is_empty() || name.last() == Some(&b'/') || self.count >= 16 {
+                continue;
+            }
+            if name.len() > 35 {
+                continue;
+            }
+            let i = self.count;
+            let mut used = 0;
+            push_str(&mut self.paths[i], &mut used, b"/disk/notes/");
+            push_str(&mut self.paths[i], &mut used, name);
+            self.path_len[i] = used as u8;
+            let path = slice_str(&self.paths[i][..used]);
+            let mut head = [0u8; 64];
+            let mut title_len = 0;
+            if let Some(handle) = k::open(path) {
+                let got = k::read_file(handle, 0, &mut head);
+                k::close(handle);
+                let end = head[..got].iter().position(|&b| b == b'\n').unwrap_or(got);
+                title_len = end.min(31);
+                self.titles[i][..title_len].copy_from_slice(&head[..title_len]);
+            }
+            if title_len == 0 {
+                let base = name.strip_suffix(b".txt").unwrap_or(name);
+                title_len = base.len().min(31);
+                self.titles[i][..title_len].copy_from_slice(&base[..title_len]);
+            }
+            self.title_len[i] = title_len as u8;
+            self.count += 1;
+        }
+    }
+
+    fn open_edit(&mut self, index: usize) {
+        if index >= self.count {
             return;
         }
-        self.loaded = true;
-        if let Some(handle) = k::open("/disk/notes.txt") {
-            let count = k::read_file(handle, 0, &mut self.text);
+        self.len = 0;
+        let path = slice_str(&self.paths[index][..self.path_len[index] as usize]);
+        if let Some(handle) = k::open(path) {
+            self.len = k::read_file(handle, 0, &mut self.text);
             k::close(handle);
-            self.len = count.min(self.text.len());
         }
-        if self.len == 0 {
-            let seed = b"KimiOS notes\n\n- bare metal, no allocator\n- 1080p phone UI\n- terminal included\n";
-            self.text[..seed.len()].copy_from_slice(seed);
-            self.len = seed.len();
+        self.editing = Some(index);
+        self.status_len = 0;
+    }
+
+    fn new_note(&mut self) {
+        if self.count >= 16 {
+            self.set_status("Note limit reached (16)");
+            return;
         }
+        let mut path = [0u8; 48];
+        let mut created = 0;
+        for number in 1..=999u64 {
+            let mut num = [0u8; 20];
+            let digits = unsigned(number, &mut num);
+            let mut used = 0;
+            push_str(&mut path, &mut used, b"/disk/notes/");
+            push_str(&mut path, &mut used, digits.as_bytes());
+            push_str(&mut path, &mut used, b".txt");
+            let candidate = slice_str(&path[..used]);
+            if k::stat(candidate).is_none() {
+                if let Some(handle) = k::create(candidate) {
+                    k::close(handle);
+                    created = used;
+                    break;
+                }
+            }
+        }
+        if created == 0 {
+            self.set_status("Could not create note");
+            return;
+        }
+        self.refresh();
+        for index in 0..self.count {
+            let len = self.path_len[index] as usize;
+            if len == created && self.paths[index][..len] == path[..created] {
+                self.open_edit(index);
+                return;
+            }
+        }
+    }
+
+    fn update_title(&mut self, index: usize) {
+        let end = self.text[..self.len].iter().position(|&b| b == b'\n').unwrap_or(self.len);
+        let mut title_len = end.min(31);
+        self.titles[index][..title_len].copy_from_slice(&self.text[..title_len]);
+        if title_len == 0 {
+            let path = &self.paths[index][..self.path_len[index] as usize];
+            let base = path.strip_prefix(b"/disk/notes/").unwrap_or(path);
+            let base = base.strip_suffix(b".txt").unwrap_or(base);
+            title_len = base.len().min(31);
+            self.titles[index][..title_len].copy_from_slice(&base[..title_len]);
+        }
+        self.title_len[index] = title_len as u8;
     }
 
     fn push(&mut self, byte: u8) {
@@ -312,19 +684,36 @@ impl Notes {
     }
 
     fn save(&mut self) {
-        let status = if let Some(handle) = k::create("/disk/notes.txt") {
+        let Some(index) = self.editing else {
+            return;
+        };
+        let path = slice_str(&self.paths[index][..self.path_len[index] as usize]);
+        if let Some(handle) = k::create(path) {
             let written = k::write_file(handle, 0, &self.text[..self.len]);
             k::close(handle);
             if written == self.len {
-                b"Saved to /disk/notes.txt" as &[u8]
+                self.set_status("Saved");
+                self.update_title(index);
             } else {
-                b"Short write"
+                self.set_status("Short write");
             }
         } else {
-            b"No disk mounted"
+            self.set_status("No disk mounted");
+        }
+    }
+
+    fn delete(&mut self) {
+        let Some(index) = self.editing else {
+            return;
         };
-        self.status_len = status.len().min(self.status.len());
-        self.status[..self.status_len].copy_from_slice(&status[..self.status_len]);
+        let path = slice_str(&self.paths[index][..self.path_len[index] as usize]);
+        if k::unlink(path) {
+            self.set_status("Deleted");
+        } else {
+            self.set_status("Delete failed");
+        }
+        self.editing = None;
+        self.refresh();
     }
 }
 
@@ -372,36 +761,102 @@ impl Terminal {
 }
 
 impl Files {
+    fn set_status(&mut self, text: &str) {
+        self.status_len = text.len().min(self.status.len());
+        self.status[..self.status_len].copy_from_slice(&text.as_bytes()[..self.status_len]);
+    }
+
+    fn push_entry(&mut self, name: &[u8], is_dir: bool, path: &[u8], size: u64) {
+        let i = self.count;
+        let nl = name.len().min(47);
+        self.names[i][..nl].copy_from_slice(&name[..nl]);
+        self.name_len[i] = nl as u8;
+        let pl = path.len().min(127);
+        self.paths[i][..pl].copy_from_slice(&path[..pl]);
+        self.path_len[i] = pl as u8;
+        self.is_dir[i] = is_dir;
+        self.sizes[i] = size;
+        self.count += 1;
+    }
+
     fn refresh(&mut self) {
         self.count = 0;
         self.preview = None;
-        let mut buffer = [0u8; 640];
-        let byte_count = k::list(&mut buffer);
-        for name in buffer[..byte_count.min(buffer.len())].split(|&byte| byte == 0) {
-            if name.is_empty() || self.count == self.names.len() {
-                continue;
-            }
-            let is_disk = name.starts_with(b"/disk/");
-            if is_disk != self.disk {
-                continue;
-            }
-            if name.len() > self.paths[self.count].len() {
-                continue;
-            }
-            self.paths[self.count][..name.len()].copy_from_slice(name);
-            self.path_len[self.count] = name.len() as u8;
-            let shown = if is_disk {
-                name.strip_prefix(b"/disk/").unwrap_or(name)
-            } else {
-                name.strip_prefix(b"/").unwrap_or(name)
-            };
-            let length = shown.len().min(self.names[self.count].len());
-            self.names[self.count][..length].copy_from_slice(&shown[..length]);
-            self.name_len[self.count] = length as u8;
-            let path = slice_str(&self.paths[self.count][..name.len()]);
-            self.sizes[self.count] = k::stat(path).map_or(0, |(_, size)| size);
-            self.count += 1;
+        self.scroll = 0;
+        self.status_len = 0;
+        let mut buffer = [0u8; 4096];
+        let dir_len = self.dir_len;
+        let Some(n) = k::listdir(slice_str(&self.dir[..dir_len]), &mut buffer) else {
+            self.set_status("Cannot open directory");
+            return;
+        };
+        if dir_len > 5 {
+            let parent_end = self.dir[..dir_len]
+                .iter()
+                .rposition(|&b| b == b'/')
+                .unwrap_or(0)
+                .max(5);
+            let mut parent = [0u8; 128];
+            parent[..parent_end].copy_from_slice(&self.dir[..parent_end]);
+            self.push_entry(b"..", true, &parent[..parent_end], 0);
         }
+        for name in buffer[..n].split(|&b| b == 0) {
+            if name.is_empty() || self.count >= 64 {
+                continue;
+            }
+            let is_dir = name.last() == Some(&b'/');
+            let base = if is_dir { &name[..name.len() - 1] } else { name };
+            if base.is_empty() || base.len() > 47 || dir_len + 1 + base.len() >= 128 {
+                continue;
+            }
+            let mut path = [0u8; 128];
+            let mut used = 0;
+            push_str(&mut path, &mut used, &self.dir[..dir_len]);
+            push_str(&mut path, &mut used, b"/");
+            push_str(&mut path, &mut used, base);
+            let size = if is_dir {
+                0
+            } else {
+                k::stat(slice_str(&path[..used])).map_or(0, |(_, size)| size)
+            };
+            self.push_entry(base, is_dir, &path[..used], size);
+        }
+        if n >= buffer.len() {
+            self.set_status("Listing truncated");
+        }
+    }
+
+    fn enter(&mut self, index: usize) {
+        if index >= self.count {
+            return;
+        }
+        if self.is_dir[index] {
+            let len = self.path_len[index] as usize;
+            self.dir[..len].copy_from_slice(&self.paths[index][..len]);
+            self.dir_len = len;
+            self.refresh();
+        } else {
+            self.open_preview(index);
+        }
+    }
+
+    fn go_up(&mut self) {
+        if self.dir_len <= 5 {
+            return;
+        }
+        let end = self.dir[..self.dir_len]
+            .iter()
+            .rposition(|&b| b == b'/')
+            .unwrap_or(0)
+            .max(5);
+        self.dir_len = end;
+        self.refresh();
+    }
+
+    fn go_root(&mut self) {
+        self.dir[..5].copy_from_slice(b"/disk");
+        self.dir_len = 5;
+        self.refresh();
     }
 
     fn open_preview(&mut self, index: usize) {
@@ -433,6 +888,106 @@ impl Files {
     }
 }
 
+impl Maps {
+    fn set_status(&mut self, text: &str) {
+        self.status_len = text.len().min(self.status.len());
+        self.status[..self.status_len].copy_from_slice(&text.as_bytes()[..self.status_len]);
+    }
+
+    fn refresh(&mut self) {
+        match location_fix() {
+            Some((lat, lon, accuracy)) => {
+                self.has_fix = true;
+                self.lat = lat;
+                self.lon = lon;
+                self.accuracy = accuracy;
+                self.set_status("Location fix acquired");
+            }
+            None => {
+                self.has_fix = false;
+                self.set_status("Location unavailable");
+            }
+        }
+    }
+
+    fn open_live(&mut self) {
+        self.refresh();
+        if !self.has_fix {
+            return;
+        }
+        let mut url = [0u8; 128];
+        let mut used = 0;
+        push_str(&mut url, &mut used, b"https://www.openstreetmap.org/#map=15/");
+        let mut coord = [0u8; 24];
+        push_str(&mut url, &mut used, format_coord(self.lat, &mut coord).as_bytes());
+        push_str(&mut url, &mut used, b"/");
+        push_str(&mut url, &mut used, format_coord(self.lon, &mut coord).as_bytes());
+        if k::open_url(slice_str(&url[..used])) {
+            self.set_status("Opened in browser");
+        } else {
+            self.set_status("WebView unavailable");
+        }
+    }
+}
+
+impl Weather {
+    fn set_status(&mut self, text: &str) {
+        self.status_len = text.len().min(self.status.len());
+        self.status[..self.status_len].copy_from_slice(&text.as_bytes()[..self.status_len]);
+    }
+
+    fn refresh(&mut self) {
+        let Some((lat, lon, accuracy)) = location_fix() else {
+            self.has_fix = false;
+            self.set_status("Location unavailable - enable location");
+            return;
+        };
+        self.has_fix = true;
+        self.lat = lat;
+        self.lon = lon;
+        self.accuracy = accuracy;
+        let mut url = [0u8; 256];
+        let mut used = 0;
+        push_str(&mut url, &mut used, b"https://api.open-meteo.com/v1/forecast?latitude=");
+        let mut coord = [0u8; 24];
+        push_str(&mut url, &mut used, format_coord(lat, &mut coord).as_bytes());
+        push_str(&mut url, &mut used, b"&longitude=");
+        push_str(&mut url, &mut used, format_coord(lon, &mut coord).as_bytes());
+        push_str(&mut url, &mut used, b"&current_weather=true");
+        if k::fetch_url(slice_str(&url[..used]), "/disk/weather.json").is_none() {
+            self.set_status("Fetch failed - check network");
+            return;
+        }
+        let mut body = [0u8; 2048];
+        let mut n = 0;
+        if let Some(handle) = k::open("/disk/weather.json") {
+            n = k::read_file(handle, 0, &mut body);
+            k::close(handle);
+        }
+        let data = &body[..n];
+        let Some(start) = json_find(data, b"current_weather") else {
+            self.set_status("Bad weather response");
+            return;
+        };
+        let Some(open) = data[start..].iter().position(|&b| b == b'{') else {
+            self.set_status("Bad weather response");
+            return;
+        };
+        let obj = &data[start + open..];
+        let end = obj.iter().position(|&b| b == b'}').unwrap_or(obj.len());
+        let obj = &obj[..end];
+        let Some(temp) = json_num_x10(obj, b"temperature") else {
+            self.set_status("Bad weather data");
+            return;
+        };
+        self.temp = temp;
+        self.wind = json_num_x10(obj, b"windspeed").unwrap_or(0);
+        self.code = (json_num_x10(obj, b"weathercode").unwrap_or(0) / 10).max(0) as u64;
+        self.has_data = true;
+        self.set_status("Live from open-meteo.com");
+    }
+}
+
 impl Apps {
     pub fn new() -> Self {
         let mut terminal = Terminal {
@@ -447,35 +1002,73 @@ impl Apps {
         Self {
             music: Music {
                 track: 0,
-                playing: true,
-                elapsed: 42_000,
-                started: k::uptime_ms(),
-            },
-            notes: Notes {
-                text: [0u8; 512],
-                len: 0,
-                loaded: false,
-                status: [0u8; 32],
+                count: 0,
+                names: [[0u8; 48]; 16],
+                name_len: [0u8; 16],
+                playing: false,
+                pos_ms: 0,
+                dur_ms: 0,
+                scroll: 0,
+                status: [0u8; 48],
                 status_len: 0,
             },
-            maps: Maps { pin: None },
+            notes: Notes {
+                text: [0u8; 1024],
+                len: 0,
+                editing: None,
+                count: 0,
+                titles: [[0u8; 32]; 16],
+                title_len: [0u8; 16],
+                paths: [[0u8; 48]; 16],
+                path_len: [0u8; 16],
+                scroll: 0,
+                status: [0u8; 48],
+                status_len: 0,
+            },
+            maps: Maps {
+                pin: None,
+                has_fix: false,
+                lat: 0,
+                lon: 0,
+                accuracy: 0,
+                status: [0u8; 64],
+                status_len: 0,
+            },
             photos: Photos { selected: None },
             files: Files {
-                disk: false,
+                dir: {
+                    let mut dir = [0u8; 128];
+                    dir[..5].copy_from_slice(b"/disk");
+                    dir
+                },
+                dir_len: 5,
                 count: 0,
-                names: [[0u8; 28]; 24],
-                name_len: [0u8; 24],
-                paths: [[0u8; 48]; 24],
-                path_len: [0u8; 24],
-                sizes: [0u64; 24],
+                names: [[0u8; 48]; 64],
+                name_len: [0u8; 64],
+                paths: [[0u8; 128]; 64],
+                path_len: [0u8; 64],
+                sizes: [0u64; 64],
+                is_dir: [false; 64],
+                scroll: 0,
                 preview: None,
                 body: [0u8; 768],
                 body_len: 0,
                 binary: false,
+                status: [0u8; 48],
+                status_len: 0,
             },
             weather: Weather {
                 fahrenheit: false,
-                day: 0,
+                has_fix: false,
+                has_data: false,
+                temp: 0,
+                wind: 0,
+                code: 0,
+                lat: 0,
+                lon: 0,
+                accuracy: 0,
+                status: [0u8; 64],
+                status_len: 0,
             },
             terminal,
             browser: Browser::new(),
@@ -504,7 +1097,10 @@ impl Apps {
 
 pub fn open(apps: &mut Apps, app: AppKind) {
     match app {
-        AppKind::Notes => apps.notes.load(),
+        AppKind::Music => apps.music.refresh(),
+        AppKind::Notes => apps.notes.refresh(),
+        AppKind::Maps => apps.maps.refresh(),
+        AppKind::Weather => apps.weather.refresh(),
         AppKind::Files => apps.files.refresh(),
         AppKind::Browser => apps.browser.editing = apps.browser.line_count == 0,
         AppKind::Apk => apps.apk.refresh(),
@@ -517,6 +1113,7 @@ pub fn open(apps: &mut Apps, app: AppKind) {
 pub fn back(apps: &mut Apps, app: AppKind) -> bool {
     match app {
         AppKind::Browser => false,
+        AppKind::Notes => false,
         AppKind::Apk => {
             if apps.apk.selected.take().is_some() {
                 true
@@ -538,13 +1135,37 @@ pub fn back(apps: &mut Apps, app: AppKind) -> bool {
                 false
             }
         }
-        AppKind::Files => {
-            if apps.files.preview.take().is_some() {
+        AppKind::Files => apps.files.preview.take().is_some(),
+        _ => false,
+    }
+}
+
+/// Back-arrow navigation: step back one screen inside the app. Returns false
+/// when there is nothing left to unwind (the shell then closes the app).
+pub fn nav_back(apps: &mut Apps, app: AppKind) -> bool {
+    match app {
+        AppKind::Notes => {
+            if apps.notes.editing.is_some() {
+                apps.notes.save();
+                apps.notes.editing = None;
                 true
             } else {
                 false
             }
         }
+        AppKind::Files => {
+            if apps.files.preview.take().is_some() {
+                true
+            } else if apps.files.dir_len > 5 {
+                apps.files.go_up();
+                true
+            } else {
+                false
+            }
+        }
+        AppKind::Photos => apps.photos.selected.take().is_some(),
+        AppKind::Apk => apps.apk.selected.take().is_some(),
+        AppKind::Dvm => apps.dvm.selected.take().is_some(),
         _ => false,
     }
 }
@@ -599,25 +1220,38 @@ pub fn key_glyph(code: u16, shift: bool) -> Option<u8> {
 /// Whether the app currently has a focused text field (OSK visibility gate).
 pub fn text_focused(apps: &Apps, app: AppKind) -> bool {
     match app {
-        AppKind::Notes | AppKind::Terminal => true,
+        AppKind::Notes => apps.notes.editing.is_some(),
+        AppKind::Terminal => true,
         AppKind::Browser => apps.browser.editing,
         _ => false,
     }
 }
 
 /// Whether an app-space tap lands on the text field itself (reopens the OSK).
-pub fn field_hit(_apps: &Apps, app: AppKind, point: (i64, i64), _osk: bool) -> bool {
+pub fn field_hit(apps: &Apps, app: AppKind, point: (i64, i64), _osk: bool) -> bool {
     match app {
-        AppKind::Notes => point.0 >= 20 && point.0 <= 460 && point.1 >= 160 && point.1 <= 614,
+        AppKind::Notes => {
+            apps.notes.editing.is_some()
+                && point.0 >= 20 && point.0 <= 460 && point.1 >= 160 && point.1 <= 614
+        }
         AppKind::Terminal => point.1 > 96 && point.1 < 770,
         AppKind::Browser => point.0 >= 20 && point.0 < 390 && point.1 >= 104 && point.1 <= 148,
         _ => false,
     }
 }
 
+/// Printable byte (or backspace marker) a keycode produces, for the home
+/// search field which lives outside the Apps dispatch.
+pub fn key_char(code: u16, shift: bool) -> Option<(u8, bool)> {
+    key_event(code, shift)
+}
+
 pub fn key(apps: &mut Apps, app: AppKind, code: u16, shift: bool) -> bool {
     match app {
         AppKind::Notes => {
+            if apps.notes.editing.is_none() {
+                return false;
+            }
             match key_event(code, shift) {
                 Some((0, true)) => {
                     apps.notes.backspace();
@@ -819,37 +1453,104 @@ pub fn tap(_screen: &Screen, apps: &mut Apps, app: AppKind, point: (i64, i64), o
 }
 
 fn music_tap(apps: &mut Apps, point: (i64, i64)) {
+    let music = &mut apps.music;
+    if point.1 >= 104 && point.1 <= 144 {
+        if point.0 >= 236 && point.0 <= 346 {
+            if k::import_file("/disk/music") {
+                music.set_status("Import started - rescan after");
+            } else {
+                music.set_status("Import unavailable");
+            }
+            return;
+        }
+        if point.0 >= 352 && point.0 <= 456 {
+            music.refresh();
+            return;
+        }
+    }
+    let dy = point.1 - 470;
     let dx = point.0 - 240;
-    let dy = point.1 - 388;
     if dx * dx + dy * dy <= 42 * 42 {
-        apps.music.toggle();
+        music.toggle();
         return;
     }
     let dx = point.0 - 140;
-    if dx * dx + dy * dy <= 30 * 30 {
-        apps.music.previous();
+    if dx * dx + dy * dy <= 32 * 32 {
+        music.previous();
         return;
     }
     let dx = point.0 - 340;
-    if dx * dx + dy * dy <= 30 * 30 {
-        apps.music.next();
+    if dx * dx + dy * dy <= 32 * 32 {
+        music.next();
         return;
     }
-    if point.1 >= 470 {
-        let index = ((point.1 - 470) / 74) as usize;
-        if index < 3 && point.0 >= 20 && point.0 < 460 {
-            apps.music.select(index);
+    if point.1 >= 516 && point.1 <= 544 {
+        if point.0 >= 368 && point.0 <= 408 {
+            music.scroll = music.scroll.saturating_sub(1);
+            return;
+        }
+        if point.0 >= 416 && point.0 <= 456 {
+            if music.scroll + 4 < music.count {
+                music.scroll += 1;
+            }
+            return;
+        }
+    }
+    if point.1 >= 548 && point.1 < 756 && point.0 >= 20 && point.0 < 460 {
+        let row = ((point.1 - 548) / 52) as usize;
+        if row < 4 {
+            let index = music.scroll + row;
+            if index < music.count {
+                music.play_track(index);
+            }
         }
     }
 }
 
 fn notes_tap(apps: &mut Apps, point: (i64, i64)) {
-    if point.0 >= 340 && point.0 <= 456 && point.1 >= 104 && point.1 <= 148 {
-        apps.notes.save();
+    let notes = &mut apps.notes;
+    if notes.editing.is_some() {
+        if point.1 >= 104 && point.1 <= 148 {
+            if point.0 >= 236 && point.0 <= 340 {
+                notes.save();
+            } else if point.0 >= 348 && point.0 <= 456 {
+                notes.delete();
+            }
+        }
+        return;
+    }
+    if point.1 >= 104 && point.1 <= 148 && point.0 >= 356 && point.0 <= 456 {
+        notes.new_note();
+        return;
+    }
+    if point.1 >= 728 && point.1 <= 764 {
+        if point.0 >= 20 && point.0 <= 140 {
+            notes.scroll = notes.scroll.saturating_sub(1);
+        } else if point.0 >= 340 && point.0 <= 460 {
+            if notes.scroll + 10 < notes.count {
+                notes.scroll += 1;
+            }
+        }
+        return;
+    }
+    if point.1 >= 160 && point.1 < 720 && point.0 >= 20 && point.0 < 460 {
+        let row = ((point.1 - 160) / 56) as usize;
+        if row < 10 {
+            let index = notes.scroll + row;
+            if index < notes.count {
+                notes.open_edit(index);
+            }
+        }
     }
 }
 
 fn maps_tap(apps: &mut Apps, point: (i64, i64)) {
+    if apps.maps.has_fix
+        && point.0 >= 296 && point.0 <= 440 && point.1 >= 656 && point.1 <= 700
+    {
+        apps.maps.open_live();
+        return;
+    }
     if point.1 >= 120 && point.1 <= 620 && point.0 >= 20 && point.0 <= 460 {
         apps.maps.pin = Some((point.0, point.1));
     }
@@ -873,28 +1574,43 @@ fn photos_tap(apps: &mut Apps, point: (i64, i64)) {
 }
 
 fn files_tap(apps: &mut Apps, point: (i64, i64)) {
-    if apps.files.preview.is_some() {
-        apps.files.preview = None;
+    let files = &mut apps.files;
+    if files.preview.is_some() {
+        files.preview = None;
         return;
     }
-    if point.1 >= 100 && point.1 <= 142 {
-        if point.0 >= 24 && point.0 < 218 {
-            if apps.files.disk {
-                apps.files.disk = false;
-                apps.files.refresh();
+    if point.1 >= 150 && point.1 <= 186 {
+        if point.0 >= 20 && point.0 <= 110 {
+            files.go_root();
+        } else if point.0 >= 120 && point.0 <= 280 {
+            let dir = slice_str(&files.dir[..files.dir_len]);
+            if k::import_file(dir) {
+                files.set_status("Import started - refresh after");
+            } else {
+                files.set_status("Import unavailable");
             }
-        } else if point.0 >= 230 && point.0 < 456 {
-            if !apps.files.disk {
-                apps.files.disk = true;
-                apps.files.refresh();
+        } else if point.0 >= 290 && point.0 <= 456 {
+            files.refresh();
+        }
+        return;
+    }
+    if point.1 >= 728 && point.1 <= 764 {
+        if point.0 >= 20 && point.0 <= 140 {
+            files.scroll = files.scroll.saturating_sub(1);
+        } else if point.0 >= 340 && point.0 <= 460 {
+            if files.scroll + 17 < files.count {
+                files.scroll += 1;
             }
         }
         return;
     }
-    if point.1 >= 170 {
-        let index = ((point.1 - 170) / 30) as usize;
-        if index < apps.files.count && point.0 >= 20 && point.0 < 460 {
-            apps.files.open_preview(index);
+    if point.1 >= 196 && point.1 < 706 && point.0 >= 20 && point.0 < 460 {
+        let row = ((point.1 - 196) / 30) as usize;
+        if row < 17 {
+            let index = files.scroll + row;
+            if index < files.count {
+                files.enter(index);
+            }
         }
     }
 }
@@ -904,11 +1620,8 @@ fn weather_tap(apps: &mut Apps, point: (i64, i64)) {
         apps.weather.fahrenheit = !apps.weather.fahrenheit;
         return;
     }
-    if point.1 >= 470 {
-        let index = ((point.1 - 470) / 64) as usize;
-        if index < 5 {
-            apps.weather.day = index;
-        }
+    if point.1 >= 368 && point.1 <= 408 && point.0 >= 20 && point.0 <= 160 {
+        apps.weather.refresh();
     }
 }
 
@@ -932,40 +1645,69 @@ pub fn draw(screen: &Screen, apps: &Apps, app: AppKind, clock: [u64; 7], osk: bo
 fn draw_music(screen: &Screen, music: &Music) {
     let width = screen.width();
     screen.fill(0, 93, width, screen.height() - 93, BLACK());
-    screen.gradient(40, 120, 160, 160, 0x0030_2028, RED_DIM());
-    screen.circle(120, 200, 46, 0x0010_0c10);
-    screen.ring(120, 200, 46, 2, RED());
-    screen.text(40, 300, track_info(music.track).0, 3, TEXT());
-    screen.text(40, 336, track_info(music.track).1, 1, MUTED());
+    button(screen, 236, 104, 110, 40, "IMPORT", SURFACE_HI(), TEXT());
+    button(screen, 352, 104, 104, 40, "Rescan", SURFACE_HI(), MUTED());
+    screen.gradient(40, 160, 160, 120, 0x0030_2028, RED_DIM());
+    screen.circle(120, 220, 46, 0x0010_0c10);
+    screen.ring(120, 220, 46, 2, RED());
+    let (pos, dur, playing) = match k::audio_query() {
+        Some(q) => (q[0], q[1], q[2] != 0),
+        None => (music.pos_ms, music.dur_ms, music.playing),
+    };
+    if music.count > 0 {
+        let name = slice_str(&music.names[music.track][..music.name_len[music.track] as usize]);
+        let shown = name.len().min(28);
+        screen.text(40, 300, &name[..shown], 2, TEXT());
+    } else {
+        screen.text(40, 300, "No tracks", 2, MUTED());
+    }
+    if music.status_len > 0 {
+        screen.text(40, 336, slice_str(&music.status[..music.status_len]), 1, RED());
+    } else {
+        screen.text(40, 336, "/disk/music", 1, MUTED());
+    }
     screen.round_rect(40, 380, width - 80, 8, 4, OUTLINE());
-    let progress = track_progress(music);
+    let progress = if dur > 0 {
+        ((pos.min(dur) * 1000 / dur) as i64).clamp(0, 1000)
+    } else {
+        0
+    };
     screen.round_rect(40, 380, (width - 80) * progress / 1000, 8, 4, RED());
-    let elapsed = music.elapsed().min(TRACK_MS[music.track % 3]) / 1000;
-    let total = TRACK_MS[music.track % 3] / 1000;
-    let mut time = [0u8; 20];
-    let left = unsigned(elapsed, &mut time);
+    let mut time = [0u8; 12];
+    let left = format_ms(pos, &mut time);
     screen.text(40, 400, left, 1, MUTED());
-    let mut time2 = [0u8; 20];
-    let right = unsigned(total, &mut time2);
+    let mut time2 = [0u8; 12];
+    let right = format_ms(dur, &mut time2);
     screen.text(width - 40 - Screen::text_width(right, 1), 400, right, 1, MUTED());
     screen.circle(140, 470, 28, SURFACE_HI());
     screen.line(148, 458, 148, 482, 3, TEXT());
     screen.line(148, 458, 132, 470, 3, TEXT());
     screen.line(148, 482, 132, 470, 3, TEXT());
-    draw_play_button(screen, 240, 470, music.playing);
+    draw_play_button(screen, 240, 470, playing);
     screen.circle(340, 470, 28, SURFACE_HI());
     screen.line(332, 458, 332, 482, 3, TEXT());
     screen.line(332, 458, 348, 470, 3, TEXT());
     screen.line(332, 482, 348, 470, 3, TEXT());
-    screen.text(24, 530, "UP NEXT", 1, MUTED());
-    for index in 0..TRACKS.len() {
-        let y = 552 + index as i64 * 74;
+    screen.text(24, 524, "TRACKS", 1, MUTED());
+    button(screen, 368, 516, 40, 28, "up", SURFACE_HI(), MUTED());
+    button(screen, 416, 516, 40, 28, "dn", SURFACE_HI(), MUTED());
+    if music.count == 0 {
+        screen.text_centered(width / 2, 580, "Import music to begin", 2, MUTED());
+        return;
+    }
+    for row in 0..4usize {
+        let index = music.scroll + row;
+        if index >= music.count {
+            break;
+        }
+        let y = 548 + row as i64 * 52;
         let active = index == music.track;
-        screen.round_rect(20, y, width - 40, 64, 22, if active { SURFACE_HI() } else { SURFACE() });
-        screen.text(40, y + 14, TRACKS[index].0, 2, if active { TEXT() } else { MUTED() });
-        screen.text(40, y + 40, TRACKS[index].1, 1, if active { RED() } else { MUTED() });
+        screen.round_rect(20, y, width - 40, 46, 18, if active { SURFACE_HI() } else { SURFACE() });
+        let name = slice_str(&music.names[index][..music.name_len[index] as usize]);
+        let shown = name.len().min(34);
+        screen.text(40, y + 15, &name[..shown], 2, if active { TEXT() } else { MUTED() });
         if active {
-            screen.circle(width - 46, y + 32, 6, RED());
+            screen.circle(width - 46, y + 23, 6, RED());
         }
     }
 }
@@ -985,8 +1727,41 @@ fn draw_play_button(screen: &Screen, cx: i64, cy: i64, playing: bool) {
 fn draw_notes(screen: &Screen, notes: &Notes, osk: bool) {
     let width = screen.width();
     screen.fill(0, 93, width, screen.height() - 93, BLACK());
-    screen.text(24, 110, "notes.txt", 2, TEXT());
-    button(screen, 340, 104, 116, 44, "SAVE", RED(), TEXT());
+    let Some(index) = notes.editing else {
+        screen.text(24, 110, "NOTES", 2, TEXT());
+        if notes.status_len > 0 {
+            let shown = notes.status_len.min(28);
+            screen.text(130, 118, slice_str(&notes.status[..shown]), 1, GREEN());
+        }
+        button(screen, 356, 104, 100, 44, "NEW", RED(), TEXT());
+        if notes.count == 0 {
+            screen.text_centered(width / 2, 380, "No notes yet", 2, MUTED());
+            screen.text_centered(width / 2, 416, "Tap NEW to create one", 1, MUTED());
+            return;
+        }
+        for row in 0..10usize {
+            let i = notes.scroll + row;
+            if i >= notes.count {
+                break;
+            }
+            let y = 160 + row as i64 * 56;
+            screen.round_rect(20, y, width - 40, 50, 18, SURFACE());
+            let title = slice_str(&notes.titles[i][..notes.title_len[i] as usize]);
+            let shown = title.len().min(34);
+            screen.text(40, y + 17, &title[..shown], 2, TEXT());
+        }
+        button(screen, 20, 728, 120, 36, "UP", SURFACE_HI(), MUTED());
+        button(screen, 340, 728, 120, 36, "DOWN", SURFACE_HI(), MUTED());
+        let mut buf = [0u8; 20];
+        let count = unsigned(notes.count as u64, &mut buf);
+        screen.text_centered(width / 2, 738, count, 1, MUTED());
+        return;
+    };
+    let title = slice_str(&notes.titles[index][..notes.title_len[index] as usize]);
+    let shown = title.len().min(16);
+    screen.text(24, 110, &title[..shown], 2, TEXT());
+    button(screen, 236, 104, 104, 44, "SAVE", RED(), TEXT());
+    button(screen, 348, 104, 108, 44, "DEL", SURFACE_HI(), RED());
     let panel_height = if osk { 260 } else { 454 };
     let text_limit = if osk { 386 } else { 580 };
     screen.round_rect(20, 160, width - 40, panel_height, 26, SURFACE());
@@ -1017,10 +1792,10 @@ fn draw_notes(screen: &Screen, notes: &Notes, osk: bool) {
     if notes.status_len > 0 {
         screen.text(24, status_y, slice_str(&notes.status[..notes.status_len]), 1, GREEN());
     } else {
-        screen.text(24, status_y, "Typed text is saved with SAVE", 1, MUTED());
+        screen.text(24, status_y, "SAVE writes this note to /disk/notes", 1, MUTED());
     }
     if !osk {
-        screen.text(24, 654, "Enter adds a line, backspace deletes", 1, MUTED());
+        screen.text(24, 654, "Back arrow saves and returns to the list", 1, MUTED());
     }
 }
 
@@ -1051,41 +1826,22 @@ fn draw_maps(screen: &Screen, maps: &Maps) {
         screen.text_centered(width / 2, 350, "Tap the map to drop a pin", 2, TEXT());
     }
     screen.round_rect(20, 636, width - 40, 104, 26, SURFACE());
-    if let Some((px, py)) = maps.pin {
-        screen.text(40, 654, "Pinned location", 2, TEXT());
-        let lat = 377_749 + (620 - py) * 3;
-        let lon = -1_224_194 + (px - 20) * 3;
+    if maps.has_fix {
+        screen.text(40, 650, "Current location", 2, TEXT());
         let mut line = [0u8; 48];
         let mut used = 0;
-        for (value, negative) in [(lat, false), (lon, true)] {
-            if negative {
-                line[used] = b'-';
-                used += 1;
-            }
-            let whole = value.unsigned_abs() / 10_000;
-            let fraction = value.unsigned_abs() % 10_000;
-            let mut buf = [0u8; 20];
-            let text = unsigned(whole, &mut buf);
-            for &byte in text.as_bytes() {
-                line[used] = byte;
-                used += 1;
-            }
-            line[used] = b'.';
-            used += 1;
-            for digit in 0..4 {
-                let divisor = 10u64.pow(3 - digit);
-                line[used] = b'0' + ((fraction / divisor) % 10) as u8;
-                used += 1;
-            }
-            line[used] = b' ';
-            used += 1;
-            line[used] = b' ';
-            used += 1;
-        }
-        screen.text(40, 688, slice_str(&line[..used]), 1, MUTED());
+        let mut coord = [0u8; 24];
+        push_str(&mut line, &mut used, format_coord(maps.lat, &mut coord).as_bytes());
+        push_str(&mut line, &mut used, b", ");
+        push_str(&mut line, &mut used, format_coord(maps.lon, &mut coord).as_bytes());
+        screen.text(40, 684, slice_str(&line[..used]), 1, MUTED());
+        button(screen, 296, 656, 144, 44, "Open map", RED(), TEXT());
     } else {
-        screen.text(40, 654, "Maps preview", 2, TEXT());
-        screen.text(40, 684, "Local, offline and tiny", 1, MUTED());
+        screen.text(40, 650, "Location unavailable", 2, MUTED());
+        screen.text(40, 684, "Enable location to open the live map", 1, MUTED());
+    }
+    if maps.status_len > 0 {
+        screen.text(24, 752, slice_str(&maps.status[..maps.status_len]), 1, MUTED());
     }
 }
 
@@ -1193,62 +1949,107 @@ fn draw_files(screen: &Screen, files: &Files) {
         screen.text(40, 642, "Tap to close", 1, MUTED());
         return;
     }
-    let tab = if files.disk { "DISK" } else { "RAMFS" };
-    screen.round_rect(24, 100, 194, 42, 21, if files.disk { SURFACE() } else { RED_DIM() });
-    screen.text_centered(121, 110, "RAMFS", 2, if files.disk { MUTED() } else { TEXT() });
-    screen.round_rect(230, 100, 226, 42, 21, if files.disk { RED_DIM() } else { SURFACE() });
-    screen.text_centered(343, 110, "DISK", 2, if files.disk { TEXT() } else { MUTED() });
-    for index in 0..files.count.min(18) {
-        let y = 170 + index as i64 * 30;
-        screen.round_rect(20, y, width - 40, 28, 14, if index % 2 == 0 { SURFACE() } else { BLACK() });
-        screen.round_rect(34, y + 7, 14, 14, 3, MUTED());
+    screen.round_rect(20, 100, width - 40, 42, 21, SURFACE());
+    let dir = slice_str(&files.dir[..files.dir_len]);
+    let start = files.dir_len.saturating_sub(50);
+    screen.text(36, 112, &dir[start..], 1, TEXT());
+    button(screen, 20, 150, 90, 36, "Root", SURFACE_HI(), TEXT());
+    button(screen, 120, 150, 160, 36, "Import", SURFACE_HI(), TEXT());
+    button(screen, 290, 150, 166, 36, "Refresh", SURFACE_HI(), MUTED());
+    for row in 0..17usize {
+        let index = files.scroll + row;
+        if index >= files.count {
+            break;
+        }
+        let y = 196 + row as i64 * 30;
+        screen.round_rect(20, y, width - 40, 28, 14, if row % 2 == 0 { SURFACE() } else { BLACK() });
+        screen.round_rect(34, y + 7, 14, 14, 3, if files.is_dir[index] { RED_DIM() } else { MUTED() });
         let label = slice_str(&files.names[index][..files.name_len[index] as usize]);
-        screen.text(60, y + 10, label, 1, TEXT());
-        let mut buf = [0u8; 20];
-        let size = unsigned(files.sizes[index], &mut buf);
-        screen.text(width - 28 - Screen::text_width(size, 1), y + 10, size, 1, MUTED());
+        let shown = label.len().min(36);
+        screen.text(60, y + 10, &label[..shown], 1, TEXT());
+        if files.is_dir[index] {
+            screen.text(width - 60, y + 10, "DIR", 1, MUTED());
+        } else {
+            let mut buf = [0u8; 20];
+            let size = unsigned(files.sizes[index], &mut buf);
+            screen.text(width - 28 - Screen::text_width(size, 1), y + 10, size, 1, MUTED());
+        }
     }
-    screen.text(24, 730, tab, 1, MUTED());
+    if files.count == 0 {
+        screen.text_centered(width / 2, 400, "Empty directory", 2, MUTED());
+    }
+    button(screen, 20, 728, 120, 36, "UP", SURFACE_HI(), MUTED());
+    button(screen, 340, 728, 120, 36, "DOWN", SURFACE_HI(), MUTED());
+    let mut line = [0u8; 48];
+    let mut used = 0;
+    let mut buf = [0u8; 20];
+    push_str(&mut line, &mut used, unsigned(files.count as u64, &mut buf).as_bytes());
+    push_str(&mut line, &mut used, b" items");
+    screen.text_centered(width / 2, 738, slice_str(&line[..used]), 1, MUTED());
+    if files.status_len > 0 {
+        screen.text(24, 712, slice_str(&files.status[..files.status_len]), 1, RED());
+    }
 }
 
 fn draw_weather(screen: &Screen, weather: &Weather, clock: [u64; 7]) {
     let width = screen.width();
     screen.fill(0, 93, width, screen.height() - 93, BLACK());
     screen.round_rect(20, 104, width - 40, 240, 30, SURFACE());
-    let temp = if weather.fahrenheit { 72 } else { 22 };
-    let _ = temp;
-    let mut buf = [0u8; 20];
-    let text = signed(temp, &mut buf);
-    screen.text(40, 132, text, 5, TEXT());
-    screen.text(40 + Screen::text_width(text, 5) + 8, 140, if weather.fahrenheit { "F" } else { "C" }, 2, MUTED());
-    screen.text(40, 220, "Clear", 2, TEXT());
-    screen.text(40, 252, if weather.fahrenheit { "Feels like 75 F" } else { "Feels like 24 C" }, 1, MUTED());
-    screen.circle(392, 248, 34, 0x00f0_c050);
-    for (dx, dy) in [(0, -1), (1, 0), (0, 1), (-1, 0), (1, 1), (-1, 1), (1, -1), (-1, -1)] {
-        screen.line(392 + dx * 42, 248 + dy * 42, 392 + dx * 56, 248 + dy * 56, 2, 0x00f0_c050);
-    }
     button(screen, 304, 104, 152, 40, if weather.fahrenheit { "USE C" } else { "USE F" }, SURFACE_HI(), MUTED());
-    screen.text(24, 370, "5-DAY FORECAST", 1, MUTED());
-    let days = ["MON", "TUE", "WED", "THU", "FRI"];
-    let highs = [24i64, 26, 23, 21, 25];
-    let lows = [15i64, 17, 14, 12, 16];
-    for index in 0..5 {
-        let y = 398 + index as i64 * 64;
-        let active = index == weather.day;
-        screen.round_rect(20, y, width - 40, 54, 18, if active { SURFACE_HI() } else { SURFACE() });
-        screen.text(40, y + 18, days[index], 2, if active { TEXT() } else { MUTED() });
-        let bar = (highs[index] - 10) * 12;
-        screen.round_rect(160, y + 24, bar, 6, 3, RED());
-        screen.round_rect(160, y + 24, (lows[index] - 10) * 12, 6, 3, OUTLINE());
-        let mut hi = [0u8; 20];
-        let mut lo = [0u8; 20];
-        let high = signed(if weather.fahrenheit { highs[index] * 9 / 5 + 32 } else { highs[index] }, &mut hi);
-        let low = signed(if weather.fahrenheit { lows[index] * 9 / 5 + 32 } else { lows[index] }, &mut lo);
-        screen.text(width - 108, y + 18, high, 2, TEXT());
-        screen.text(width - 48, y + 18, low, 2, MUTED());
+    if weather.has_data {
+        let temp_x10 = if weather.fahrenheit {
+            weather.temp * 9 / 5 + 320
+        } else {
+            weather.temp
+        };
+        let mut buf = [0u8; 20];
+        let text = signed(round_tenths(temp_x10), &mut buf);
+        screen.text(40, 132, text, 5, TEXT());
+        screen.text(40 + Screen::text_width(text, 5) + 8, 140, if weather.fahrenheit { "F" } else { "C" }, 2, MUTED());
+        screen.text(40, 220, weather_text(weather.code), 2, TEXT());
+        let mut wind = [0u8; 20];
+        let value = format_tenths(weather.wind, &mut wind);
+        let mut line = [0u8; 48];
+        let mut used = 0;
+        push_str(&mut line, &mut used, b"Wind ");
+        push_str(&mut line, &mut used, value.as_bytes());
+        push_str(&mut line, &mut used, b" km/h");
+        screen.text(40, 252, slice_str(&line[..used]), 1, MUTED());
+        screen.circle(392, 248, 34, 0x00f0_c050);
+        for (dx, dy) in [(0, -1), (1, 0), (0, 1), (-1, 0), (1, 1), (-1, 1), (1, -1), (-1, -1)] {
+            screen.line(392 + dx * 42, 248 + dy * 42, 392 + dx * 56, 248 + dy * 56, 2, 0x00f0_c050);
+        }
+    } else if weather.has_fix {
+        screen.text(40, 150, "No weather data", 2, MUTED());
+        screen.text(40, 190, "Tap Refresh to try again", 1, MUTED());
+    } else {
+        screen.text(40, 150, "Location unavailable", 2, MUTED());
+        screen.text(40, 190, "Enable location to see weather", 1, MUTED());
+    }
+    button(screen, 20, 368, 140, 40, "Refresh", RED(), TEXT());
+    screen.text(24, 436, "CURRENT LOCATION", 1, MUTED());
+    if weather.has_fix {
+        let mut line = [0u8; 64];
+        let mut used = 0;
+        let mut coord = [0u8; 24];
+        push_str(&mut line, &mut used, b"Lat ");
+        push_str(&mut line, &mut used, format_coord(weather.lat, &mut coord).as_bytes());
+        push_str(&mut line, &mut used, b"  Lon ");
+        push_str(&mut line, &mut used, format_coord(weather.lon, &mut coord).as_bytes());
+        screen.text(24, 464, slice_str(&line[..used]), 1, TEXT());
+        let mut buf = [0u8; 20];
+        let acc = unsigned(weather.accuracy, &mut buf);
+        let mut line2 = [0u8; 48];
+        let mut used2 = 0;
+        push_str(&mut line2, &mut used2, b"Accuracy ");
+        push_str(&mut line2, &mut used2, acc.as_bytes());
+        push_str(&mut line2, &mut used2, b" m");
+        screen.text(24, 490, slice_str(&line2[..used2]), 1, MUTED());
+    } else {
+        screen.text(24, 464, "No fix", 1, MUTED());
     }
     let _ = clock;
-    screen.text(24, 730, "Updated from the RTC", 1, MUTED());
+    screen.text(24, 730, slice_str(&weather.status[..weather.status_len]), 1, MUTED());
 }
 
 fn draw_terminal(screen: &Screen, terminal: &Terminal, osk: bool) {
@@ -1306,15 +2107,43 @@ fn browser_tap(apps: &mut Apps, point: (i64, i64), osk: bool) {
 fn browser_go(apps: &mut Apps) {
     let browser = &mut apps.browser;
     browser.editing = false;
+    if browser.url_len == 0 {
+        browser.set_status("Enter a host");
+        return;
+    }
+    let mut full = [0u8; 160];
+    let mut used = 0;
+    let url = &browser.url[..browser.url_len];
+    if !starts_ci(url, b"http://") && !starts_ci(url, b"https://") {
+        push_str(&mut full, &mut used, b"https://");
+    }
+    push_str(&mut full, &mut used, url);
+    browser.set_status("Opening in browser...");
+    if k::open_url(slice_str(&full[..used])) {
+        browser.set_status("Opened in browser");
+        return;
+    }
+    browser_fetch_http(apps);
+}
+
+fn browser_fetch_http(apps: &mut Apps) {
+    let browser = &mut apps.browser;
     browser.scroll = 0;
     browser.line_count = 0;
     browser.title_len = 0;
+    browser.set_status("WebView unavailable - text fetch");
 
     let mut url_buf = [0u8; 128];
     let url_len = browser.url_len.min(128);
     url_buf[..url_len].copy_from_slice(&browser.url[..url_len]);
     let url = &url_buf[..url_len];
-    let url = if url.starts_with(b"http://") { &url[7..] } else { url };
+    let url = if starts_ci(url, b"http://") {
+        &url[7..]
+    } else if starts_ci(url, b"https://") {
+        &url[8..]
+    } else {
+        url
+    };
     let split = url.iter().position(|&b| b == b'/').unwrap_or(url.len());
     let host = &url[..split];
     let path = if split < url.len() { &url[split..] } else { &b"/"[..] };
@@ -1695,7 +2524,7 @@ fn draw_browser(screen: &Screen, browser: &Browser, osk: bool) {
     if browser.line_count == 0 {
         screen.text_centered(width / 2, 380, "Type a host and press GO", 2, MUTED());
         if !osk {
-            screen.text_centered(width / 2, 416, "e.g. example.com", 1, 0x0050_505a);
+            screen.text_centered(width / 2, 416, "GO opens the real browser", 1, 0x0050_505a);
         }
     }
 

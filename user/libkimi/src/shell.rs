@@ -673,9 +673,106 @@ pub fn exec(input: &[u8]) {
         let arg = core::str::from_utf8(trim(rest)).unwrap_or("");
         linux_guest(bin, arg);
     } else {
+        let mut bin_buffer = [0u8; 160];
+        if !command.contains(&b'/') {
+            if let Some(bin) = resolve_sysroot_bin(command, &mut bin_buffer) {
+                linux_guest(bin, core::str::from_utf8(argument).unwrap_or(""));
+                return;
+            }
+            if disk_bin_app(command, argument) {
+                return;
+            }
+        }
         k::print("unknown command: ");
         k::print_bytes(command);
-        k::print("\n");
+        k::print(" (try `apkg install ");
+        k::print_bytes(command);
+        k::print("` first)\n");
+    }
+}
+
+/// Resolve a bare command name against the Alpine sysroot PATH, returning the
+/// sysroot-relative binary path (e.g. "usr/bin/curl") for `linux_run`.
+fn resolve_sysroot_bin<'a>(command: &[u8], buffer: &'a mut [u8; 160]) -> Option<&'a str> {
+    let mut found = None;
+    for dir in [&b"usr/bin/"[..], b"bin/", b"usr/sbin/", b"sbin/"] {
+        let length = dir.len() + command.len();
+        if length > buffer.len() {
+            continue;
+        }
+        buffer[..dir.len()].copy_from_slice(dir);
+        buffer[dir.len()..length].copy_from_slice(command);
+        let Ok(rel) = core::str::from_utf8(&buffer[..length]) else {
+            continue;
+        };
+        let mut full = [0u8; 180];
+        let prefix = b"/disk/alpine/root/";
+        let total = prefix.len() + length;
+        if total > full.len() {
+            continue;
+        }
+        full[..prefix.len()].copy_from_slice(prefix);
+        full[prefix.len()..total].copy_from_slice(rel.as_bytes());
+        let Ok(path) = core::str::from_utf8(&full[..total]) else {
+            continue;
+        };
+        if let Some((kind, _)) = k::stat(path) {
+            if kind != 2 {
+                found = Some(length);
+                break;
+            }
+        }
+    }
+    core::str::from_utf8(&buffer[..found?]).ok()
+}
+
+/// kpkg-installed static apps in /disk/bin: spawn on bare metal; the Android
+/// libOS host has no spawn, so point the user at `kpkg run`.
+fn disk_bin_app(command: &[u8], argument: &[u8]) -> bool {
+    let mut path = [0u8; 96];
+    let prefix = b"/disk/bin/";
+    let length = prefix.len() + command.len();
+    if length > path.len() {
+        return false;
+    }
+    path[..prefix.len()].copy_from_slice(prefix);
+    path[prefix.len()..length].copy_from_slice(command);
+    let Ok(path_str) = core::str::from_utf8(&path[..length]) else {
+        return false;
+    };
+    if k::stat(path_str).is_none() {
+        return false;
+    }
+    let mut args: [&str; 16] = [""; 16];
+    let mut argc = 0usize;
+    let mut rem = argument;
+    while !rem.is_empty() && argc < 16 {
+        let (word, next) = split_word(rem);
+        if let Ok(s) = core::str::from_utf8(word) {
+            if !s.is_empty() {
+                args[argc] = s;
+                argc += 1;
+            }
+        }
+        rem = trim(next);
+    }
+    let spawned = if argc > 0 {
+        k::spawn_args(path_str, &args[..argc])
+    } else {
+        k::spawn(path_str)
+    };
+    match spawned {
+        Some(pid) => {
+            report_status(pid, k::wait(pid));
+            true
+        }
+        None => {
+            k::print_bytes(command);
+            k::print(": static app — run it with `kpkg run ");
+            k::print_bytes(command);
+            k::print("` (no spawn on the Android libOS host)\n");
+            true
+        }
     }
 }
 

@@ -69,6 +69,11 @@ pub const SYS_INSTR_MAP: u64 = 39;
 pub const SYS_SYMLINK: u64 = 40;
 pub const SYS_LINUX_RUN: u64 = 41;
 pub const SYS_FETCH_URL: u64 = 42;
+pub const SYS_LOCAL_TIME: u64 = 43;
+pub const SYS_LOCATION: u64 = 44;
+pub const SYS_OPEN_URL: u64 = 45;
+pub const SYS_AUDIO: u64 = 46;
+pub const SYS_IMPORT_FILE: u64 = 47;
 
 /// Latency-mailbox slot indices (shared with the kernel `instr` module and the
 /// Android shared-memory reader).
@@ -603,6 +608,45 @@ pub fn fetch_url(url: &str, dest: &str) -> Option<u64> {
         dest.len() as u64,
     );
     if r == ERROR { None } else { Some(r) }
+}
+
+/// Local device time: `[epoch, year, month, day, hour, minute, second,
+/// weekday (0=Sunday), tz_offset_minutes]`. Host-only (None on bare metal).
+pub fn local_time() -> Option<[u64; 9]> {
+    let mut f = [0u64; 9];
+    if syscall3(SYS_LOCAL_TIME, f.as_mut_ptr() as u64, 0, 0) == ERROR { None } else { Some(f) }
+}
+
+/// Device location: `[lat_f64_bits, lon_f64_bits, accuracy_meters, has_fix]`.
+/// Decode lat/lon with `f64::from_bits`. Host-only.
+pub fn location() -> Option<[u64; 4]> {
+    let mut f = [0u64; 4];
+    if syscall3(SYS_LOCATION, f.as_mut_ptr() as u64, 0, 0) == ERROR { None } else { Some(f) }
+}
+
+/// Open `url` in the platform WebView (real browser / search / map). Host-only.
+pub fn open_url(url: &str) -> bool {
+    syscall3(SYS_OPEN_URL, url.as_ptr() as u64, url.len() as u64, 0) == 0
+}
+
+/// Play the audio file at `path` (platform MediaPlayer). Host-only.
+pub fn audio_play(path: &str) -> bool {
+    syscall4(SYS_AUDIO, path.as_ptr() as u64, path.len() as u64, 0, 0) == 0
+}
+pub fn audio_pause() -> bool { syscall3(SYS_AUDIO, 0, 0, 1) == 0 }
+pub fn audio_stop() -> bool { syscall3(SYS_AUDIO, 0, 0, 2) == 0 }
+pub fn audio_resume() -> bool { syscall3(SYS_AUDIO, 0, 0, 3) == 0 }
+/// Audio status: `[position_ms, duration_ms, is_playing]`. Host-only.
+pub fn audio_query() -> Option<[u64; 3]> {
+    let mut f = [0u64; 3];
+    if syscall4(SYS_AUDIO, f.as_mut_ptr() as u64, 0, 4, 0) == ERROR { None } else { Some(f) }
+}
+
+/// Launch the platform file picker to import a file into the `/disk/...` dir
+/// `dir`. Returns true if the picker was launched (the copy completes async;
+/// refresh the listing afterwards). Host-only.
+pub fn import_file(dir: &str) -> bool {
+    syscall3(SYS_IMPORT_FILE, dir.as_ptr() as u64, dir.len() as u64, 0) == 0
 }
 
 /// File metadata: `(kind, size)` where kind 0 is RamFS and 1 is a disk file.

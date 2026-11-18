@@ -45,6 +45,79 @@ JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *reserved) {
     (void)reserved; g_vm = vm; return JNI_VERSION_1_6;
 }
 
+// KimiBridge jclass + method IDs cached in nativeInit, which runs on a Java
+// thread where the APP classloader is current. FindClass from the GUI pthread
+// (attached via AttachCurrentThread) resolves against the SYSTEM classloader
+// and cannot see app classes, so every GUI-thread JNI call must use these.
+static jclass g_bridge;
+static jmethodID g_fetch_mid, g_local_time_mid, g_location_mid, g_open_url_mid,
+                 g_audio_mid, g_audio_query_mid, g_import_mid;
+
+static JNIEnv *gui_env(int *attached) {
+    *attached = 0;
+    if (!g_vm) return NULL;
+    JNIEnv *env = NULL;
+    if ((*g_vm)->GetEnv(g_vm, (void **)&env, JNI_VERSION_1_6) == JNI_OK) return env;
+    if ((*g_vm)->AttachCurrentThread(g_vm, &env, NULL) != JNI_OK) return NULL;
+    *attached = 1;
+    return env;
+}
+static void gui_done(JNIEnv *env, int attached) {
+    if (env && (*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+    if (attached) (*g_vm)->DetachCurrentThread(g_vm);
+}
+// Call a static KimiBridge method returning long[]; copy n elements to out.
+static uint64_t call_longs(jmethodID mid, uint64_t *out, int n) {
+    if (!g_bridge || !mid || !out) return ERROR;
+    int attached = 0; JNIEnv *env = gui_env(&attached);
+    if (!env) return ERROR;
+    uint64_t r = ERROR;
+    jlongArray arr = (jlongArray)(*env)->CallStaticObjectMethod(env, g_bridge, mid);
+    if (!(*env)->ExceptionCheck(env) && arr) {
+        if ((*env)->GetArrayLength(env, arr) >= n) {
+            jlong *e = (*env)->GetLongArrayElements(env, arr, NULL);
+            if (e) {
+                for (int i = 0; i < n; i++) out[i] = (uint64_t)e[i];
+                (*env)->ReleaseLongArrayElements(env, arr, e, JNI_ABORT);
+                r = 0;
+            }
+        }
+        (*env)->DeleteLocalRef(env, arr);
+    }
+    gui_done(env, attached);
+    return r;
+}
+// Call a static KimiBridge method (String) -> long (0 ok, -1 = ERROR).
+static uint64_t call_str_long(jmethodID mid, const char *s) {
+    if (!g_bridge || !mid) return ERROR;
+    int attached = 0; JNIEnv *env = gui_env(&attached);
+    if (!env) return ERROR;
+    uint64_t r = ERROR;
+    jstring js = s ? (*env)->NewStringUTF(env, s) : NULL;
+    if (!(*env)->ExceptionCheck(env)) {
+        jlong v = (*env)->CallStaticLongMethod(env, g_bridge, mid, js);
+        if (!(*env)->ExceptionCheck(env)) r = (uint64_t)v;
+    }
+    if (js) (*env)->DeleteLocalRef(env, js);
+    gui_done(env, attached);
+    return r;
+}
+// Call nativeAudio(String path, int cmd) -> long (0 ok, -1 = ERROR).
+static uint64_t audio_cmd(const char *path, int cmd) {
+    if (!g_bridge || !g_audio_mid) return ERROR;
+    int attached = 0; JNIEnv *env = gui_env(&attached);
+    if (!env) return ERROR;
+    uint64_t r = ERROR;
+    jstring jp = path ? (*env)->NewStringUTF(env, path) : NULL;
+    if (!(*env)->ExceptionCheck(env)) {
+        jlong v = (*env)->CallStaticLongMethod(env, g_bridge, g_audio_mid, jp, (jint)cmd);
+        if (!(*env)->ExceptionCheck(env)) r = (uint64_t)v;
+    }
+    if (jp) (*env)->DeleteLocalRef(env, jp);
+    gui_done(env, attached);
+    return r;
+}
+
 // ===================== time =====================
 static uint64_t now_ns(void) {
     struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t);
@@ -233,32 +306,26 @@ static uint64_t fs_symlink(const char *target, const char *path) { if (strncmp(p
 
 // SYS_FETCH_URL: GET url (HTTP/HTTPS) via Java HttpURLConnection, write body to
 // the sandbox file dest. Lets kpkg reach HTTPS repos (GitHub raw) with no TLS
-// stack in the userland. Runs on the GUI thread (attached to the JVM here).
+// stack in the userland. Runs on the GUI thread: uses the jclass/methodID
+// cached in nativeInit (FindClass here would hit the system classloader).
 static uint64_t fs_fetch_url(const char *url, const char *dest) {
     if (strncmp(dest, "/disk/", 6)) return ERROR;
     const char *rel = dest + 6;
     if (!safe_rel(rel)) return ERROR;
     char p[512]; disk_path(rel, p, sizeof p);
-    if (!g_vm) return ERROR;
-    JNIEnv *env = NULL;
-    if ((*g_vm)->GetEnv(g_vm, (void **)&env, JNI_VERSION_1_6) != JNI_OK) {
-        if ((*g_vm)->AttachCurrentThread(g_vm, &env, NULL) != JNI_OK) return ERROR;
-    }
+    if (!g_bridge || !g_fetch_mid) return ERROR;
+    int attached = 0; JNIEnv *env = gui_env(&attached);
+    if (!env) return ERROR;
     uint64_t result = ERROR;
-    jclass cls = (*env)->FindClass(env, "com/kimios/libos/KimiBridge");
-    if (cls) {
-        jmethodID mid = (*env)->GetStaticMethodID(env, cls, "nativeFetchUrl", "(Ljava/lang/String;Ljava/lang/String;)J");
-        if (mid) {
-            jstring ju = (*env)->NewStringUTF(env, url);
-            jstring jd = (*env)->NewStringUTF(env, p);
-            jlong n = (*env)->CallStaticLongMethod(env, cls, mid, ju, jd);
-            (*env)->DeleteLocalRef(env, ju);
-            (*env)->DeleteLocalRef(env, jd);
-            if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
-            else if (n >= 0) result = (uint64_t)n;
-        }
+    jstring ju = (*env)->NewStringUTF(env, url);
+    jstring jd = (*env)->NewStringUTF(env, p);
+    if (!(*env)->ExceptionCheck(env)) {
+        jlong n = (*env)->CallStaticLongMethod(env, g_bridge, g_fetch_mid, ju, jd);
+        if (!(*env)->ExceptionCheck(env) && n >= 0) result = (uint64_t)n;
     }
-    if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+    if (ju) (*env)->DeleteLocalRef(env, ju);
+    if (jd) (*env)->DeleteLocalRef(env, jd);
+    gui_done(env, attached);
     return result;
 }
 
@@ -303,7 +370,12 @@ static uint64_t fs_linux_run(uint64_t a0) {
         if (arg[0]) {
             if (is_node) { argv[n++] = "-e"; argv[n++] = arg; }
             else if (is_py || is_sh) { argv[n++] = "-c"; argv[n++] = arg; }
-            else { argv[n++] = arg; }
+            else {
+                strncpy(tokbuf, arg, sizeof tokbuf - 1); tokbuf[sizeof tokbuf - 1] = 0;
+                char *save = NULL;
+                for (char *t = strtok_r(tokbuf, " \t", &save); t && n < 60; t = strtok_r(NULL, " \t", &save))
+                    if (*t) argv[n++] = t;
+            }
         }
     }
     argv[n] = NULL;
@@ -416,6 +488,30 @@ uint64_t kimi_host_syscall(uint64_t n, uint64_t a0, uint64_t a1, uint64_t a2, ui
     case 40: { char target[256]; str_arg(a0, a1, target, sizeof target); str_arg(a2, a3, path, sizeof path); return fs_symlink(target, path); }
     case 41: return fs_linux_run(a0);
     case 42: { char url[512]; str_arg(a0, a1, url, sizeof url); str_arg(a2, a3, path, sizeof path); return fs_fetch_url(url, path); }
+    case 43: return call_longs(g_local_time_mid, (uint64_t *)a0, 9); // SYS_LOCAL_TIME
+    case 44: return call_longs(g_location_mid, (uint64_t *)a0, 4);   // SYS_LOCATION
+    case 45: { char url[512]; str_arg(a0, a1, url, sizeof url); return call_str_long(g_open_url_mid, url); } // SYS_OPEN_URL
+    case 46: { // SYS_AUDIO: a2 = cmd (0 play, 1 pause, 2 stop, 3 resume, 4 query)
+        if (a2 == 4) return call_longs(g_audio_query_mid, (uint64_t *)a0, 3);
+        if (a2 == 0) {
+            str_arg(a0, a1, path, sizeof path);
+            if (strncmp(path, "/disk/", 6) || !safe_rel(path + 6)) return ERROR;
+            char abs[512]; disk_path(path + 6, abs, sizeof abs);
+            return audio_cmd(abs, 0);
+        }
+        if (a2 <= 3) return audio_cmd(NULL, (int)a2);
+        return ERROR;
+    }
+    case 47: { // SYS_IMPORT_FILE: launch SAF picker into /disk dir (async copy)
+        str_arg(a0, a1, path, sizeof path);
+        const char *rel;
+        if (!strcmp(path, "/disk")) rel = "";
+        else if (!strncmp(path, "/disk/", 6)) rel = path + 6;
+        else return ERROR;
+        if (!safe_rel(rel)) return ERROR;
+        char abs[512]; disk_path(rel, abs, sizeof abs);
+        return call_str_long(g_import_mid, abs);
+    }
     case 23: { if (a1 < 1) return ERROR; uint64_t *o = (uint64_t *)a0; o[0] = 1; o[1] = 0; o[2] = 2; o[3] = 0; return 1; }
     case 12: return 2048;
     case 22: return 0;
@@ -446,6 +542,22 @@ Java_com_kimios_libos_KimiBridge_nativeInit(JNIEnv *env, jclass cls, jstring fil
     mkdir_p(diskRoot);
     if (!front) { front = calloc(FB_W * FB_H, 4); back = calloc(FB_W * FB_H, 4); }
     start_ns = now_ns();
+    // Runs on a Java thread (app classloader): cache the bridge class + method
+    // IDs once so GUI-pthread syscalls never need FindClass.
+    if (!g_bridge) {
+        jclass local = (*env)->FindClass(env, "com/kimios/libos/KimiBridge");
+        if (!local) { if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env); local = cls; }
+        g_bridge = (jclass)(*env)->NewGlobalRef(env, local);
+        g_fetch_mid       = (*env)->GetStaticMethodID(env, g_bridge, "nativeFetchUrl",  "(Ljava/lang/String;Ljava/lang/String;)J");
+        g_local_time_mid  = (*env)->GetStaticMethodID(env, g_bridge, "nativeLocalTime", "()[J");
+        g_location_mid    = (*env)->GetStaticMethodID(env, g_bridge, "nativeLocation",   "()[J");
+        g_open_url_mid    = (*env)->GetStaticMethodID(env, g_bridge, "nativeOpenUrl",    "(Ljava/lang/String;)J");
+        g_audio_mid       = (*env)->GetStaticMethodID(env, g_bridge, "nativeAudio",      "(Ljava/lang/String;I)J");
+        g_audio_query_mid = (*env)->GetStaticMethodID(env, g_bridge, "nativeAudioQuery", "()[J");
+        g_import_mid      = (*env)->GetStaticMethodID(env, g_bridge, "nativeImportFile", "(Ljava/lang/String;)J");
+        if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+        LOG("bridge class + method IDs cached");
+    }
     LOG("native init, disk=%s", diskRoot);
 }
 

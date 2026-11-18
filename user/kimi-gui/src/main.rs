@@ -226,6 +226,9 @@ struct Ui {
     shade: bool,
     paint_bg: bool,
     home_page: usize,
+    searching: bool,
+    search_query: [u8; 128],
+    search_len: usize,
 }
 
 impl Ui {
@@ -243,6 +246,9 @@ impl Ui {
             shade: false,
             paint_bg: true,
             home_page: 0,
+            searching: false,
+            search_query: [0u8; 128],
+            search_len: 0,
         }
     }
 }
@@ -275,6 +281,14 @@ fn gui_run() -> ! {
             if second != last_second {
                 last_second = second;
                 dirty = true;
+            }
+        } else if ui.scene == Scene::App(AppKind::Music) {
+            if second != last_second {
+                last_second = second;
+                dirty = true;
+            }
+            if minute != last_minute {
+                last_minute = minute;
             }
         } else if minute != last_minute {
             last_minute = minute;
@@ -396,6 +410,16 @@ fn handle(screen: &Screen, ui: &mut Ui, event: k::InputEvent, clock: [u64; 7]) -
                 }
                 return false;
             }
+            if ui.scene == Scene::Home && ui.searching {
+                if search_input(ui, code, ui.shift) {
+                    if ui.shift && code != 14 {
+                        ui.shift = false;
+                    }
+                    render(screen, ui, clock);
+                    return true;
+                }
+                return false;
+            }
             if let Scene::App(app) = ui.scene {
                 if apps::key(&mut ui.apps, app, code, ui.shift) {
                     render(screen, ui, clock);
@@ -418,7 +442,14 @@ fn handle(screen: &Screen, ui: &mut Ui, event: k::InputEvent, clock: [u64; 7]) -
                             tapped(screen, ui, ui.touch, clock);
                         } else if ui.scene == Scene::Home && dx.abs() > 60 && dx.abs() > dy.abs() * 2 {
                             let next = if dx < 0 { 1 } else { 0 };
-                            if ui.home_page != next {
+                            if ui.searching {
+                                ui.searching = false;
+                                ui.osk = false;
+                                ui.shift = false;
+                                ui.symbols = false;
+                                ui.paint_bg = true;
+                                render(screen, ui, clock);
+                            } else if ui.home_page != next {
                                 ui.home_page = next;
                                 ui.paint_bg = true;
                                 render(screen, ui, clock);
@@ -466,6 +497,33 @@ fn tapped(screen: &Screen, ui: &mut Ui, point: (i64, i64), clock: [u64; 7]) {
     match ui.scene {
         Scene::Lock => unlock(screen, ui, clock),
         Scene::Home => {
+            if ui.searching && ui.osk {
+                if let Some(key) = keyboard::hit(app_point, ui.symbols) {
+                    osk_key_home(screen, ui, key, clock);
+                    return;
+                }
+                if app_point.1 >= keyboard::TOP && app_point.1 <= 770 {
+                    return;
+                }
+            }
+            if search_pill_hit(screen, point) {
+                if ui.searching && search_go_hit(screen, point) {
+                    search_go(ui);
+                } else {
+                    ui.searching = true;
+                    ui.osk = true;
+                }
+                render(screen, ui, clock);
+                return;
+            }
+            if ui.searching {
+                ui.searching = false;
+                ui.osk = false;
+                ui.shift = false;
+                ui.symbols = false;
+                render(screen, ui, clock);
+                return;
+            }
             if let Some(page) = home_page_hit(screen, point) {
                 if ui.home_page != page {
                     ui.home_page = page;
@@ -493,7 +551,12 @@ fn tapped(screen: &Screen, ui: &mut Ui, point: (i64, i64), clock: [u64; 7]) {
                 }
             }
             if back_hit(screen, app_point) {
-                close_app(screen, ui, clock);
+                if apps::nav_back(&mut ui.apps, app) {
+                    ui.osk = apps::text_focused(&ui.apps, app);
+                    render(screen, ui, clock);
+                } else {
+                    close_app(screen, ui, clock);
+                }
                 return;
             }
             if apps::back(&mut ui.apps, app) {
@@ -566,6 +629,114 @@ fn osk_key(screen: &Screen, ui: &mut Ui, app: AppKind, key: keyboard::Key, clock
     render(screen, ui, clock);
 }
 
+fn osk_key_home(screen: &Screen, ui: &mut Ui, key: keyboard::Key, clock: [u64; 7]) {
+    match key {
+        keyboard::Key::Hide => {
+            ui.osk = false;
+            ui.shift = false;
+            ui.symbols = false;
+        }
+        keyboard::Key::Shift => {
+            ui.shift = !ui.shift;
+        }
+        keyboard::Key::Symbols => {
+            ui.symbols = true;
+            ui.shift = false;
+        }
+        keyboard::Key::Letters => {
+            ui.symbols = false;
+            ui.shift = false;
+        }
+        keyboard::Key::Sym(code, sh) => {
+            search_input(ui, code, sh);
+        }
+        keyboard::Key::Char(code) => {
+            search_input(ui, code, ui.shift);
+            if ui.shift && code != 14 {
+                ui.shift = false;
+            }
+        }
+    }
+    render(screen, ui, clock);
+}
+
+fn search_input(ui: &mut Ui, code: u16, shift: bool) -> bool {
+    match apps::key_char(code, shift) {
+        Some((0, true)) => {
+            ui.search_len = ui.search_len.saturating_sub(1);
+            true
+        }
+        Some((b'\n', _)) => {
+            search_go(ui);
+            true
+        }
+        Some((byte, _)) => {
+            if ui.search_len < ui.search_query.len() {
+                ui.search_query[ui.search_len] = byte;
+                ui.search_len += 1;
+            }
+            true
+        }
+        None => false,
+    }
+}
+
+fn search_go(ui: &mut Ui) {
+    if ui.search_len == 0 {
+        return;
+    }
+    let mut url = [0u8; 448];
+    let prefix = b"https://duckduckgo.com/?q=";
+    url[..prefix.len()].copy_from_slice(prefix);
+    let mut used = prefix.len();
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    for &byte in &ui.search_query[..ui.search_len] {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
+            if used + 1 > url.len() {
+                break;
+            }
+            url[used] = byte;
+            used += 1;
+        } else if byte == b' ' {
+            if used + 1 > url.len() {
+                break;
+            }
+            url[used] = b'+';
+            used += 1;
+        } else {
+            if used + 3 > url.len() {
+                break;
+            }
+            url[used] = b'%';
+            url[used + 1] = HEX[(byte >> 4) as usize];
+            url[used + 2] = HEX[(byte & 15) as usize];
+            used += 3;
+        }
+    }
+    let _ = k::open_url(str_of(&url[..used]));
+    ui.searching = false;
+    ui.osk = false;
+    ui.shift = false;
+    ui.symbols = false;
+}
+
+fn search_pill_hit(screen: &Screen, point: (i64, i64)) -> bool {
+    if screen.height() < 720 {
+        return false;
+    }
+    point.0 >= 24
+        && point.0 <= screen.width() - 24
+        && point.1 >= screen.sy(142)
+        && point.1 <= screen.sy(196)
+}
+
+fn search_go_hit(screen: &Screen, point: (i64, i64)) -> bool {
+    point.0 >= screen.width() - 104
+        && point.0 <= screen.width() - 28
+        && point.1 >= screen.sy(148)
+        && point.1 <= screen.sy(190)
+}
+
 fn shade_tap(screen: &Screen, ui: &mut Ui, point: (i64, i64), clock: [u64; 7]) {
     let height = 800;
     if point.1 > 610 {
@@ -632,8 +803,8 @@ fn open_app(screen: &Screen, ui: &mut Ui, app: AppKind, clock: [u64; 7]) {
     let width = screen.width();
     apps::open(&mut ui.apps, app);
     ui.osk = match app {
-        AppKind::Notes | AppKind::Terminal => true,
-        AppKind::Browser => apps::text_focused(&ui.apps, app),
+        AppKind::Terminal => true,
+        AppKind::Notes | AppKind::Browser => apps::text_focused(&ui.apps, app),
         _ => false,
     };
     ui.shift = false;
@@ -710,6 +881,14 @@ fn draw_scene(screen: &Screen, ui: &Ui, clock: [u64; 7], paint_bg: bool) {
         Scene::Home => {
             let pressed = ui.press.and_then(|point| home_hit(screen, point, ui.home_page));
             draw_home(screen, clock, ui, pressed, 0, paint_bg);
+            if ui.searching && ui.osk {
+                screen.set_app_space(true);
+                let pressed = ui
+                    .press
+                    .map(|p| (p.0, p.1 * 800 / screen.logical_height()));
+                keyboard::draw(screen, ui.shift, ui.symbols, pressed);
+                screen.set_app_space(false);
+            }
         }
         Scene::App(app) => {
             draw_app(screen, ui, app, clock, 0, paint_bg);
@@ -861,15 +1040,40 @@ fn draw_home(
     let mut date = [0u8; 16];
     format_date(clock, &mut date);
     screen.text(48, screen.sy(94) + y_offset, str_of(&date), 1, MUTED());
-    screen.text(width - 48 - Screen::text_width("22", 3), screen.sy(60) + y_offset, "22", 3, RED());
-    screen.text(width - 76, screen.sy(96) + y_offset, "CLEAR", 1, MUTED());
+    let mut temp_buf = [0u8; 20];
+    let (temp_text, glance_cond) = match apps::home_weather(&ui.apps.weather) {
+        Some((temp, cond)) => (format_i64(temp, &mut temp_buf), cond),
+        None => ("--", "NO DATA"),
+    };
+    let cond_len = glance_cond.len().min(12);
+    screen.text(width - 48 - Screen::text_width(temp_text, 3), screen.sy(60) + y_offset, temp_text, 3, RED());
+    screen.text(width - 76, screen.sy(96) + y_offset, &glance_cond[..cond_len], 1, MUTED());
 
     if !compact {
         // Search pill.
-        screen.round_rect(24, screen.sy(142) + y_offset, width - 48, screen.sy(54), 27, SURFACE_HI());
+        let pill_bg = if ui.searching { SURFACE_MAX() } else { SURFACE_HI() };
+        screen.round_rect(24, screen.sy(142) + y_offset, width - 48, screen.sy(54), 27, pill_bg);
         screen.ring(54, screen.sy(169) + y_offset, 8, 2, MUTED());
         screen.line(60, screen.sy(175) + y_offset, 66, screen.sy(181) + y_offset, 2, MUTED());
-        screen.text(80, screen.sy(162) + y_offset, "Search", 2, MUTED());
+        if ui.searching {
+            if ui.search_len == 0 {
+                screen.text(80, screen.sy(162) + y_offset, "Search the web", 2, MUTED());
+            } else {
+                let start = ui.search_len.saturating_sub(24);
+                let shown = ui.search_len - start;
+                screen.text(
+                    80,
+                    screen.sy(162) + y_offset,
+                    str_of(&ui.search_query[start..start + shown]),
+                    2,
+                    TEXT(),
+                );
+            }
+            screen.round_rect(width - 100, screen.sy(148) + y_offset, 72, screen.sy(42), 21, RED());
+            screen.text_centered(width - 64, screen.sy(160) + y_offset, "GO", 2, TEXT());
+        } else {
+            screen.text(80, screen.sy(162) + y_offset, "Search", 2, MUTED());
+        }
 
         // Music widget.
         let music_y = screen.sy(212) + y_offset;
@@ -1608,7 +1812,11 @@ impl AppKind {
 }
 
 fn clock() -> [u64; 7] {
-    k::rtc().unwrap_or([0, 2026, 1, 1, 0, 0, 0])
+    if let Some(local) = k::local_time() {
+        [local[0], local[1], local[2], local[3], local[4], local[5], local[6]]
+    } else {
+        k::rtc().unwrap_or([0, 2026, 1, 1, 0, 0, 0])
+    }
 }
 
 fn scale(value: u32, dimension: i64) -> i64 {

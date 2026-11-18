@@ -42,8 +42,33 @@ public class MainActivity extends Activity
         view.getHolder().addCallback(this);
         view.setOnTouchListener(this);
 
+        KimiBridge.setContext(getApplicationContext());
+        KimiBridge.setActivity(this);
+        requestLocationPermissions();
         KimiBridge.nativeInit(getFilesDir().getAbsolutePath());
         maybeRunGuest(getIntent());
+    }
+
+    private void requestLocationPermissions() {
+        if (checkSelfPermission(android.Manifest.permission.ACCESS_FINE_LOCATION)
+                != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(new String[]{
+                    android.Manifest.permission.ACCESS_FINE_LOCATION,
+                    android.Manifest.permission.ACCESS_COARSE_LOCATION}, 1);
+        }
+    }
+
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, android.content.Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode == KimiBridge.REQ_IMPORT) KimiBridge.handleImportResult(resultCode, data);
+    }
+
+    @Override
+    protected void onDestroy() {
+        KimiBridge.nativeAudio(null, 2);
+        KimiBridge.clearActivity(this);
+        super.onDestroy();
     }
 
     @Override
