@@ -654,9 +654,41 @@ pub fn exec(input: &[u8]) {
     } else if command == &b"exit"[..] {
         k::print("bye\n");
         k::exit(0);
+    } else if command == &b"node"[..] || command == &b"nodejs"[..] {
+        let arg = core::str::from_utf8(trim(argument)).unwrap_or("");
+        linux_guest("usr/bin/node", arg);
+    } else if command == &b"python"[..] || command == &b"python3"[..] {
+        let arg = core::str::from_utf8(trim(argument)).unwrap_or("");
+        linux_guest("usr/bin/python3", arg);
+    } else if command == &b"alpine"[..] {
+        let (bin_word, rest) = split_word(argument);
+        let bin = core::str::from_utf8(bin_word).unwrap_or("");
+        if bin.is_empty() {
+            k::print("usage: alpine <bin> [arg]   e.g. alpine usr/bin/node 'console.log(1)'\n");
+            return;
+        }
+        let arg = core::str::from_utf8(trim(rest)).unwrap_or("");
+        linux_guest(bin, arg);
     } else {
         k::print("unknown command: ");
         k::print_bytes(command);
         k::print("\n");
+    }
+}
+
+/// Run an Alpine sysroot binary natively (Android libOS) and print its output.
+fn linux_guest(bin: &str, arg: &str) {
+    let mut out = [0u8; 4096];
+    match k::linux_run(bin, arg, &mut out) {
+        Some((code, n)) => {
+            k::print_bytes(&out[..n]);
+            if n > 0 && out[n - 1] != b'\n' {
+                k::print("\n");
+            }
+            k::print("[exit ");
+            k::print_u64(code);
+            k::print("]\n");
+        }
+        None => k::print("linux guests need the Android libOS host (apkg install first)\n"),
     }
 }

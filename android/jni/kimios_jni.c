@@ -225,6 +225,51 @@ static uint64_t fs_unlink(const char *path) { if (strncmp(path, "/disk/", 6)) re
 static uint64_t fs_mkdir(const char *path) { const char *rel; if (!strcmp(path, "/disk")) rel = ""; else if (!strncmp(path, "/disk/", 6)) rel = path + 6; else return ERROR; char p[512]; disk_path(rel, p, sizeof p); if (is_dir(p)) return 0; return mkdir(p, 0755) == 0 ? 0 : ERROR; }
 static uint64_t fs_rmdir(const char *path) { if (strncmp(path, "/disk/", 6)) return ERROR; char p[512]; disk_path(path + 6, p, sizeof p); if (!is_dir(p)) return ERROR; return rmdir(p) == 0 ? 0 : ERROR; }
 static uint64_t fs_symlink(const char *target, const char *path) { if (strncmp(path, "/disk/", 6)) return ERROR; const char *rel = path + 6; if (!safe_rel(rel)) return ERROR; char p[512]; disk_path(rel, p, sizeof p); unlink(p); return symlink(target, p) == 0 ? 0 : ERROR; }
+
+// SYS_LINUX_RUN: run an Alpine sysroot binary natively (kimi_elf.c), capture stdout.
+static uint64_t str_arg(uint64_t p, uint64_t len, char *out, size_t cap);
+struct linux_run_req { uint64_t bin_ptr, bin_len, arg_ptr, arg_len, out_ptr, out_cap, out_len, code; };
+extern int kimi_guest_capture(const char *, const char *, char *const *, char *const *, char *, size_t, size_t *, int *);
+static uint64_t fs_linux_run(uint64_t a0) {
+    struct linux_run_req *rq = (struct linux_run_req *)a0;
+    char bin[160], arg[4096];
+    str_arg(rq->bin_ptr, rq->bin_len, bin, sizeof bin);
+    str_arg(rq->arg_ptr, rq->arg_len, arg, sizeof arg);
+    char sysroot[400], exe[600];
+    snprintf(sysroot, sizeof sysroot, "%s/alpine/root", diskRoot);
+    if (strchr(bin, '/')) snprintf(exe, sizeof exe, "%s/%s", sysroot, bin);
+    else snprintf(exe, sizeof exe, "%s/usr/bin/%s", sysroot, bin);
+    const char *base = strrchr(bin, '/'); base = base ? base + 1 : bin;
+    char lib[700], ppath[900], phome[500], path[700], home[400], tmp[400], hd[400], td[400];
+    snprintf(lib, sizeof lib, "LD_LIBRARY_PATH=%s/usr/lib:%s/lib", sysroot, sysroot);
+    snprintf(path, sizeof path, "PATH=%s/usr/bin:%s/bin", sysroot, sysroot);
+    snprintf(home, sizeof home, "HOME=%s/home", diskRoot);
+    snprintf(tmp, sizeof tmp, "TMPDIR=%s/tmp", diskRoot);
+    snprintf(hd, sizeof hd, "%s/home", diskRoot); mkdir(hd, 0755);
+    snprintf(td, sizeof td, "%s/tmp", diskRoot); mkdir(td, 0755);
+    int is_node = strstr(base, "node") != NULL;
+    int is_py = strstr(base, "python") != NULL;
+    int is_sh = strcmp(base, "sh") == 0 || strcmp(base, "busybox") == 0;
+    char *argv[8]; int n = 0; argv[n++] = exe;
+    if (arg[0]) {
+        if (is_node) { argv[n++] = "-e"; argv[n++] = arg; }
+        else if (is_py || is_sh) { argv[n++] = "-c"; argv[n++] = arg; }
+        else { argv[n++] = arg; }
+    }
+    argv[n] = NULL;
+    char *envp[12]; int e = 0;
+    envp[e++] = lib; envp[e++] = path; envp[e++] = home; envp[e++] = tmp; envp[e++] = "LANG=C.UTF-8";
+    if (is_py) {
+        snprintf(phome, sizeof phome, "PYTHONHOME=%s/usr", sysroot);
+        snprintf(ppath, sizeof ppath, "PYTHONPATH=%s/usr/lib/python3.14:%s/usr/lib/python3.14/lib-dynload", sysroot, sysroot);
+        envp[e++] = phome; envp[e++] = ppath; envp[e++] = "PYTHONDONTWRITEBYTECODE=1";
+    }
+    envp[e] = NULL;
+    size_t olen = 0; int code = 0;
+    kimi_guest_capture(exe, sysroot, argv, envp, (char *)rq->out_ptr, (size_t)rq->out_cap, &olen, &code);
+    rq->out_len = olen; rq->code = (uint64_t)code;
+    return (uint64_t)code;
+}
 static uint64_t fs_rename(const char *o, const char *n) { if (strncmp(o, "/disk/", 6) || strncmp(n, "/disk/", 6)) return ERROR; char op[512], np[512]; disk_path(o + 6, op, sizeof op); disk_path(n + 6, np, sizeof np); if (!file_exists(op) || file_exists(np)) return ERROR; return rename(op, np) == 0 ? 0 : ERROR; }
 static uint64_t disk_file_count(void) { uint64_t n = 0; DIR *d = opendir(diskRoot); if (d) { struct dirent *e; while ((e = readdir(d))) if (e->d_name[0] != '.') n++; closedir(d); } return n; }
 
@@ -299,6 +344,7 @@ uint64_t kimi_host_syscall(uint64_t n, uint64_t a0, uint64_t a1, uint64_t a2, ui
     case 29: str_arg(a0, a1, path, sizeof path); return fs_mkdir(path);
     case 30: str_arg(a0, a1, path, sizeof path); return fs_rmdir(path);
     case 40: { char target[256]; str_arg(a0, a1, target, sizeof target); str_arg(a2, a3, path, sizeof path); return fs_symlink(target, path); }
+    case 41: return fs_linux_run(a0);
     case 23: { if (a1 < 1) return ERROR; uint64_t *o = (uint64_t *)a0; o[0] = 1; o[1] = 0; o[2] = 2; o[3] = 0; return 1; }
     case 12: return 2048;
     case 22: return 0;
@@ -360,4 +406,24 @@ Java_com_kimios_libos_KimiBridge_nativeTouch(JNIEnv *env, jclass cls, jint x, ji
 JNIEXPORT void JNICALL
 Java_com_kimios_libos_KimiBridge_nativeMove(JNIEnv *env, jclass cls, jint x, jint y) {
     (void)env; (void)cls; move(x, y);
+}
+
+// Test/bridge entry for SYS_LINUX_RUN (the shell's node/python/alpine path).
+JNIEXPORT jint JNICALL
+Java_com_kimios_libos_KimiBridge_nativeLinuxRun(JNIEnv *env, jclass cls, jstring jbin, jstring jarg) {
+    (void)cls;
+    const char *bin = (*env)->GetStringUTFChars(env, jbin, NULL);
+    const char *arg = (*env)->GetStringUTFChars(env, jarg, NULL);
+    static char out[8192];
+    struct linux_run_req rq;
+    rq.bin_ptr = (uint64_t)(uintptr_t)bin; rq.bin_len = strlen(bin);
+    rq.arg_ptr = (uint64_t)(uintptr_t)arg; rq.arg_len = strlen(arg);
+    rq.out_ptr = (uint64_t)(uintptr_t)out; rq.out_cap = sizeof out;
+    rq.out_len = 0; rq.code = 0;
+    uint64_t code = kimi_host_syscall(41, (uint64_t)(uintptr_t)&rq, 0, 0, 0, 0);
+    out[rq.out_len < sizeof out ? rq.out_len : sizeof out - 1] = 0;
+    LOG("linux_run bin=%s code=%llu out=%s", bin, (unsigned long long)code, out);
+    (*env)->ReleaseStringUTFChars(env, jbin, bin);
+    (*env)->ReleaseStringUTFChars(env, jarg, arg);
+    return (jint)code;
 }

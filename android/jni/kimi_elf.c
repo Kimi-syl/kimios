@@ -466,6 +466,33 @@ int kimi_guest_wait(pid_t pid, int *status) {
     return (int)r;
 }
 
+// Synchronous run: capture guest stdout/stderr into `out` (cap bytes), wait for
+// exit, report length + code. Used by the shell's SYS_LINUX_RUN path.
+int kimi_guest_capture(const char *exe, const char *sysroot, char *const argv[],
+                       char *const envp[], char *out, size_t cap, size_t *out_len,
+                       int *code) {
+    int in = -1, of = -1;
+    pid_t pid = kimi_guest_spawn(exe, sysroot, argv, envp, &in, &of);
+    if (pid < 0) return -1;
+    if (in >= 0) close(in);
+    size_t total = 0;
+    ssize_t r;
+    if (cap > 0) {
+        while (total < cap - 1 && (r = read(of, out + total, cap - 1 - total)) > 0)
+            total += (size_t)r;
+    }
+    char scratch[4096];
+    while ((r = read(of, scratch, sizeof scratch)) > 0) {} // drain so guest never blocks
+    close(of);
+    int st = 0;
+    kimi_guest_wait(pid, &st);
+    if (cap > 0) out[total] = 0;
+    if (out_len) *out_len = total;
+    int c = WIFEXITED(st) ? WEXITSTATUS(st) : (128 + WTERMSIG(st));
+    if (code) *code = c;
+    return c;
+}
+
 // ---------------- JNI ----------------
 #ifndef KIMI_ELF_NO_JNI
 typedef struct { int fd; } reader_arg;

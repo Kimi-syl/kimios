@@ -55,6 +55,17 @@ public class MainActivity extends Activity
 
     private void maybeRunGuest(android.content.Intent intent) {
         if (intent == null) return;
+        final String lb = intent.getStringExtra("linux");
+        if (lb != null) {
+            final String la = intent.getStringExtra("arg");
+            new Thread(new Runnable() {
+                @Override public void run() {
+                    int code = KimiBridge.nativeLinuxRun(lb, la == null ? "" : la);
+                    android.util.Log.i("KimiOS-guest", "linux_run " + lb + " exit=" + code);
+                }
+            }, "kimi-linux").start();
+            return;
+        }
         final String g = intent.getStringExtra("guest");
         if (g == null) return;
         String a = intent.getStringExtra("arg");

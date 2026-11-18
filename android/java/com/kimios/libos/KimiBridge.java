@@ -17,5 +17,8 @@ public final class KimiBridge {
     public static native int nativeRunElf(String exe, String sysroot,
                                           String[] argv, String[] envp);
 
+    /** Run an Alpine sysroot binary via SYS_LINUX_RUN (shell node/python path). */
+    public static native int nativeLinuxRun(String bin, String arg);
+
     private KimiBridge() {}
 }

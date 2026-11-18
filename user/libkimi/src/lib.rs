@@ -67,6 +67,7 @@ pub const SYS_FB_PRESENT: u64 = 37;
 pub const SYS_GFX_BENCH: u64 = 38;
 pub const SYS_INSTR_MAP: u64 = 39;
 pub const SYS_SYMLINK: u64 = 40;
+pub const SYS_LINUX_RUN: u64 = 41;
 
 /// Latency-mailbox slot indices (shared with the kernel `instr` module and the
 /// Android shared-memory reader).
@@ -549,6 +550,42 @@ pub fn symlink(target: &str, link: &str) -> bool {
         link.as_ptr() as u64,
         link.len() as u64,
     ) == 0
+}
+
+/// Request/response block for SYS_LINUX_RUN (host-native Alpine guest execution).
+#[repr(C)]
+pub struct LinuxRunReq {
+    pub bin_ptr: u64,
+    pub bin_len: u64,
+    pub arg_ptr: u64,
+    pub arg_len: u64,
+    pub out_ptr: u64,
+    pub out_cap: u64,
+    pub out_len: u64,
+    pub code: u64,
+}
+
+/// Run an Alpine sysroot binary natively on the host kernel (libOS only).
+/// `bin` is a sysroot-relative path ("usr/bin/node") or a bare name ("node",
+/// resolved under usr/bin). `arg` is the code/script payload. Captured stdout
+/// is written to `out`; returns `(exit_code, out_len)`. Bare metal: ERROR.
+pub fn linux_run(bin: &str, arg: &str, out: &mut [u8]) -> Option<(u64, usize)> {
+    let mut req = LinuxRunReq {
+        bin_ptr: bin.as_ptr() as u64,
+        bin_len: bin.len() as u64,
+        arg_ptr: arg.as_ptr() as u64,
+        arg_len: arg.len() as u64,
+        out_ptr: out.as_mut_ptr() as u64,
+        out_cap: out.len() as u64,
+        out_len: 0,
+        code: 0,
+    };
+    let r = syscall3(SYS_LINUX_RUN, &mut req as *mut _ as u64, 0, 0);
+    if r == ERROR {
+        None
+    } else {
+        Some((req.code, req.out_len as usize))
+    }
 }
 
 /// File metadata: `(kind, size)` where kind 0 is RamFS and 1 is a disk file.
