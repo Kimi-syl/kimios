@@ -5,15 +5,8 @@
 
 use crate::apps;
 use crate::draw::Screen;
+use crate::theme::{SURFACE_HI, SURFACE_MAX, OUTLINE, TEXT, MUTED, RED, RED_DIM, PANEL};
 
-const SURFACE_HI: u32 = 0x001e_1e25;
-const SURFACE_MAX: u32 = 0x0027_272f;
-const OUTLINE: u32 = 0x0035_3540;
-const TEXT: u32 = 0x00f2_f2f6;
-const MUTED: u32 = 0x0093_93a0;
-const RED: u32 = 0x00e0_352b;
-const RED_DIM: u32 = 0x005c_1a16;
-const PANEL: u32 = 0x000a_0a0f;
 
 /// Top of the keyboard panel in app-space coordinates.
 pub const TOP: i64 = 452;
@@ -98,7 +91,7 @@ pub fn hit(point: (i64, i64)) -> Option<Key> {
 }
 
 pub fn draw(screen: &Screen, shift: bool, pressed: Option<(i64, i64)>) {
-    screen.round_rect(0, TOP, 480, 800 - TOP, 16, PANEL);
+    screen.round_rect(0, TOP, 480, 800 - TOP, 16, PANEL());
     screen.round_rect(220, TOP + 5, 40, 4, 2, 0x0050_505a);
 
     for row in 0..5usize {
@@ -108,32 +101,32 @@ pub fn draw(screen: &Screen, shift: bool, pressed: Option<(i64, i64)>) {
                 p.0 >= x && p.0 < x + w && p.1 >= y && p.1 < y + h
             });
             let mut color = match key {
-                Key::Shift if shift => RED_DIM,
-                Key::Char(28) => RED,
-                Key::Shift | Key::Hide | Key::Question | Key::Char(14) => SURFACE_MAX,
-                _ => SURFACE_HI,
+                Key::Shift if shift => RED_DIM(),
+                Key::Char(28) => RED(),
+                Key::Shift | Key::Hide | Key::Question | Key::Char(14) => SURFACE_MAX(),
+                _ => SURFACE_HI(),
             };
             if is_pressed {
-                color = OUTLINE;
+                color = OUTLINE();
             }
             screen.round_rect(x, y, w, h, 12, color);
             let cx = x + w / 2;
             let cy = y + h / 2;
             match key {
-                Key::Char(14) => draw_backspace(screen, cx, cy, TEXT),
-                Key::Shift => draw_shift(screen, cx, cy, if shift { RED } else { TEXT }),
+                Key::Char(14) => draw_backspace(screen, cx, cy, TEXT()),
+                Key::Shift => draw_shift(screen, cx, cy, if shift { RED() } else { TEXT() }),
                 Key::Hide => {
-                    screen.line(cx - 9, cy - 4, cx, cy + 5, 2, MUTED);
-                    screen.line(cx, cy + 5, cx + 9, cy - 4, 2, MUTED);
+                    screen.line(cx - 9, cy - 4, cx, cy + 5, 2, MUTED());
+                    screen.line(cx, cy + 5, cx + 9, cy - 4, 2, MUTED());
                 }
-                Key::Char(57) => screen.text_centered(cx, cy - 5, "space", 1, MUTED),
-                Key::Char(28) => screen.text_centered(cx, cy - 5, "ENTER", 1, TEXT),
-                Key::Question => screen.text_centered(cx, cy - 8, "?", 2, TEXT),
+                Key::Char(57) => screen.text_centered(cx, cy - 5, "space", 1, MUTED()),
+                Key::Char(28) => screen.text_centered(cx, cy - 5, "ENTER", 1, TEXT()),
+                Key::Question => screen.text_centered(cx, cy - 8, "?", 2, TEXT()),
                 Key::Char(code) => {
                     if let Some(byte) = apps::key_glyph(*code, shift) {
                         let label = [byte];
                         if let Ok(text) = core::str::from_utf8(&label) {
-                            screen.text_centered(cx, cy - 8, text, 2, TEXT);
+                            screen.text_centered(cx, cy - 8, text, 2, TEXT());
                         }
                     }
                 }

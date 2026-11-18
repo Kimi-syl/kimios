@@ -109,7 +109,13 @@ A Nothing-OS × Material-3 phone shell, all software-rendered in Rust at
   Nothing typefaces (NType82 / Ndot-55 / NType82Mono), on-screen keyboard.
 - Interactive apps: Phone, Messages, Camera (saves PPM), Music, Clock,
   Calculator, Notes, Maps, Photos, Files, Weather, **Terminal**, **Browser**,
-  APK inspector, mini-Dalvik DEX runner.
+  **Marketplace**, APK inspector, mini-Dalvik DEX runner.
+- **Marketplace** (powered by kpkg): browse and install **themes**, **fonts** and
+  apps. Seven built-in themes (Nothing Dark, Graphite Light, Ocean, Forest,
+  Sunset, Lavender, Mono) and four fonts (NType82, Ndot-55, Mono, Pixel 8x8) apply
+  live and persist; more download from a [`market/`](market/README.md) repo
+  (`.theme` palettes, `.kfont` bitmap fonts). The whole UI recolours/re-types at
+  runtime via a global palette + selectable font.
 - A shared command interpreter (`libkimi::shell`) used by both the CLI and the
   in-GUI Terminal: `ls cat write rm mkdir rmdir mv stat df net dns fetch date
   time sleep uptime ps kpkg apk dvm …`.
@@ -218,6 +224,8 @@ Full per-phase history: **[docs/phases.md](docs/phases.md)**.
 
 - [ios/README.md](ios/README.md) — iOS library-OS port; `.ipa` CI; host dispatcher.
 - [android/README.md](android/README.md) — Android library-OS port; signed APK CI.
+- [market/README.md](market/README.md) — Marketplace repo: themes, fonts, apps;
+  asset formats (`.theme`, `.kfont`) and serving.
 - [docs/phases.md](docs/phases.md) — detailed write-up of every phase (Ph1–Ph52).
 - [ROADMAP.md](ROADMAP.md) — milestone checklist across the three modes.
 - [docs/graphics-architecture.md](docs/graphics-architecture.md) — display

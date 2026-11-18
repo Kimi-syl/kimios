@@ -31,6 +31,7 @@ route to a `kimi_host_syscall` dispatcher; everything above is unchanged.
 | Sandboxed `/disk/` filesystem + RamFS (full CRUD/dirs/stat/df) | done | done |
 | Networking (DNS + TCP; Browser/dns/fetch/kpkg) | done | done |
 | Time / rtc / ps / mem | done | done |
+| Marketplace + runtime themes/fonts (kpkg-powered, [`market/`](market/README.md)) | done | done |
 | Thin platform shell (UIKit Activity / SurfaceView Activity) | done | done |
 | CI build → artifact (`.ipa` / signed APK) | done (`macos-latest`) | done (`ubuntu`) |
 | Signing | unsigned (sideload re-sign) | phone debug key (`b1339cd3…`) |

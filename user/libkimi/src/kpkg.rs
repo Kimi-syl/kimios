@@ -454,3 +454,146 @@ pub fn help() {
     print("Packages run via the Linux ABI (Phase 47). npm/pip/curl need a\n");
     print("fuller Linux runtime and are marked not-runnable.\n");
 }
+// -- programmatic API (used by the GUI Marketplace) -------------------------
+
+/// A repo package entry, parsed into fixed buffers (no allocator).
+#[derive(Clone, Copy)]
+pub struct Package {
+    pub name: [u8; 32],
+    pub name_len: usize,
+    pub desc: [u8; 96],
+    pub desc_len: usize,
+    pub kind: [u8; 16],
+    pub kind_len: usize,
+    pub file: [u8; 64],
+    pub file_len: usize,
+    pub run: bool,
+}
+
+impl Package {
+    pub fn name_str(&self) -> &str {
+        core::str::from_utf8(&self.name[..self.name_len]).unwrap_or("")
+    }
+    pub fn desc_str(&self) -> &str {
+        core::str::from_utf8(&self.desc[..self.desc_len]).unwrap_or("")
+    }
+    /// "app" (default), "theme" or "font".
+    pub fn kind_str(&self) -> &str {
+        if self.kind_len == 0 {
+            "app"
+        } else {
+            core::str::from_utf8(&self.kind[..self.kind_len]).unwrap_or("app")
+        }
+    }
+}
+
+/// True if a repo.json is cached on disk.
+pub fn repo_cached() -> bool {
+    read_repo().is_some()
+}
+
+/// Invoke `f` for every package in the cached repo.
+pub fn each_package(mut f: impl FnMut(&Package)) {
+    let Some(n) = read_repo() else { return };
+    let data = &repo_buf()[..n];
+    foreach_package(data, |obj| {
+        let mut p = Package {
+            name: [0; 32], name_len: 0,
+            desc: [0; 96], desc_len: 0,
+            kind: [0; 16], kind_len: 0,
+            file: [0; 64], file_len: 0,
+            run: false,
+        };
+        if let Some(v) = json_str(obj, "name") {
+            p.name_len = v.len().min(32);
+            p.name[..p.name_len].copy_from_slice(&v[..p.name_len]);
+        }
+        if let Some(v) = json_str(obj, "desc") {
+            p.desc_len = v.len().min(96);
+            p.desc[..p.desc_len].copy_from_slice(&v[..p.desc_len]);
+        }
+        if let Some(v) = json_str(obj, "kind") {
+            p.kind_len = v.len().min(16);
+            p.kind[..p.kind_len].copy_from_slice(&v[..p.kind_len]);
+        }
+        if let Some(v) = json_str(obj, "file") {
+            p.file_len = v.len().min(64);
+            p.file[..p.file_len].copy_from_slice(&v[..p.file_len]);
+        }
+        p.run = json_true(obj, "run");
+        f(&p);
+    });
+}
+
+/// Fetch + cache repo.json; returns true on success (quiet, for the GUI).
+pub fn update_quiet(base_url: &str) -> bool {
+    let base = if base_url.is_empty() { DEFAULT_BASE } else { base_url };
+    let mut host_buf = [0u8; 64];
+    let Some((host, port, prefix)) = parse_url(base, &mut host_buf) else { return false };
+    let mut path = [0u8; 160];
+    let mut plen = 0usize;
+    for piece in [prefix.as_bytes(), b"/repo.json"] {
+        if plen + piece.len() > path.len() { break; }
+        path[plen..plen + piece.len()].copy_from_slice(piece);
+        plen += piece.len();
+    }
+    let path_str = core::str::from_utf8(&path[..plen]).unwrap_or("/repo.json");
+    let mut got = 0usize;
+    let ok = http_body(host, port, path_str, |chunk| {
+        let n = chunk.len().min(repo_buf().len() - got);
+        repo_buf()[got..got + n].copy_from_slice(&chunk[..n]);
+        got += n;
+    });
+    if ok.is_none() || got == 0 { return false; }
+    if let Some(handle) = create(REPO_PATH) {
+        write_file(handle, 0, &repo_buf()[..got]);
+        close(handle);
+    }
+    true
+}
+
+/// Download a package's asset file to an arbitrary destination path. Unlike
+/// `install`, this does not require the package to be a runnable binary — it is
+/// used for theme/font assets as well as apps. Returns true on success.
+pub fn install_to(name: &str, dest: &str) -> bool {
+    let Some(n) = read_repo() else { return false };
+    let data = &repo_buf()[..n];
+    let Some(base) = json_str(data, "base") else { return false };
+    let base_str = core::str::from_utf8(base).unwrap_or(DEFAULT_BASE);
+
+    let mut found = false;
+    let mut file = [0u8; 64];
+    let mut file_len = 0usize;
+    foreach_package(data, |obj| {
+        if let Some(nm) = json_str(obj, "name") {
+            if nm == name.as_bytes() {
+                found = true;
+                if let Some(f) = json_str(obj, "file") {
+                    file_len = f.len().min(file.len());
+                    file[..file_len].copy_from_slice(&f[..file_len]);
+                }
+            }
+        }
+    });
+    if !found || file_len == 0 { return false; }
+
+    let mut host_buf = [0u8; 64];
+    let Some((host, port, prefix)) = parse_url(base_str, &mut host_buf) else { return false };
+    let mut path = [0u8; 160];
+    let mut plen = 0usize;
+    for piece in [prefix.as_bytes(), b"/", &file[..file_len]] {
+        if plen + piece.len() > path.len() { break; }
+        path[plen..plen + piece.len()].copy_from_slice(piece);
+        plen += piece.len();
+    }
+    let path_str = core::str::from_utf8(&path[..plen]).unwrap_or("/");
+
+    let Some(handle) = create(dest) else { return false };
+    let mut offset = 0u64;
+    let ok = http_body(host, port, path_str, |chunk| {
+        let w = write_file(handle, offset as usize, chunk);
+        offset += w as u64;
+    });
+    close(handle);
+    ok.is_some() && offset > 0
+}

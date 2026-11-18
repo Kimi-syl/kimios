@@ -1,17 +1,8 @@
 use crate::draw::Screen;
 use crate::AppKind;
 use libkimi as k;
+use crate::theme::{BLACK, SURFACE, SURFACE_HI, SURFACE_MAX, OUTLINE, TEXT, MUTED, RED, RED_DIM, GREEN};
 
-const BLACK: u32 = 0x0000_0000;
-const SURFACE: u32 = 0x0014_1419;
-const SURFACE_HI: u32 = 0x001e_1e25;
-const SURFACE_MAX: u32 = 0x0027_272f;
-const OUTLINE: u32 = 0x0035_3540;
-const TEXT: u32 = 0x00f2_f2f6;
-const MUTED: u32 = 0x0093_93a0;
-const RED: u32 = 0x00e0_352b;
-const RED_DIM: u32 = 0x005c_1a16;
-const GREEN: u32 = 0x0060_d18a;
 
 const TERM_WIDTH: usize = 50;
 const TERM_LINES: usize = 40;
@@ -211,6 +202,7 @@ pub struct Apps {
     pub browser: Browser,
     pub apk: ApkApp,
     pub dvm: DvmApp,
+    pub market: Market,
 }
 
 const KEY_LABELS: [&str; 12] = [
@@ -611,6 +603,7 @@ impl Apps {
                 err: [0; 48],
                 err_len: 0,
             },
+            market: Market::new(),
         }
     }
 }
@@ -623,6 +616,7 @@ pub fn open(apps: &mut Apps, app: AppKind) {
         AppKind::Browser => apps.browser.editing = apps.browser.line_count == 0,
         AppKind::Apk => apps.apk.refresh(),
         AppKind::Dvm => apps.dvm.refresh(),
+        AppKind::Market => apps.market.refresh(),
         _ => {}
     }
 }
@@ -987,6 +981,7 @@ pub fn tap(screen: &Screen, apps: &mut Apps, app: AppKind, point: (i64, i64), os
         AppKind::Browser => browser_tap(apps, point, osk),
         AppKind::Apk => apk_tap(apps, point),
         AppKind::Dvm => dvm_tap(apps, point),
+        AppKind::Market => market_tap(apps, point),
         _ => {}
     }
 }
@@ -1235,16 +1230,17 @@ pub fn draw(screen: &Screen, apps: &Apps, app: AppKind, clock: [u64; 7], osk: bo
         AppKind::Browser => draw_browser(screen, &apps.browser, osk),
         AppKind::Apk => draw_apk(screen, &apps.apk),
         AppKind::Dvm => draw_dvm(screen, &apps.dvm),
+        AppKind::Market => draw_market(screen, &apps.market),
         _ => {}
     }
 }
 
 fn draw_phone(screen: &Screen, phone: &Phone) {
     let width = screen.width();
-    screen.fill(0, 93, width, screen.height() - 93, BLACK);
+    screen.fill(0, 93, width, screen.height() - 93, BLACK());
     if phone.in_call {
-        screen.text_centered(width / 2, 150, phone.number(), 3, TEXT);
-        screen.text_centered(width / 2, 200, "In call", 1, MUTED);
+        screen.text_centered(width / 2, 150, phone.number(), 3, TEXT());
+        screen.text_centered(width / 2, 200, "In call", 1, MUTED());
         let mut time = [0u8; 8];
         let seconds = phone.call_seconds();
         time[0] = b'0' + (seconds / 600) as u8 % 10;
@@ -1252,27 +1248,27 @@ fn draw_phone(screen: &Screen, phone: &Phone) {
         time[2] = b':';
         time[3] = b'0' + (seconds / 10) as u8 % 10;
         time[4] = b'0' + seconds as u8 % 10;
-        screen.text_centered(width / 2, 250, slice_str(&time[..5]), 3, TEXT);
-        screen.circle(width / 2, 350, 34, SURFACE_MAX);
-        screen.circle(width / 2, 350, 18, RED_DIM);
-        screen.text_centered(width / 2, 410, "Calling over Wi-Fi", 1, MUTED);
+        screen.text_centered(width / 2, 250, slice_str(&time[..5]), 3, TEXT());
+        screen.circle(width / 2, 350, 34, SURFACE_MAX());
+        screen.circle(width / 2, 350, 18, RED_DIM());
+        screen.text_centered(width / 2, 410, "Calling over Wi-Fi", 1, MUTED());
         for (x, label, active) in [
             (84, "Mute", phone.mute),
             (240, "Speaker", phone.speaker),
             (396, "End", false),
         ] {
-            let color = if label == "End" { RED } else if active { RED_DIM } else { SURFACE_HI };
+            let color = if label == "End" { RED() } else if active { RED_DIM() } else { SURFACE_HI() };
             screen.round_rect(x - 40, 620, 80, 80, 40, color);
-            screen.text_centered(x, 654, label, 1, TEXT);
+            screen.text_centered(x, 654, label, 1, TEXT());
         }
         return;
     }
-    screen.round_rect(20, 112, width - 40, 88, 28, SURFACE);
+    screen.round_rect(20, 112, width - 40, 88, 28, SURFACE());
     let number = phone.number();
     if number.is_empty() {
-        screen.text_centered(width / 2, 138, "Enter number", 2, MUTED);
+        screen.text_centered(width / 2, 138, "Enter number", 2, MUTED());
     } else {
-        screen.text_centered(width / 2, 134, number, 3, TEXT);
+        screen.text_centered(width / 2, 134, number, 3, TEXT());
     }
     for row in 0..4i64 {
         for column in 0..3i64 {
@@ -1280,36 +1276,36 @@ fn draw_phone(screen: &Screen, phone: &Phone) {
             let y = 232 + row * 80;
             let index = (row * 3 + column) as usize;
             let label = KEY_LABELS[index];
-            screen.circle(x + 50, y + 34, 32, SURFACE);
-            screen.text_centered(x + 50, y + 22, label, 3, TEXT);
+            screen.circle(x + 50, y + 34, 32, SURFACE());
+            screen.text_centered(x + 50, y + 22, label, 3, TEXT());
         }
     }
-    button(screen, 120, 560, 240, 66, "Call", GREEN, BLACK);
-    screen.round_rect(388, 590, 64, 32, 16, SURFACE);
-    screen.text_centered(420, 598, "DEL", 1, MUTED);
+    button(screen, 120, 560, 240, 66, "Call", GREEN(), BLACK());
+    screen.round_rect(388, 590, 64, 32, 16, SURFACE());
+    screen.text_centered(420, 598, "DEL", 1, MUTED());
 }
 
 fn draw_messages(screen: &Screen, messages: &Messages, osk: bool) {
     let width = screen.width();
-    screen.fill(0, 93, width, screen.height() - 93, BLACK);
+    screen.fill(0, 93, width, screen.height() - 93, BLACK());
     match messages.open {
         None => {
             for index in 0..3 {
                 let y = 130 + index as i64 * 104;
-                screen.round_rect(20, y, width - 40, 92, 26, SURFACE);
-                screen.circle(58, y + 46, 22, if index == 0 { RED_DIM } else { SURFACE_MAX });
-                screen.text(58, y + 36, &THREAD_NAMES[index][..1], 2, if index == 0 { RED } else { TEXT });
-                screen.text(94, y + 20, THREAD_NAMES[index], 2, TEXT);
-                screen.text(94, y + 48, THREAD_PREVIEW[index], 1, MUTED);
-                screen.text(width - 28 - Screen::text_width(THREAD_TIMES[index], 1), y + 22, THREAD_TIMES[index], 1, MUTED);
+                screen.round_rect(20, y, width - 40, 92, 26, SURFACE());
+                screen.circle(58, y + 46, 22, if index == 0 { RED_DIM() } else { SURFACE_MAX() });
+                screen.text(58, y + 36, &THREAD_NAMES[index][..1], 2, if index == 0 { RED() } else { TEXT() });
+                screen.text(94, y + 20, THREAD_NAMES[index], 2, TEXT());
+                screen.text(94, y + 48, THREAD_PREVIEW[index], 1, MUTED());
+                screen.text(width - 28 - Screen::text_width(THREAD_TIMES[index], 1), y + 22, THREAD_TIMES[index], 1, MUTED());
                 if index == 0 {
-                    screen.circle(width - 36, y + 62, 5, RED);
+                    screen.circle(width - 36, y + 62, 5, RED());
                 }
             }
         }
         Some(index) => {
-            screen.text(24, 106, THREAD_NAMES[index], 2, TEXT);
-            screen.text(24, 132, "online", 1, MUTED);
+            screen.text(24, 106, THREAD_NAMES[index], 2, TEXT());
+            screen.text(24, 132, "online", 1, MUTED());
             let mut y = 164i64;
             let thread: &[&str] = match index {
                 0 => &THREAD_A,
@@ -1333,11 +1329,11 @@ fn draw_messages(screen: &Screen, messages: &Messages, osk: bool) {
                 }
                 y = bubble(screen, slice_str(&messages.sent[order][..messages.sent_len[order]]), y, true);
             }
-            screen.round_rect(20, draft_y, width - 40, 56, 28, SURFACE);
+            screen.round_rect(20, draft_y, width - 40, 56, 28, SURFACE());
             if messages.draft_len == 0 {
-                screen.text(38, draft_y + 18, "Type a message and press Enter", 1, MUTED);
+                screen.text(38, draft_y + 18, "Type a message and press Enter", 1, MUTED());
             } else {
-                screen.text(38, draft_y + 16, slice_str(&messages.draft[..messages.draft_len.min(20)]), 2, TEXT);
+                screen.text(38, draft_y + 16, slice_str(&messages.draft[..messages.draft_len.min(20)]), 2, TEXT());
             }
         }
     }
@@ -1374,11 +1370,11 @@ fn bubble(screen: &Screen, text: &str, y: i64, mine: bool) -> i64 {
     }
     let bubble_width = (widest + 32).clamp(80, 360).min(width - 48);
     let x = if mine { width - 24 - bubble_width } else { 24 };
-    let color = if mine { RED_DIM } else { SURFACE_HI };
+    let color = if mine { RED_DIM() } else { SURFACE_HI() };
     screen.round_rect(x, y, bubble_width, height, 20, color);
     for index in 0..lines {
         let (start, end) = ranges[index];
-        screen.text(x + 16, y + 14 + index as i64 * 24, slice_str(&bytes[start..end]), 2, TEXT);
+        screen.text(x + 16, y + 14 + index as i64 * 24, slice_str(&bytes[start..end]), 2, TEXT());
     }
     y + height + 12
 }
@@ -1399,84 +1395,84 @@ fn draw_camera(screen: &Screen, camera: &Camera) {
         screen.fill(0, y, width, 1, 0x40ff_ffff);
     }
     screen.round_rect(18, 106, 86, 28, 14, 0x8000_0000);
-    screen.text(30, 114, if camera.front { "FRONT" } else { "12MP" }, 1, TEXT);
+    screen.text(30, 114, if camera.front { "FRONT" } else { "12MP" }, 1, TEXT());
     screen.round_rect(width - 104, 106, 86, 28, 14, 0x8000_0000);
-    screen.text(width - 92, 114, if camera.flash { "FLASH" } else { "AUTO" }, 1, TEXT);
-    screen.circle(240, 690, 38, SURFACE_MAX);
-    screen.ring(240, 690, 38, 3, TEXT);
-    screen.circle(240, 690, 28, TEXT);
-    screen.round_rect(84, 668, 44, 44, 22, SURFACE_HI);
-    screen.text_centered(106, 680, "F", 2, TEXT);
-    screen.round_rect(352, 668, 44, 44, 22, SURFACE_HI);
-    screen.text_centered(374, 680, "L", 2, TEXT);
+    screen.text(width - 92, 114, if camera.flash { "FLASH" } else { "AUTO" }, 1, TEXT());
+    screen.circle(240, 690, 38, SURFACE_MAX());
+    screen.ring(240, 690, 38, 3, TEXT());
+    screen.circle(240, 690, 28, TEXT());
+    screen.round_rect(84, 668, 44, 44, 22, SURFACE_HI());
+    screen.text_centered(106, 680, "F", 2, TEXT());
+    screen.round_rect(352, 668, 44, 44, 22, SURFACE_HI());
+    screen.text_centered(374, 680, "L", 2, TEXT());
     if camera.status_len > 0 {
-        screen.text_centered(240, 748, slice_str(&camera.status[..camera.status_len]), 1, GREEN);
+        screen.text_centered(240, 748, slice_str(&camera.status[..camera.status_len]), 1, GREEN());
     } else {
-        screen.text_centered(240, 748, "Tap the shutter to save a PPM", 1, MUTED);
+        screen.text_centered(240, 748, "Tap the shutter to save a PPM", 1, MUTED());
     }
 }
 
 fn draw_music(screen: &Screen, music: &Music) {
     let width = screen.width();
-    screen.fill(0, 93, width, screen.height() - 93, BLACK);
-    screen.gradient(40, 120, 160, 160, 0x0030_2028, RED_DIM);
+    screen.fill(0, 93, width, screen.height() - 93, BLACK());
+    screen.gradient(40, 120, 160, 160, 0x0030_2028, RED_DIM());
     screen.circle(120, 200, 46, 0x0010_0c10);
-    screen.ring(120, 200, 46, 2, RED);
-    screen.text(40, 300, track_info(music.track).0, 3, TEXT);
-    screen.text(40, 336, track_info(music.track).1, 1, MUTED);
-    screen.round_rect(40, 380, width - 80, 8, 4, OUTLINE);
+    screen.ring(120, 200, 46, 2, RED());
+    screen.text(40, 300, track_info(music.track).0, 3, TEXT());
+    screen.text(40, 336, track_info(music.track).1, 1, MUTED());
+    screen.round_rect(40, 380, width - 80, 8, 4, OUTLINE());
     let progress = track_progress(music);
-    screen.round_rect(40, 380, (width - 80) * progress / 1000, 8, 4, RED);
+    screen.round_rect(40, 380, (width - 80) * progress / 1000, 8, 4, RED());
     let elapsed = music.elapsed().min(TRACK_MS[music.track % 3]) / 1000;
     let total = TRACK_MS[music.track % 3] / 1000;
     let mut time = [0u8; 20];
     let left = unsigned(elapsed, &mut time);
-    screen.text(40, 400, left, 1, MUTED);
+    screen.text(40, 400, left, 1, MUTED());
     let mut time2 = [0u8; 20];
     let right = unsigned(total, &mut time2);
-    screen.text(width - 40 - Screen::text_width(right, 1), 400, right, 1, MUTED);
-    screen.circle(140, 470, 28, SURFACE_HI);
-    screen.line(148, 458, 148, 482, 3, TEXT);
-    screen.line(148, 458, 132, 470, 3, TEXT);
-    screen.line(148, 482, 132, 470, 3, TEXT);
+    screen.text(width - 40 - Screen::text_width(right, 1), 400, right, 1, MUTED());
+    screen.circle(140, 470, 28, SURFACE_HI());
+    screen.line(148, 458, 148, 482, 3, TEXT());
+    screen.line(148, 458, 132, 470, 3, TEXT());
+    screen.line(148, 482, 132, 470, 3, TEXT());
     draw_play_button(screen, 240, 470, music.playing);
-    screen.circle(340, 470, 28, SURFACE_HI);
-    screen.line(332, 458, 332, 482, 3, TEXT);
-    screen.line(332, 458, 348, 470, 3, TEXT);
-    screen.line(332, 482, 348, 470, 3, TEXT);
-    screen.text(24, 530, "UP NEXT", 1, MUTED);
+    screen.circle(340, 470, 28, SURFACE_HI());
+    screen.line(332, 458, 332, 482, 3, TEXT());
+    screen.line(332, 458, 348, 470, 3, TEXT());
+    screen.line(332, 482, 348, 470, 3, TEXT());
+    screen.text(24, 530, "UP NEXT", 1, MUTED());
     for index in 0..TRACKS.len() {
         let y = 552 + index as i64 * 74;
         let active = index == music.track;
-        screen.round_rect(20, y, width - 40, 64, 22, if active { SURFACE_HI } else { SURFACE });
-        screen.text(40, y + 14, TRACKS[index].0, 2, if active { TEXT } else { MUTED });
-        screen.text(40, y + 40, TRACKS[index].1, 1, if active { RED } else { MUTED });
+        screen.round_rect(20, y, width - 40, 64, 22, if active { SURFACE_HI() } else { SURFACE() });
+        screen.text(40, y + 14, TRACKS[index].0, 2, if active { TEXT() } else { MUTED() });
+        screen.text(40, y + 40, TRACKS[index].1, 1, if active { RED() } else { MUTED() });
         if active {
-            screen.circle(width - 46, y + 32, 6, RED);
+            screen.circle(width - 46, y + 32, 6, RED());
         }
     }
 }
 
 fn draw_play_button(screen: &Screen, cx: i64, cy: i64, playing: bool) {
-    screen.circle(cx, cy, 38, RED);
+    screen.circle(cx, cy, 38, RED());
     if playing {
-        screen.fill(cx - 10, cy - 13, 6, 26, TEXT);
-        screen.fill(cx + 4, cy - 13, 6, 26, TEXT);
+        screen.fill(cx - 10, cy - 13, 6, 26, TEXT());
+        screen.fill(cx + 4, cy - 13, 6, 26, TEXT());
     } else {
-        screen.line(cx - 8, cy - 14, cx - 8, cy + 14, 4, TEXT);
-        screen.line(cx - 8, cy - 14, cx + 14, cy, 4, TEXT);
-        screen.line(cx - 8, cy + 14, cx + 14, cy, 4, TEXT);
+        screen.line(cx - 8, cy - 14, cx - 8, cy + 14, 4, TEXT());
+        screen.line(cx - 8, cy - 14, cx + 14, cy, 4, TEXT());
+        screen.line(cx - 8, cy + 14, cx + 14, cy, 4, TEXT());
     }
 }
 
 fn draw_notes(screen: &Screen, notes: &Notes, osk: bool) {
     let width = screen.width();
-    screen.fill(0, 93, width, screen.height() - 93, BLACK);
-    screen.text(24, 110, "notes.txt", 2, TEXT);
-    button(screen, 340, 104, 116, 44, "SAVE", RED, TEXT);
+    screen.fill(0, 93, width, screen.height() - 93, BLACK());
+    screen.text(24, 110, "notes.txt", 2, TEXT());
+    button(screen, 340, 104, 116, 44, "SAVE", RED(), TEXT());
     let panel_height = if osk { 260 } else { 454 };
     let text_limit = if osk { 386 } else { 580 };
-    screen.round_rect(20, 160, width - 40, panel_height, 26, SURFACE);
+    screen.round_rect(20, 160, width - 40, panel_height, 26, SURFACE());
     let mut x = 40i64;
     let mut y = 180i64;
     let mut line_length = 0;
@@ -1496,24 +1492,24 @@ fn draw_notes(screen: &Screen, notes: &Notes, osk: bool) {
             break;
         }
         let ch = [byte];
-        screen.text(x, y, slice_str(&ch), 1, TEXT);
+        screen.text(x, y, slice_str(&ch), 1, TEXT());
         x += 8;
         line_length += 1;
     }
     let status_y = if osk { 430 } else { 626 };
     if notes.status_len > 0 {
-        screen.text(24, status_y, slice_str(&notes.status[..notes.status_len]), 1, GREEN);
+        screen.text(24, status_y, slice_str(&notes.status[..notes.status_len]), 1, GREEN());
     } else {
-        screen.text(24, status_y, "Typed text is saved with SAVE", 1, MUTED);
+        screen.text(24, status_y, "Typed text is saved with SAVE", 1, MUTED());
     }
     if !osk {
-        screen.text(24, 654, "Enter adds a line, backspace deletes", 1, MUTED);
+        screen.text(24, 654, "Enter adds a line, backspace deletes", 1, MUTED());
     }
 }
 
 fn draw_maps(screen: &Screen, maps: &Maps) {
     let width = screen.width();
-    screen.fill(0, 93, width, screen.height() - 93, BLACK);
+    screen.fill(0, 93, width, screen.height() - 93, BLACK());
     screen.round_rect(20, 108, width - 40, 512, 28, 0x0018_1c22);
     screen.fill(28, 116, width - 56, 496, 0x0014_2028);
     for index in 0..7 {
@@ -1525,21 +1521,21 @@ fn draw_maps(screen: &Screen, maps: &Maps) {
         screen.line(x, 108, x - 30, 620, 3, 0x0024_2c34);
     }
     screen.round_rect(40, 400, 130, 100, 18, 0x0020_3830);
-    screen.text(56, 420, "Park", 1, GREEN);
+    screen.text(56, 420, "Park", 1, GREEN());
     screen.line(250, 108, 210, 620, 14, 0x0020_3850);
     screen.line(250, 108, 210, 620, 8, 0x0030_5878);
-    screen.text(70, 250, "Kimi City", 2, TEXT);
-    screen.text(70, 278, "grid 7 / 12", 1, MUTED);
+    screen.text(70, 250, "Kimi City", 2, TEXT());
+    screen.text(70, 278, "grid 7 / 12", 1, MUTED());
     if let Some((px, py)) = maps.pin {
-        screen.circle(px, py, 16, RED);
-        screen.circle(px, py, 6, TEXT);
-        screen.fill(px - 3, py + 12, 6, 10, RED);
+        screen.circle(px, py, 16, RED());
+        screen.circle(px, py, 6, TEXT());
+        screen.fill(px - 3, py + 12, 6, 10, RED());
     } else {
-        screen.text_centered(width / 2, 350, "Tap the map to drop a pin", 2, TEXT);
+        screen.text_centered(width / 2, 350, "Tap the map to drop a pin", 2, TEXT());
     }
-    screen.round_rect(20, 636, width - 40, 104, 26, SURFACE);
+    screen.round_rect(20, 636, width - 40, 104, 26, SURFACE());
     if let Some((px, py)) = maps.pin {
-        screen.text(40, 654, "Pinned location", 2, TEXT);
+        screen.text(40, 654, "Pinned location", 2, TEXT());
         let lat = 377_749 + (620 - py) * 3;
         let lon = -1_224_194 + (px - 20) * 3;
         let mut line = [0u8; 48];
@@ -1569,39 +1565,39 @@ fn draw_maps(screen: &Screen, maps: &Maps) {
             line[used] = b' ';
             used += 1;
         }
-        screen.text(40, 688, slice_str(&line[..used]), 1, MUTED);
+        screen.text(40, 688, slice_str(&line[..used]), 1, MUTED());
     } else {
-        screen.text(40, 654, "Maps preview", 2, TEXT);
-        screen.text(40, 684, "Local, offline and tiny", 1, MUTED);
+        screen.text(40, 654, "Maps preview", 2, TEXT());
+        screen.text(40, 684, "Local, offline and tiny", 1, MUTED());
     }
 }
 
 fn draw_photos(screen: &Screen, photos: &Photos, shots: u32) {
     let width = screen.width();
-    screen.fill(0, 93, width, screen.height() - 93, BLACK);
+    screen.fill(0, 93, width, screen.height() - 93, BLACK());
     if let Some(index) = photos.selected {
         draw_photo(screen, index, 24, 118, width - 48, 470);
-        screen.text(24, 608, "Photo", 2, TEXT);
+        screen.text(24, 608, "Photo", 2, TEXT());
         let mut buf = [0u8; 20];
         let value = unsigned((index + 1) as u64, &mut buf);
-        screen.text(88, 608, value, 2, MUTED);
-        screen.text(24, 646, "Tap anywhere to close", 1, MUTED);
+        screen.text(88, 608, value, 2, MUTED());
+        screen.text(24, 646, "Tap anywhere to close", 1, MUTED());
         return;
     }
-    screen.text(24, 102, "GALLERY", 1, MUTED);
+    screen.text(24, 102, "GALLERY", 1, MUTED());
     for index in 0..6usize {
         let column = index as i64 % 2;
         let row = index as i64 / 2;
         let x = 24 + column * 224;
         let y = 120 + row * 156;
         draw_photo(screen, index, x, y, 208, 144);
-        screen.text(x + 6, y + 148 - 18, "img", 1, TEXT);
+        screen.text(x + 6, y + 148 - 18, "img", 1, TEXT());
     }
     let mut buf = [0u8; 20];
     let shots_text = unsigned(shots as u64, &mut buf);
-    screen.text(24, 620, "Camera shots:", 1, MUTED);
-    screen.text(156, 620, shots_text, 1, TEXT);
-    screen.text(24, 648, "Tap a photo to open it", 1, MUTED);
+    screen.text(24, 620, "Camera shots:", 1, MUTED());
+    screen.text(156, 620, shots_text, 1, TEXT());
+    screen.text(24, 648, "Tap a photo to open it", 1, MUTED());
 }
 
 fn draw_photo(screen: &Screen, index: usize, x: i64, y: i64, width: i64, height: i64) {
@@ -1639,7 +1635,7 @@ fn draw_photo(screen: &Screen, index: usize, x: i64, y: i64, width: i64, height:
         4 => {
             screen.gradient(x, y, width, height, 0x0020_1828, 0x0060_2040);
             for ring in 0..4 {
-                screen.ring(x + width / 2, y + height / 2, 18 + ring * 12, 2, RED);
+                screen.ring(x + width / 2, y + height / 2, 18 + ring * 12, 2, RED());
             }
         }
         _ => {
@@ -1653,13 +1649,13 @@ fn draw_photo(screen: &Screen, index: usize, x: i64, y: i64, width: i64, height:
 
 fn draw_files(screen: &Screen, files: &Files) {
     let width = screen.width();
-    screen.fill(0, 93, width, screen.height() - 93, BLACK);
+    screen.fill(0, 93, width, screen.height() - 93, BLACK());
     if let Some(index) = files.preview {
-        screen.round_rect(20, 104, width - 40, 560, 26, SURFACE);
+        screen.round_rect(20, 104, width - 40, 560, 26, SURFACE());
         let title = slice_str(&files.names[index][..files.name_len[index] as usize]);
-        screen.text(40, 120, title, 2, TEXT);
+        screen.text(40, 120, title, 2, TEXT());
         if files.binary {
-            screen.text(40, 160, "Binary file", 1, MUTED);
+            screen.text(40, 160, "Binary file", 1, MUTED());
         } else {
             let mut x = 40i64;
             let mut y = 160i64;
@@ -1676,75 +1672,75 @@ fn draw_files(screen: &Screen, files: &Files) {
                 if y > 630 {
                     break;
                 }
-                screen.text(x, y, slice_str(&[byte]), 1, TEXT);
+                screen.text(x, y, slice_str(&[byte]), 1, TEXT());
                 x += 8;
                 column += 1;
             }
         }
-        screen.text(40, 642, "Tap to close", 1, MUTED);
+        screen.text(40, 642, "Tap to close", 1, MUTED());
         return;
     }
     let tab = if files.disk { "DISK" } else { "RAMFS" };
-    screen.round_rect(24, 100, 194, 42, 21, if files.disk { SURFACE } else { RED_DIM });
-    screen.text_centered(121, 110, "RAMFS", 2, if files.disk { MUTED } else { TEXT });
-    screen.round_rect(230, 100, 226, 42, 21, if files.disk { RED_DIM } else { SURFACE });
-    screen.text_centered(343, 110, "DISK", 2, if files.disk { TEXT } else { MUTED });
+    screen.round_rect(24, 100, 194, 42, 21, if files.disk { SURFACE() } else { RED_DIM() });
+    screen.text_centered(121, 110, "RAMFS", 2, if files.disk { MUTED() } else { TEXT() });
+    screen.round_rect(230, 100, 226, 42, 21, if files.disk { RED_DIM() } else { SURFACE() });
+    screen.text_centered(343, 110, "DISK", 2, if files.disk { TEXT() } else { MUTED() });
     for index in 0..files.count.min(18) {
         let y = 170 + index as i64 * 30;
-        screen.round_rect(20, y, width - 40, 28, 14, if index % 2 == 0 { SURFACE } else { BLACK });
-        screen.round_rect(34, y + 7, 14, 14, 3, MUTED);
+        screen.round_rect(20, y, width - 40, 28, 14, if index % 2 == 0 { SURFACE() } else { BLACK() });
+        screen.round_rect(34, y + 7, 14, 14, 3, MUTED());
         let label = slice_str(&files.names[index][..files.name_len[index] as usize]);
-        screen.text(60, y + 10, label, 1, TEXT);
+        screen.text(60, y + 10, label, 1, TEXT());
         let mut buf = [0u8; 20];
         let size = unsigned(files.sizes[index], &mut buf);
-        screen.text(width - 28 - Screen::text_width(size, 1), y + 10, size, 1, MUTED);
+        screen.text(width - 28 - Screen::text_width(size, 1), y + 10, size, 1, MUTED());
     }
-    screen.text(24, 730, tab, 1, MUTED);
+    screen.text(24, 730, tab, 1, MUTED());
 }
 
 fn draw_weather(screen: &Screen, weather: &Weather, clock: [u64; 7]) {
     let width = screen.width();
-    screen.fill(0, 93, width, screen.height() - 93, BLACK);
-    screen.round_rect(20, 104, width - 40, 240, 30, SURFACE);
+    screen.fill(0, 93, width, screen.height() - 93, BLACK());
+    screen.round_rect(20, 104, width - 40, 240, 30, SURFACE());
     let temp = if weather.fahrenheit { 72 } else { 22 };
     let _ = temp;
     let mut buf = [0u8; 20];
     let text = signed(temp, &mut buf);
-    screen.text(40, 132, text, 5, TEXT);
-    screen.text(40 + Screen::text_width(text, 5) + 8, 140, if weather.fahrenheit { "F" } else { "C" }, 2, MUTED);
-    screen.text(40, 220, "Clear", 2, TEXT);
-    screen.text(40, 252, if weather.fahrenheit { "Feels like 75 F" } else { "Feels like 24 C" }, 1, MUTED);
+    screen.text(40, 132, text, 5, TEXT());
+    screen.text(40 + Screen::text_width(text, 5) + 8, 140, if weather.fahrenheit { "F" } else { "C" }, 2, MUTED());
+    screen.text(40, 220, "Clear", 2, TEXT());
+    screen.text(40, 252, if weather.fahrenheit { "Feels like 75 F" } else { "Feels like 24 C" }, 1, MUTED());
     screen.circle(392, 248, 34, 0x00f0_c050);
     for (dx, dy) in [(0, -1), (1, 0), (0, 1), (-1, 0), (1, 1), (-1, 1), (1, -1), (-1, -1)] {
         screen.line(392 + dx * 42, 248 + dy * 42, 392 + dx * 56, 248 + dy * 56, 2, 0x00f0_c050);
     }
-    button(screen, 304, 104, 152, 40, if weather.fahrenheit { "USE C" } else { "USE F" }, SURFACE_HI, MUTED);
-    screen.text(24, 370, "5-DAY FORECAST", 1, MUTED);
+    button(screen, 304, 104, 152, 40, if weather.fahrenheit { "USE C" } else { "USE F" }, SURFACE_HI(), MUTED());
+    screen.text(24, 370, "5-DAY FORECAST", 1, MUTED());
     let days = ["MON", "TUE", "WED", "THU", "FRI"];
     let highs = [24i64, 26, 23, 21, 25];
     let lows = [15i64, 17, 14, 12, 16];
     for index in 0..5 {
         let y = 398 + index as i64 * 64;
         let active = index == weather.day;
-        screen.round_rect(20, y, width - 40, 54, 18, if active { SURFACE_HI } else { SURFACE });
-        screen.text(40, y + 18, days[index], 2, if active { TEXT } else { MUTED });
+        screen.round_rect(20, y, width - 40, 54, 18, if active { SURFACE_HI() } else { SURFACE() });
+        screen.text(40, y + 18, days[index], 2, if active { TEXT() } else { MUTED() });
         let bar = (highs[index] - 10) * 12;
-        screen.round_rect(160, y + 24, bar, 6, 3, RED);
-        screen.round_rect(160, y + 24, (lows[index] - 10) * 12, 6, 3, OUTLINE);
+        screen.round_rect(160, y + 24, bar, 6, 3, RED());
+        screen.round_rect(160, y + 24, (lows[index] - 10) * 12, 6, 3, OUTLINE());
         let mut hi = [0u8; 20];
         let mut lo = [0u8; 20];
         let high = signed(if weather.fahrenheit { highs[index] * 9 / 5 + 32 } else { highs[index] }, &mut hi);
         let low = signed(if weather.fahrenheit { lows[index] * 9 / 5 + 32 } else { lows[index] }, &mut lo);
-        screen.text(width - 108, y + 18, high, 2, TEXT);
-        screen.text(width - 48, y + 18, low, 2, MUTED);
+        screen.text(width - 108, y + 18, high, 2, TEXT());
+        screen.text(width - 48, y + 18, low, 2, MUTED());
     }
     let _ = clock;
-    screen.text(24, 730, "Updated from the RTC", 1, MUTED);
+    screen.text(24, 730, "Updated from the RTC", 1, MUTED());
 }
 
 fn draw_terminal(screen: &Screen, terminal: &Terminal, osk: bool) {
     let width = screen.width();
-    screen.fill(0, 93, width, screen.height() - 93, BLACK);
+    screen.fill(0, 93, width, screen.height() - 93, BLACK());
     let max_lines = if osk { 24 } else { TERM_LINES };
     let separator_y = if osk { 416 } else { 684 };
     let input_y = if osk { 430 } else { 700 };
@@ -1752,18 +1748,18 @@ fn draw_terminal(screen: &Screen, terminal: &Terminal, osk: bool) {
     let mut y = 108i64;
     for index in start..terminal.count {
         let length = terminal.line_len[index] as usize;
-        screen.text_mono(20, y, slice_str(&terminal.lines[index][..length]), 1, TEXT);
+        screen.text_mono(20, y, slice_str(&terminal.lines[index][..length]), 1, TEXT());
         y += 13;
     }
-    screen.fill(20, separator_y, width - 40, 1, OUTLINE);
-    screen.text_mono(20, input_y, "$", 2, RED);
+    screen.fill(20, separator_y, width - 40, 1, OUTLINE());
+    screen.text_mono(20, input_y, "$", 2, RED());
     let shown = terminal.input_len.min(52);
-    screen.text_mono(44, input_y, slice_str(&terminal.input[..shown]), 2, TEXT);
+    screen.text_mono(44, input_y, slice_str(&terminal.input[..shown]), 2, TEXT());
     if terminal.input_len == 0 {
         screen.text_mono(44, input_y, "type a command", 2, 0x0050_505a);
     }
     if !osk {
-        screen.text_mono(20, 744, "help  ls  cat  date  df  mem  ps  uptime  clear", 1, MUTED);
+        screen.text_mono(20, 744, "help  ls  cat  date  df  mem  ps  uptime  clear", 1, MUTED());
     }
 }
 
@@ -2158,21 +2154,21 @@ fn html_to_lines(html: &[u8], browser: &mut Browser) {
 
 fn draw_browser(screen: &Screen, browser: &Browser, osk: bool) {
     let width = screen.width();
-    screen.fill(0, 93, width, screen.height() - 93, BLACK);
+    screen.fill(0, 93, width, screen.height() - 93, BLACK());
 
-    screen.round_rect(20, 104, width - 110, 44, 22, SURFACE_HI);
+    screen.round_rect(20, 104, width - 110, 44, 22, SURFACE_HI());
     if browser.url_len == 0 {
         screen.text(36, 118, "enter address", 1, 0x0050_505a);
     } else {
         let shown = browser.url_len.min(40);
-        screen.text(36, 118, slice_str(&browser.url[..shown]), 1, if browser.editing { TEXT } else { MUTED });
+        screen.text(36, 118, slice_str(&browser.url[..shown]), 1, if browser.editing { TEXT() } else { MUTED() });
     }
-    screen.round_rect(width - 84, 104, 64, 44, 22, RED);
-    screen.text_centered(width - 52, 116, "GO", 2, TEXT);
+    screen.round_rect(width - 84, 104, 64, 44, 22, RED());
+    screen.text_centered(width - 52, 116, "GO", 2, TEXT());
 
     if browser.title_len > 0 {
         let shown = browser.title_len.min(44);
-        screen.text(20, 162, slice_str(&browser.title[..shown]), 2, TEXT);
+        screen.text(20, 162, slice_str(&browser.title[..shown]), 2, TEXT());
     }
 
     let mut y = 196i64;
@@ -2180,22 +2176,22 @@ fn draw_browser(screen: &Screen, browser: &Browser, osk: bool) {
     let end = (browser.scroll + visible_lines).min(browser.line_count);
     for index in browser.scroll..end {
         let length = browser.line_len[index] as usize;
-        screen.text(20, y, slice_str(&browser.lines[index][..length]), 1, TEXT);
+        screen.text(20, y, slice_str(&browser.lines[index][..length]), 1, TEXT());
         y += 14;
     }
     if browser.line_count == 0 {
-        screen.text_centered(width / 2, 380, "Type a host and press GO", 2, MUTED);
+        screen.text_centered(width / 2, 380, "Type a host and press GO", 2, MUTED());
         if !osk {
             screen.text_centered(width / 2, 416, "e.g. example.com", 1, 0x0050_505a);
         }
     }
 
     let scroll_y = if osk { 410 } else { 700 };
-    screen.round_rect(width - 110, scroll_y, 44, 40, 12, SURFACE_HI);
-    screen.text_centered(width - 88, scroll_y + 10, "up", 1, TEXT);
-    screen.round_rect(width - 60, scroll_y, 44, 40, 12, SURFACE_HI);
-    screen.text_centered(width - 38, scroll_y + 10, "dn", 1, TEXT);
-    screen.text(20, scroll_y + 12, slice_str(&browser.status[..browser.status_len]), 1, MUTED);
+    screen.round_rect(width - 110, scroll_y, 44, 40, 12, SURFACE_HI());
+    screen.text_centered(width - 88, scroll_y + 10, "up", 1, TEXT());
+    screen.round_rect(width - 60, scroll_y, 44, 40, 12, SURFACE_HI());
+    screen.text_centered(width - 38, scroll_y + 10, "dn", 1, TEXT());
+    screen.text(20, scroll_y + 12, slice_str(&browser.status[..browser.status_len]), 1, MUTED());
 }
 
 fn apk_tap(apps: &mut Apps, point: (i64, i64)) {
@@ -2221,33 +2217,33 @@ fn apk_tap(apps: &mut Apps, point: (i64, i64)) {
 }
 
 fn draw_apk_field(screen: &Screen, x: i64, y: i64, label: &str, value: &[u8], len: usize) {
-    screen.text(x, y, label, 1, MUTED);
-    screen.text(x + 90, y, slice_str(&value[..len]), 1, TEXT);
+    screen.text(x, y, label, 1, MUTED());
+    screen.text(x + 90, y, slice_str(&value[..len]), 1, TEXT());
 }
 
 fn draw_apk(screen: &Screen, apk: &ApkApp) {
     let width = screen.width();
-    screen.fill(0, 93, width, screen.height() - 93, BLACK);
+    screen.fill(0, 93, width, screen.height() - 93, BLACK());
 
     if let Some(index) = apk.selected {
         let info = &apk.info;
-        screen.text(20, 104, slice_str(&apk.names[index][..apk.name_lens[index]]), 2, TEXT);
+        screen.text(20, 104, slice_str(&apk.names[index][..apk.name_lens[index]]), 2, TEXT());
         if !info.valid {
-            screen.text(20, 150, "Could not parse this APK", 1, RED);
-            screen.text(20, 700, "tap to go back", 1, MUTED);
+            screen.text(20, 150, "Could not parse this APK", 1, RED());
+            screen.text(20, 700, "tap to go back", 1, MUTED());
             return;
         }
         draw_apk_field(screen, 20, 140, "package", &info.package, info.package_len);
         draw_apk_field(screen, 20, 162, "version", &info.version_name, info.version_name_len);
         draw_apk_field(screen, 20, 184, "label", &info.label, info.label_len);
-        screen.text(20, 206, "sdk", 1, MUTED);
-        screen.text(110, 206, "min", 1, TEXT);
-        screen.text(140, 206, slice_str(&num_buf(info.min_sdk)), 1, TEXT);
-        screen.text(180, 206, "target", 1, TEXT);
-        screen.text(225, 206, slice_str(&num_buf(info.target_sdk)), 1, TEXT);
+        screen.text(20, 206, "sdk", 1, MUTED());
+        screen.text(110, 206, "min", 1, TEXT());
+        screen.text(140, 206, slice_str(&num_buf(info.min_sdk)), 1, TEXT());
+        screen.text(180, 206, "target", 1, TEXT());
+        screen.text(225, 206, slice_str(&num_buf(info.target_sdk)), 1, TEXT());
 
         let mut y = 238i64;
-        screen.text(20, y, "PERMISSIONS", 1, RED);
+        screen.text(20, y, "PERMISSIONS", 1, RED());
         y += 20;
         for i in 0..info.permission_count {
             if y > 560 {
@@ -2255,40 +2251,40 @@ fn draw_apk(screen: &Screen, apk: &ApkApp) {
             }
             let full = &info.permissions[i][..info.permission_lens[i]];
             let short = full.strip_prefix(b"android.permission.").unwrap_or(full);
-            screen.text(28, y, slice_str(short), 1, TEXT);
+            screen.text(28, y, slice_str(short), 1, TEXT());
             y += 17;
         }
         y += 8;
-        screen.text(20, y, "ACTIVITIES", 1, RED);
+        screen.text(20, y, "ACTIVITIES", 1, RED());
         y += 20;
         for i in 0..info.activity_count {
             if y > 640 {
                 break;
             }
-            screen.text(28, y, slice_str(&info.activities[i][..info.activity_lens[i]]), 1, TEXT);
+            screen.text(28, y, slice_str(&info.activities[i][..info.activity_lens[i]]), 1, TEXT());
             y += 17;
         }
         if info.has_dex {
-            screen.text(20, 664, "DEX", 1, RED);
-            screen.text(60, 664, "classes", 1, MUTED);
-            screen.text(115, 664, slice_str(&num_buf(info.dex_classes)), 1, TEXT);
-            screen.text(150, 664, "methods", 1, MUTED);
-            screen.text(210, 664, slice_str(&num_buf(info.dex_methods)), 1, TEXT);
+            screen.text(20, 664, "DEX", 1, RED());
+            screen.text(60, 664, "classes", 1, MUTED());
+            screen.text(115, 664, slice_str(&num_buf(info.dex_classes)), 1, TEXT());
+            screen.text(150, 664, "methods", 1, MUTED());
+            screen.text(210, 664, slice_str(&num_buf(info.dex_methods)), 1, TEXT());
         }
-        screen.text(20, 700, "inspection only — tap to go back", 1, MUTED);
+        screen.text(20, 700, "inspection only — tap to go back", 1, MUTED());
         return;
     }
 
-    screen.text(20, 104, "APK files on /disk", 2, TEXT);
+    screen.text(20, 104, "APK files on /disk", 2, TEXT());
     if apk.count == 0 {
-        screen.text_centered(width / 2, 380, "No .apk files found", 2, MUTED);
+        screen.text_centered(width / 2, 380, "No .apk files found", 2, MUTED());
         screen.text_centered(width / 2, 416, "Insert one via the Android app", 1, 0x0050_505a);
         return;
     }
     for i in 0..apk.count {
         let y = 120 + i as i64 * 56;
-        screen.round_rect(20, y, width - 40, 48, 16, SURFACE);
-        screen.text(36, y + 16, slice_str(&apk.names[i][..apk.name_lens[i]]), 2, TEXT);
+        screen.round_rect(20, y, width - 40, 48, 16, SURFACE());
+        screen.text(36, y + 16, slice_str(&apk.names[i][..apk.name_lens[i]]), 2, TEXT());
     }
 }
 
@@ -2321,40 +2317,40 @@ fn dvm_tap(apps: &mut Apps, point: (i64, i64)) {
 
 fn draw_dvm(screen: &Screen, dvm: &DvmApp) {
     let width = screen.width();
-    screen.fill(0, 93, width, screen.height() - 93, BLACK);
+    screen.fill(0, 93, width, screen.height() - 93, BLACK());
 
     if let Some(index) = dvm.selected {
-        screen.text(20, 104, slice_str(&dvm.names[index][..dvm.name_lens[index]]), 2, TEXT);
-        screen.text(20, 140, "OUTPUT", 1, RED);
+        screen.text(20, 104, slice_str(&dvm.names[index][..dvm.name_lens[index]]), 2, TEXT());
+        screen.text(20, 140, "OUTPUT", 1, RED());
         let mut y = 162i64;
         for line in dvm.output[..dvm.out_len].split(|&b| b == b'\n') {
             if y > 660 {
                 break;
             }
             if !line.is_empty() {
-                screen.text(28, y, slice_str(line), 1, TEXT);
+                screen.text(28, y, slice_str(line), 1, TEXT());
             }
             y += 20;
         }
         if dvm.ok {
-            screen.text(20, 684, "executed on mini-Dalvik", 1, MUTED);
+            screen.text(20, 684, "executed on mini-Dalvik", 1, MUTED());
         } else {
-            screen.text(20, 684, slice_str(&dvm.err[..dvm.err_len]), 1, RED);
+            screen.text(20, 684, slice_str(&dvm.err[..dvm.err_len]), 1, RED());
         }
-        screen.text(20, 704, "tap to go back", 1, MUTED);
+        screen.text(20, 704, "tap to go back", 1, MUTED());
         return;
     }
 
-    screen.text(20, 104, "DEX files on /disk", 2, TEXT);
+    screen.text(20, 104, "DEX files on /disk", 2, TEXT());
     if dvm.count == 0 {
-        screen.text_centered(width / 2, 380, "No .dex files found", 2, MUTED);
+        screen.text_centered(width / 2, 380, "No .dex files found", 2, MUTED());
         screen.text_centered(width / 2, 416, "Compile Java with javac + d8", 1, 0x0050_505a);
         return;
     }
     for i in 0..dvm.count {
         let y = 120 + i as i64 * 56;
-        screen.round_rect(20, y, width - 40, 48, 16, SURFACE);
-        screen.text(36, y + 16, slice_str(&dvm.names[i][..dvm.name_lens[i]]), 2, TEXT);
+        screen.round_rect(20, y, width - 40, 48, 16, SURFACE());
+        screen.text(36, y + 16, slice_str(&dvm.names[i][..dvm.name_lens[i]]), 2, TEXT());
     }
 }
 
@@ -2379,4 +2375,285 @@ fn num_buf(value: u32) -> [u8; 12] {
         i += 1;
     }
     buf
+}
+
+// ---- Marketplace (powered by kpkg) ----------------------------------------
+
+#[derive(Clone, Copy)]
+struct MarketItem {
+    name: [u8; 32],
+    name_len: usize,
+    desc: [u8; 64],
+    desc_len: usize,
+    kind: u8,    // 0 theme, 1 font, 2 app
+    source: u8,  // 0 built-in, 1 repo
+    index: usize,
+    installed: bool,
+}
+
+impl MarketItem {
+    fn name_str(&self) -> &str { slice_str(&self.name[..self.name_len]) }
+    fn desc_str(&self) -> &str { slice_str(&self.desc[..self.desc_len]) }
+}
+
+pub struct Market {
+    tab: usize,
+    scroll: [usize; 3],
+    items: [MarketItem; 40],
+    count: usize,
+    status: [u8; 64],
+    status_len: usize,
+    repo_ok: bool,
+}
+
+const EMPTY_ITEM: MarketItem = MarketItem {
+    name: [0; 32], name_len: 0, desc: [0; 64], desc_len: 0,
+    kind: 0, source: 0, index: 0, installed: false,
+};
+
+impl Market {
+    pub fn new() -> Self {
+        let mut m = Self {
+            tab: 0,
+            scroll: [0; 3],
+            items: [EMPTY_ITEM; 40],
+            count: 0,
+            status: [0; 64],
+            status_len: 0,
+            repo_ok: false,
+        };
+        m.set_status("Themes, fonts & apps — powered by kpkg");
+        m
+    }
+
+    fn set_status(&mut self, s: &str) {
+        let b = s.as_bytes();
+        self.status_len = b.len().min(64);
+        self.status[..self.status_len].copy_from_slice(&b[..self.status_len]);
+    }
+
+    fn push(&mut self, name: &str, desc: &str, kind: u8, source: u8, index: usize, installed: bool) {
+        if self.count >= self.items.len() { return; }
+        let it = &mut self.items[self.count];
+        it.name_len = name.len().min(32);
+        it.name[..it.name_len].copy_from_slice(&name.as_bytes()[..it.name_len]);
+        it.desc_len = desc.len().min(64);
+        it.desc[..it.desc_len].copy_from_slice(&desc.as_bytes()[..it.desc_len]);
+        it.kind = kind; it.source = source; it.index = index; it.installed = installed;
+        self.count += 1;
+    }
+
+    fn refresh(&mut self) {
+        self.count = 0;
+        let _ = k::mkdir("/disk/themes");
+        let _ = k::mkdir("/disk/fonts");
+        for i in 0..crate::theme::theme_count() {
+            self.push(crate::theme::theme_name(i), "Built-in theme", 0, 0, i, true);
+        }
+        for i in 0..crate::theme::font_count() {
+            if i == 4 && !crate::font_store::valid() { continue; }
+            self.push(crate::theme::font_name(i), "Built-in font", 1, 0, i, true);
+        }
+        let mut ord = 0usize;
+        k::kpkg::each_package(|p| {
+            let kind = match p.kind_str() { "theme" => 0, "font" => 1, _ => 2 };
+            let mut buf = [0u8; 96];
+            let path = asset_path(kind, p.name_str(), &mut buf);
+            let installed = k::stat(path).is_some();
+            self.push(p.name_str(), p.desc_str(), kind, 1, ord, installed);
+            ord += 1;
+        });
+        self.repo_ok = k::kpkg::repo_cached();
+        for t in 0..3 {
+            let n = self.kind_count(t as u8);
+            if self.scroll[t] + 6 > n { self.scroll[t] = n.saturating_sub(6); }
+        }
+    }
+
+    fn kind_count(&self, kind: u8) -> usize {
+        self.items[..self.count].iter().filter(|i| i.kind == kind).count()
+    }
+
+    fn filtered(&self, kind: u8, pos: usize) -> Option<MarketItem> {
+        let mut j = 0;
+        for i in 0..self.count {
+            let it = self.items[i];
+            if it.kind == kind {
+                if j == pos { return Some(it); }
+                j += 1;
+            }
+        }
+        None
+    }
+
+    fn action(&mut self, it: MarketItem) {
+        let name = it.name_str();
+        match it.kind {
+            0 => {
+                if it.source == 0 {
+                    crate::theme::apply_theme(it.index);
+                } else {
+                    let mut buf = [0u8; 96];
+                    let path = asset_path(0, name, &mut buf);
+                    if !it.installed { k::kpkg::install_to(name, path); }
+                    crate::theme::load_theme_file(path, name);
+                }
+                crate::theme::save();
+                self.set_status("Theme applied");
+            }
+            1 => {
+                if it.source == 0 {
+                    crate::theme::apply_font(it.index);
+                } else {
+                    let mut buf = [0u8; 96];
+                    let path = asset_path(1, name, &mut buf);
+                    if !it.installed { k::kpkg::install_to(name, path); }
+                    crate::font_store::load(path, name);
+                    crate::theme::apply_font(4);
+                }
+                crate::theme::save();
+                self.set_status("Font applied");
+            }
+            _ => {
+                let mut buf = [0u8; 96];
+                let path = asset_path(2, name, &mut buf);
+                if k::kpkg::install_to(name, path) {
+                    self.set_status("Installed — run it in the Terminal");
+                } else {
+                    self.set_status("Install failed (repo reachable?)");
+                }
+            }
+        }
+        self.refresh();
+    }
+}
+
+fn asset_path<'a>(kind: u8, name: &str, buf: &'a mut [u8; 96]) -> &'a str {
+    let (dir, ext) = match kind {
+        0 => ("/disk/themes/", ".theme"),
+        1 => ("/disk/fonts/", ".kfont"),
+        _ => ("/disk/bin/", ""),
+    };
+    let mut n = 0usize;
+    for piece in [dir.as_bytes(), name.as_bytes(), ext.as_bytes()] {
+        let take = piece.len().min(buf.len() - n);
+        buf[n..n + take].copy_from_slice(&piece[..take]);
+        n += take;
+    }
+    core::str::from_utf8(&buf[..n]).unwrap_or("")
+}
+
+fn item_active(it: &MarketItem) -> bool {
+    match (it.kind, it.source) {
+        (0, 0) => !crate::theme::is_custom() && crate::theme::active_theme() == it.index,
+        (0, _) => crate::theme::is_custom() && crate::theme::custom_name() == it.name_str(),
+        (1, 0) => crate::theme::active_font() == it.index,
+        (1, _) => crate::theme::active_font() == 4 && crate::font_store::name() == it.name_str(),
+        _ => false,
+    }
+}
+
+fn market_tap(apps: &mut Apps, point: (i64, i64)) {
+    let m = &mut apps.market;
+    if point.1 >= 100 && point.1 <= 142 {
+        m.tab = if point.0 < 165 { 0 } else if point.0 < 315 { 1 } else { 2 };
+        return;
+    }
+    if point.1 >= 150 && point.1 <= 186 && point.0 >= 330 {
+        if k::kpkg::update_quiet("") {
+            m.set_status("Repo updated");
+        } else {
+            m.set_status("Fetch failed — built-ins still available");
+        }
+        m.refresh();
+        return;
+    }
+    if point.1 >= 760 {
+        if point.0 < 160 {
+            m.scroll[m.tab] = m.scroll[m.tab].saturating_sub(1);
+        } else if point.0 > 320 {
+            let n = m.kind_count(m.tab as u8);
+            if m.scroll[m.tab] + 6 < n { m.scroll[m.tab] += 1; }
+        }
+        return;
+    }
+    if point.1 >= 196 && point.0 >= 20 && point.0 < 460 {
+        let row = ((point.1 - 196) / 96) as usize;
+        if row < 6 {
+            if let Some(it) = m.filtered(m.tab as u8, m.scroll[m.tab] + row) {
+                m.action(it);
+            }
+        }
+    }
+}
+
+fn draw_market(screen: &Screen, m: &Market) {
+    let width = screen.width();
+    screen.fill(0, 93, width, screen.height() - 93, BLACK());
+
+    let tabs = ["Themes", "Fonts", "Apps"];
+    for t in 0..3 {
+        let x = 20 + t as i64 * 150;
+        let w = if t == 2 { 136 } else { 140 };
+        let active = m.tab == t;
+        screen.round_rect(x, 100, w, 42, 21, if active { RED_DIM() } else { SURFACE() });
+        screen.text_centered(x + w / 2, 110, tabs[t], 2, if active { TEXT() } else { MUTED() });
+    }
+
+    screen.text(24, 162, slice_str(&m.status[..m.status_len]), 1, MUTED());
+    button(screen, 330, 150, 126, 36, "Refresh", SURFACE_HI(), TEXT());
+
+    let kind = m.tab as u8;
+    let mut row = 0i64;
+    let mut skipped = 0usize;
+    for i in 0..m.count {
+        let it = m.items[i];
+        if it.kind != kind { continue; }
+        if skipped < m.scroll[m.tab] { skipped += 1; continue; }
+        if row >= 6 { break; }
+        let y = 196 + row * 96;
+        screen.round_rect(20, y, width - 40, 88, 20, SURFACE());
+        let name = it.name_str();
+        let nlen = name.len().min(22);
+        screen.text(40, y + 14, &name[..nlen], 2, TEXT());
+        let desc = it.desc_str();
+        let dlen = desc.len().min(44);
+        screen.text(40, y + 46, &desc[..dlen], 1, MUTED());
+        let tag = match it.kind { 0 => "THEME", 1 => "FONT", _ => "APP" };
+        screen.text(40, y + 66, tag, 1, OUTLINE());
+
+        let active = item_active(&it);
+        let (label, bg, fg) = if it.kind == 2 {
+            if it.installed { ("Installed", SURFACE_HI(), MUTED()) } else { ("Install", SURFACE_HI(), TEXT()) }
+        } else if active {
+            ("Active", SURFACE_MAX(), GREEN())
+        } else if it.installed || it.source == 0 {
+            ("Apply", RED(), TEXT())
+        } else {
+            ("Install", SURFACE_HI(), TEXT())
+        };
+        button(screen, 330, y + 24, 110, 40, label, bg, fg);
+        row += 1;
+    }
+
+    if row == 0 {
+        screen.text_centered(width / 2, 300, "Nothing here yet", 2, MUTED());
+        screen.text_centered(width / 2, 336, "Tap Refresh to fetch the kpkg repo", 1, MUTED());
+    }
+
+    button(screen, 20, 760, 120, 32, "UP", SURFACE_HI(), MUTED());
+    button(screen, 340, 760, 120, 32, "DOWN", SURFACE_HI(), MUTED());
+    let total = m.kind_count(kind);
+    let mut buf = [0u8; 20];
+    let pos = unsigned((m.scroll[m.tab] + 1) as u64, &mut buf);
+    let mut buf2 = [0u8; 20];
+    let tot = unsigned(total as u64, &mut buf2);
+    let mut line = [0u8; 48];
+    let mut ln = 0;
+    for piece in [pos.as_bytes(), b" / ", tot.as_bytes()] {
+        let take = piece.len().min(line.len() - ln);
+        line[ln..ln + take].copy_from_slice(&piece[..take]);
+        ln += take;
+    }
+    screen.text_centered(width / 2, 768, slice_str(&line[..ln]), 1, MUTED());
 }

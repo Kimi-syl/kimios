@@ -9,12 +9,15 @@ mod apps;
 mod draw;
 mod font_data;
 mod keyboard;
+mod theme;
+mod font_store;
 
 use core::panic::PanicInfo;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use draw::Screen;
 use libkimi as k;
+use crate::theme::{BLACK, SURFACE, SURFACE_HI, SURFACE_MAX, OUTLINE, TEXT, MUTED, RED, RED_DIM, GREEN};
 
 /// User VA of the latency mailbox (0 = unavailable). Stages are written here so
 /// the Android frontend can read them out of shared guest RAM.
@@ -39,16 +42,6 @@ fn ibump_seq() {
     }
 }
 
-const BLACK: u32 = 0x0000_0000;
-const SURFACE: u32 = 0x0014_1419;
-const SURFACE_HI: u32 = 0x001e_1e25;
-const SURFACE_MAX: u32 = 0x0027_272f;
-const OUTLINE: u32 = 0x0035_3540;
-const TEXT: u32 = 0x00f2_f2f6;
-const MUTED: u32 = 0x0093_93a0;
-const RED: u32 = 0x00e0_352b;
-const RED_DIM: u32 = 0x005c_1a16;
-const GREEN: u32 = 0x0060_d18a;
 
 const CLOCK_X: [i64; 60] = [
     0, 107, 213, 316, 416, 512, 602, 685, 761, 828, 887, 935, 974, 1002, 1018,
@@ -83,6 +76,7 @@ enum AppKind {
     Browser,
     Apk,
     Dvm,
+    Market,
 }
 
 const GRID: [AppKind; 12] = [
@@ -100,7 +94,7 @@ const GRID: [AppKind; 12] = [
     AppKind::Terminal,
 ];
 
-const GRID2: [AppKind; 3] = [AppKind::Browser, AppKind::Apk, AppKind::Dvm];
+const GRID2: [AppKind; 4] = [AppKind::Browser, AppKind::Apk, AppKind::Dvm, AppKind::Market];
 
 fn page_apps(page: usize) -> &'static [AppKind] {
     match page {
@@ -268,6 +262,7 @@ fn gui_run() -> ! {
     };
 
     let screen = Screen::new(base, width, height, stride);
+    theme::load();
     INSTR.store(k::instr_map().unwrap_or(0), Ordering::Relaxed);
     while k::input_poll().is_some() {}
     let mut ui = Ui::new(screen.width(), screen.height());
@@ -327,6 +322,25 @@ pub extern "C" fn _start() -> ! {
 #[cfg(not(target_os = "none"))]
 pub extern "C" fn kimi_gui_start() -> ! {
     gui_run()
+}
+
+/// Host-only test hook: load a `.theme` and `.kfont` asset (NUL-terminated path
+/// pointers), apply them, and return a success bitmask (bit0 theme, bit1 font).
+/// Used by the native harness to verify the downloadable-asset parsers.
+#[no_mangle]
+#[cfg(not(target_os = "none"))]
+pub extern "C" fn kimi_test_load(theme_path: u64, font_path: u64) -> u64 {
+    unsafe fn cstr(p: *const u8) -> &'static str {
+        let mut n = 0;
+        while *p.add(n) != 0 { n += 1; }
+        core::str::from_utf8(core::slice::from_raw_parts(p, n)).unwrap_or("")
+    }
+    let t = unsafe { cstr(theme_path as *const u8) };
+    let f = unsafe { cstr(font_path as *const u8) };
+    let ot = theme::load_theme_file(t, "nord");
+    let of = font_store::load(f, "pixel-bold");
+    if of { theme::apply_font(4); }
+    (ot as u64) | ((of as u64) << 1)
 }
 
 fn handle(screen: &Screen, ui: &mut Ui, event: k::InputEvent, clock: [u64; 7]) -> bool {
@@ -407,7 +421,7 @@ fn press_feedback(screen: &Screen, ui: &Ui) {
     if let Some(point) = ui.press {
         screen.reset_dirty();
         screen.ring(point.0, point.1, 18, 3, 0x00a0_a8b8);
-        screen.circle(point.0, point.1, 3, TEXT);
+        screen.circle(point.0, point.1, 3, TEXT());
         istamp(k::IBOX_DRAWN, k::cntpct());
         present_dirty(screen);
     }
@@ -640,7 +654,7 @@ fn render(screen: &Screen, ui: &mut Ui, clock: [u64; 7]) {
     }
     if let Some(point) = ui.press {
         screen.ring(point.0, point.1, 18, 3, 0x00a0_a8b8);
-        screen.circle(point.0, point.1, 3, TEXT);
+        screen.circle(point.0, point.1, 3, TEXT());
     }
     ui.paint_bg = false;
     present_dirty(screen);
@@ -689,14 +703,14 @@ fn draw_wallpaper(screen: &Screen, y_offset: i64, dark: bool) {
 fn draw_status_bar(screen: &Screen, clock: [u64; 7], ui: &Ui) {
     screen.set_app_space(false);
     let width = screen.width();
-    screen.fill(0, 0, width, 28, BLACK);
+    screen.fill(0, 0, width, 28, BLACK());
 
     let mut time = [0u8; 5];
     format_time(clock[4], clock[5], &mut time);
-    screen.text(16, 7, str_of(&time), 2, TEXT);
+    screen.text(16, 7, str_of(&time), 2, TEXT());
 
     // Notification dot.
-    screen.circle(120, 14, 3, RED);
+    screen.circle(120, 14, 3, RED());
 
     // Signal bars.
     for index in 0..4 {
@@ -706,18 +720,18 @@ fn draw_status_bar(screen: &Screen, clock: [u64; 7], ui: &Ui) {
             22 - bar,
             4,
             bar,
-            if index < 3 { TEXT } else { MUTED },
+            if index < 3 { TEXT() } else { MUTED() },
         );
     }
-    screen.text(width - 76, 7, "5G", 1, MUTED);
+    screen.text(width - 76, 7, "5G", 1, MUTED());
 
     // Battery.
     let battery_x = width - 44;
-    screen.round_rect(battery_x, 8, 30, 15, 4, TEXT);
-    screen.round_rect(battery_x + 2, 10, 26, 11, 3, BLACK);
+    screen.round_rect(battery_x, 8, 30, 15, 4, TEXT());
+    screen.round_rect(battery_x + 2, 10, 26, 11, 3, BLACK());
     let charge = 20 * (if ui.settings.torch { 5 } else { 14 }) / 20;
-    screen.round_rect(battery_x + 4, 12, charge, 7, 2, GREEN);
-    screen.fill(battery_x + 31, 12, 2, 7, TEXT);
+    screen.round_rect(battery_x + 4, 12, charge, 7, 2, GREEN());
+    screen.fill(battery_x + 31, 12, 2, 7, TEXT());
 }
 
 fn draw_lock(screen: &Screen, clock: [u64; 7], y_offset: i64) {
@@ -727,7 +741,7 @@ fn draw_lock(screen: &Screen, clock: [u64; 7], y_offset: i64) {
 
     let mut date = [0u8; 16];
     format_date(clock, &mut date);
-    screen.text(28, screen.sy(58) + y_offset, str_of(&date), 2, MUTED);
+    screen.text(28, screen.sy(58) + y_offset, str_of(&date), 2, MUTED());
     screen.text(28, screen.sy(82) + y_offset, "KIMIOS PREVIEW", 1, 0x0060_606c);
 
     let mut time = [0u8; 5];
@@ -740,14 +754,14 @@ fn draw_lock(screen: &Screen, clock: [u64; 7], y_offset: i64) {
         str_of(&time),
         cells,
         3,
-        TEXT,
+        TEXT(),
     );
 
     notification_card(
         screen,
         28,
         screen.sy(260) + y_offset,
-        RED,
+        RED(),
         "Messages",
         "3 new messages",
         "now",
@@ -764,9 +778,9 @@ fn draw_lock(screen: &Screen, clock: [u64; 7], y_offset: i64) {
 
     // Fingerprint target: three broken ridges opening at the bottom.
     for (radius, inner, outer) in [(33i64, 6usize, 54usize), (25, 9, 51), (17, 12, 48)] {
-        draw_arc(screen, center, screen.sy(540) + y_offset, radius, inner, outer, 3, RED);
+        draw_arc(screen, center, screen.sy(540) + y_offset, radius, inner, outer, 3, RED());
     }
-    screen.text_centered(center, screen.sy(590) + y_offset, "Touch to unlock", 2, TEXT);
+    screen.text_centered(center, screen.sy(590) + y_offset, "Touch to unlock", 2, TEXT());
     screen.text_centered(center, screen.sy(620) + y_offset, "tap / swipe up / enter", 1, 0x0060_606c);
 
     draw_home_indicator(screen);
@@ -783,11 +797,11 @@ fn notification_card(
 ) {
     let width = screen.width() - 56;
     let height = screen.sy(92);
-    screen.round_rect(x, y, width, height, 26, SURFACE);
+    screen.round_rect(x, y, width, height, 26, SURFACE());
     screen.circle(x + 38, y + height / 2, 16, accent);
-    screen.circle(x + 38, y + height / 2, 6, BLACK);
-    screen.text(x + 68, y + height * 22 / 100, title, 2, TEXT);
-    screen.text(x + 68, y + height * 52 / 100, body, 1, MUTED);
+    screen.circle(x + 38, y + height / 2, 6, BLACK());
+    screen.text(x + 68, y + height * 22 / 100, title, 2, TEXT());
+    screen.text(x + 68, y + height * 52 / 100, body, 1, MUTED());
     screen.text(x + width - 34, y + height * 24 / 100, age, 1, 0x0060_606c);
 }
 
@@ -815,35 +829,35 @@ fn draw_home(
     }
 
     // At-a-glance / clock widget.
-    screen.round_rect(24, screen.sy(44) + y_offset, width - 48, screen.sy(82), 26, SURFACE);
+    screen.round_rect(24, screen.sy(44) + y_offset, width - 48, screen.sy(82), 26, SURFACE());
     let mut time = [0u8; 5];
     format_time(clock[4], clock[5], &mut time);
-    screen.text(48, screen.sy(56) + y_offset, str_of(&time), 3, TEXT);
+    screen.text(48, screen.sy(56) + y_offset, str_of(&time), 3, TEXT());
     let mut date = [0u8; 16];
     format_date(clock, &mut date);
-    screen.text(48, screen.sy(94) + y_offset, str_of(&date), 1, MUTED);
-    screen.text(width - 48 - Screen::text_width("22", 3), screen.sy(60) + y_offset, "22", 3, RED);
-    screen.text(width - 76, screen.sy(96) + y_offset, "CLEAR", 1, MUTED);
+    screen.text(48, screen.sy(94) + y_offset, str_of(&date), 1, MUTED());
+    screen.text(width - 48 - Screen::text_width("22", 3), screen.sy(60) + y_offset, "22", 3, RED());
+    screen.text(width - 76, screen.sy(96) + y_offset, "CLEAR", 1, MUTED());
 
     if !compact {
         // Search pill.
-        screen.round_rect(24, screen.sy(142) + y_offset, width - 48, screen.sy(54), 27, SURFACE_HI);
-        screen.ring(54, screen.sy(169) + y_offset, 8, 2, MUTED);
-        screen.line(60, screen.sy(175) + y_offset, 66, screen.sy(181) + y_offset, 2, MUTED);
-        screen.text(80, screen.sy(162) + y_offset, "Search", 2, MUTED);
+        screen.round_rect(24, screen.sy(142) + y_offset, width - 48, screen.sy(54), 27, SURFACE_HI());
+        screen.ring(54, screen.sy(169) + y_offset, 8, 2, MUTED());
+        screen.line(60, screen.sy(175) + y_offset, 66, screen.sy(181) + y_offset, 2, MUTED());
+        screen.text(80, screen.sy(162) + y_offset, "Search", 2, MUTED());
 
         // Music widget.
         let music_y = screen.sy(212) + y_offset;
         let (title, subtitle, playing, progress) = apps::home_music(&ui.apps.music);
-        screen.round_rect(24, music_y, width - 48, screen.sy(100), 28, SURFACE);
-        screen.round_rect(42, music_y + screen.sy(18), 64, 64, 20, SURFACE_HI);
-        screen.circle(74, music_y + screen.sy(50), 18, RED_DIM);
-        screen.circle(74, music_y + screen.sy(50), 7, RED);
-        screen.text(122, music_y + screen.sy(20), title, 2, TEXT);
-        screen.text(122, music_y + screen.sy(48), subtitle, 1, MUTED);
+        screen.round_rect(24, music_y, width - 48, screen.sy(100), 28, SURFACE());
+        screen.round_rect(42, music_y + screen.sy(18), 64, 64, 20, SURFACE_HI());
+        screen.circle(74, music_y + screen.sy(50), 18, RED_DIM());
+        screen.circle(74, music_y + screen.sy(50), 7, RED());
+        screen.text(122, music_y + screen.sy(20), title, 2, TEXT());
+        screen.text(122, music_y + screen.sy(48), subtitle, 1, MUTED());
         draw_play(screen, width - 76, music_y + screen.sy(50), playing);
-        screen.round_rect(122, music_y + screen.sy(76), width - 190, 4, 2, OUTLINE);
-        screen.round_rect(122, music_y + screen.sy(76), (width - 190) * progress / 1000, 4, 2, RED);
+        screen.round_rect(122, music_y + screen.sy(76), width - 190, 4, 2, OUTLINE());
+        screen.round_rect(122, music_y + screen.sy(76), (width - 190) * progress / 1000, 4, 2, RED());
     }
 
     // App grid.
@@ -852,7 +866,7 @@ fn draw_home(
     for (index, app) in page_apps(ui.home_page).iter().enumerate() {
         let (cx, cy) = grid_center(width, height, index);
         draw_app_icon(screen, *app, cx, cy + y_offset, icon, pressed == Some(*app));
-        screen.text_centered(cx, cy + icon / 2 + 12 + y_offset, app.label(), 1, MUTED);
+        screen.text_centered(cx, cy + icon / 2 + 12 + y_offset, app.label(), 1, MUTED());
     }
 
     // Page indicator (two pages).
@@ -860,15 +874,15 @@ fn draw_home(
     for page in 0..2usize {
         let dx = width / 2 - 12 + page as i64 * 24;
         if page == ui.home_page {
-            screen.round_rect(dx - 10, dots_y - 3, 20, 6, 3, RED);
+            screen.round_rect(dx - 10, dots_y - 3, 20, 6, 3, RED());
         } else {
-            screen.circle(dx, dots_y, 3, OUTLINE);
+            screen.circle(dx, dots_y, 3, OUTLINE());
         }
     }
 
     // Dock.
     let dock_y = height - 120 + y_offset;
-    screen.round_rect(20, dock_y, width - 40, 92, 34, SURFACE);
+    screen.round_rect(20, dock_y, width - 40, 92, 34, SURFACE());
     for (index, app) in DOCK.iter().enumerate() {
         let cx = 76 + index as i64 * 109;
         draw_app_icon(screen, *app, cx, dock_y + 46, 56, pressed == Some(*app));
@@ -878,7 +892,7 @@ fn draw_home(
 }
 
 fn draw_app_icon(screen: &Screen, app: AppKind, cx: i64, cy: i64, size: i64, pressed: bool) {
-    let tile = if pressed { SURFACE_MAX } else { SURFACE_HI };
+    let tile = if pressed { SURFACE_MAX() } else { SURFACE_HI() };
     screen.round_rect(cx - size / 2, cy - size / 2, size, size, size / 4, tile);
     screen.round_rect(
         cx - size / 2 + 1,
@@ -888,11 +902,11 @@ fn draw_app_icon(screen: &Screen, app: AppKind, cx: i64, cy: i64, size: i64, pre
         size / 4 - 1,
         tile,
     );
-    let glyph = if app == AppKind::Music { RED } else { TEXT };
+    let glyph = if app == AppKind::Music { RED() } else { TEXT() };
     draw_glyph(screen, app, cx, cy, size, glyph);
     if app == AppKind::Messages {
-        screen.circle(cx + size / 2 - 5, cy - size / 2 + 5, 6, RED);
-        screen.circle(cx + size / 2 - 5, cy - size / 2 + 5, 2, BLACK);
+        screen.circle(cx + size / 2 - 5, cy - size / 2 + 5, 6, RED());
+        screen.circle(cx + size / 2 - 5, cy - size / 2 + 5, 2, BLACK());
     }
 }
 
@@ -918,11 +932,11 @@ fn draw_glyph(screen: &Screen, app: AppKind, cx: i64, cy: i64, size: i64, color:
                 s * 2 / 3 - 4,
                 s / 2 - 4,
                 s / 12,
-                SURFACE_HI,
+                SURFACE_HI(),
             );
             screen.fill(cx - s / 6, cy - s / 3, s / 5, s / 12, color);
             screen.ring(cx, cy + s / 24, s / 5, 2, color);
-            screen.circle(cx, cy + s / 24, s / 9, SURFACE_HI);
+            screen.circle(cx, cy + s / 24, s / 9, SURFACE_HI());
         }
         AppKind::Music => {
             screen.circle(cx - s / 10, cy + s / 6, s / 9, color);
@@ -960,7 +974,7 @@ fn draw_glyph(screen: &Screen, app: AppKind, cx: i64, cy: i64, size: i64, color:
                 s / 2 - 4,
                 s * 2 / 3 - 4,
                 s / 16,
-                SURFACE_HI,
+                SURFACE_HI(),
             );
             for row in 0..3 {
                 for column in 0..3 {
@@ -982,7 +996,7 @@ fn draw_glyph(screen: &Screen, app: AppKind, cx: i64, cy: i64, size: i64, color:
                 s * 2 / 3 - 4,
                 s * 2 / 3 - 4,
                 s / 16,
-                SURFACE_HI,
+                SURFACE_HI(),
             );
             for row in 0..3 {
                 screen.fill(cx - s / 5, cy - s / 6 + row * s / 6, s * 2 / 5, s / 22, color);
@@ -1003,7 +1017,7 @@ fn draw_glyph(screen: &Screen, app: AppKind, cx: i64, cy: i64, size: i64, color:
                     color,
                 );
             }
-            screen.circle(cx, cy, s / 10, SURFACE_HI);
+            screen.circle(cx, cy, s / 10, SURFACE_HI());
         }
         AppKind::Files => {
             screen.round_rect(cx - s / 3, cy - s / 5, s * 2 / 3, s / 2, s / 14, color);
@@ -1013,7 +1027,7 @@ fn draw_glyph(screen: &Screen, app: AppKind, cx: i64, cy: i64, size: i64, color:
                 s * 2 / 3 - 4,
                 s / 2 - 4,
                 s / 18,
-                SURFACE_HI,
+                SURFACE_HI(),
             );
             screen.fill(cx - s / 3, cy - s / 4, s / 3, s / 12, color);
         }
@@ -1043,7 +1057,7 @@ fn draw_glyph(screen: &Screen, app: AppKind, cx: i64, cy: i64, size: i64, color:
                 s * 2 / 3 - 4,
                 s * 2 / 3 - 4,
                 s / 18,
-                SURFACE_HI,
+                SURFACE_HI(),
             );
             screen.line(cx - s / 6, cy - s / 6, cx, cy, 3, color);
             screen.line(cx, cy, cx - s / 6, cy + s / 6, 3, color);
@@ -1057,32 +1071,37 @@ fn draw_glyph(screen: &Screen, app: AppKind, cx: i64, cy: i64, size: i64, color:
         }
         AppKind::Apk => {
             screen.round_rect(cx - s / 4, cy - s / 3, s / 2, s * 2 / 3, s / 12, color);
-            screen.round_rect(cx - s / 4 + 2, cy - s / 3 + 2, s / 2 - 4, s * 2 / 3 - 4, s / 16, SURFACE_HI);
+            screen.round_rect(cx - s / 4 + 2, cy - s / 3 + 2, s / 2 - 4, s * 2 / 3 - 4, s / 16, SURFACE_HI());
             screen.line(cx - s / 8, cy - s / 6, cx - s / 8, cy + s / 6, 2, color);
             screen.line(cx + s / 8, cy - s / 6, cx + s / 8, cy + s / 6, 2, color);
             screen.line(cx - s / 8, cy, cx + s / 8, cy, 2, color);
         }
         AppKind::Dvm => {
             screen.round_rect(cx - s / 3, cy - s / 3, s * 2 / 3, s * 2 / 3, s / 12, color);
-            screen.round_rect(cx - s / 3 + 2, cy - s / 3 + 2, s * 2 / 3 - 4, s * 2 / 3 - 4, s / 16, SURFACE_HI);
+            screen.round_rect(cx - s / 3 + 2, cy - s / 3 + 2, s * 2 / 3 - 4, s * 2 / 3 - 4, s / 16, SURFACE_HI());
             screen.line(cx - s / 10, cy - s / 6, cx - s / 10, cy + s / 6, 3, color);
             screen.line(cx - s / 10, cy - s / 6, cx + s / 6, cy, 3, color);
             screen.line(cx - s / 10, cy + s / 6, cx + s / 6, cy, 3, color);
+        }
+        AppKind::Market => {
+            for (dx, dy) in [(-1, -1), (1, -1), (-1, 1), (1, 1)] {
+                screen.round_rect(cx + dx * s / 5 - s / 8, cy + dy * s / 5 - s / 8, s / 4, s / 4, s / 16, color);
+            }
         }
     }
 }
 
 fn draw_play(screen: &Screen, cx: i64, cy: i64, playing: bool) {
-    screen.circle(cx, cy, 21, SURFACE);
-    screen.ring(cx, cy, 20, 2, OUTLINE);
+    screen.circle(cx, cy, 21, SURFACE());
+    screen.ring(cx, cy, 20, 2, OUTLINE());
     if playing {
-        screen.fill(cx - 6, cy - 8, 4, 16, TEXT);
-        screen.fill(cx + 2, cy - 8, 4, 16, TEXT);
+        screen.fill(cx - 6, cy - 8, 4, 16, TEXT());
+        screen.fill(cx + 2, cy - 8, 4, 16, TEXT());
     } else {
-        screen.line(cx - 4, cy - 8, cx - 4, cy + 8, 2, TEXT);
-        screen.line(cx - 4, cy - 8, cx + 8, cy, 2, TEXT);
-        screen.line(cx - 4, cy + 8, cx + 8, cy, 2, TEXT);
-        screen.line(cx - 2, cy, cx + 7, cy, 2, TEXT);
+        screen.line(cx - 4, cy - 8, cx - 4, cy + 8, 2, TEXT());
+        screen.line(cx - 4, cy - 8, cx + 8, cy, 2, TEXT());
+        screen.line(cx - 4, cy + 8, cx + 8, cy, 2, TEXT());
+        screen.line(cx - 2, cy, cx + 7, cy, 2, TEXT());
     }
 }
 
@@ -1112,7 +1131,7 @@ fn draw_arc(
 
 fn draw_home_indicator(screen: &Screen) {
     let width = screen.width();
-    screen.round_rect(width / 2 - 62, screen.height() - 20, 124, 5, 2, TEXT);
+    screen.round_rect(width / 2 - 62, screen.height() - 20, 124, 5, 2, TEXT());
 }
 
 fn draw_app(
@@ -1128,12 +1147,12 @@ fn draw_app(
     let width = screen.width();
     let height = screen.height();
     if paint_bg {
-        screen.fill(x, 0, width - x, height, BLACK);
+        screen.fill(x, 0, width - x, height, BLACK());
     }
 
     // Large Material 3 top app bar.
     draw_back(screen, x + 40, 64);
-    screen.text(x + 78, 48, app.label(), 2, TEXT);
+    screen.text(x + 78, 48, app.label(), 2, TEXT());
     screen.fill(x, 92, width, 1, 0x0020_2026);
 
     let osk = x_offset == 0 && ui.osk && apps::text_focused(&ui.apps, app);
@@ -1153,23 +1172,23 @@ fn draw_app(
 }
 
 fn draw_back(screen: &Screen, cx: i64, cy: i64) {
-    screen.line(cx + 9, cy - 12, cx - 9, cy, 3, TEXT);
-    screen.line(cx - 9, cy, cx + 9, cy + 12, 3, TEXT);
+    screen.line(cx + 9, cy - 12, cx - 9, cy, 3, TEXT());
+    screen.line(cx - 9, cy, cx + 9, cy + 12, 3, TEXT());
 }
 
 fn draw_calculator(screen: &Screen, ui: &Ui, x_offset: i64) {
     let x = x_offset;
     let width = screen.width();
-    screen.fill(x, 93, width, screen.height() - 93, BLACK);
+    screen.fill(x, 93, width, screen.height() - 93, BLACK());
 
-    screen.round_rect(x + 20, 112, width - 40, 148, 30, SURFACE);
+    screen.round_rect(x + 20, 112, width - 40, 148, 30, SURFACE());
     let mut digits = [0u8; 20];
     let text = format_i64(ui.calc.current, &mut digits);
     let scale = if text.len() > 9 { 3 } else { 4 };
     let text_width = Screen::text_width(text, scale);
-    screen.text(x + width - 44 - text_width, 176, text, scale, TEXT);
+    screen.text(x + width - 44 - text_width, 176, text, scale, TEXT());
     if let Some(op) = ui.calc.pending {
-        screen.text(x + width - 44 - 20, 136, str_of(&[op]), 2, RED);
+        screen.text(x + width - 44 - 20, 136, str_of(&[op]), 2, RED());
     }
 
     for row in 0..5usize {
@@ -1180,16 +1199,16 @@ fn draw_calculator(screen: &Screen, ui: &Ui, x_offset: i64) {
             }
             let (bx, by, bw, bh) = calculator_button(x, row, column);
             let (bw, color, text_color) = if label == "=" {
-                (bw * 2 + 10, RED, TEXT)
+                (bw * 2 + 10, RED(), TEXT())
             } else if label == "AC" {
-                (bw, SURFACE_MAX, RED)
+                (bw, SURFACE_MAX(), RED())
             } else {
-                (bw, SURFACE_HI, TEXT)
+                (bw, SURFACE_HI(), TEXT())
             };
             let pressed = ui.press.map_or(false, |point| {
                 point.0 >= bx && point.0 < bx + bw && point.1 >= by && point.1 < by + bh
             });
-            let color = if pressed { SURFACE_MAX } else { color };
+            let color = if pressed { SURFACE_MAX() } else { color };
             screen.round_rect(bx, by, bw, bh, 26, color);
             screen.text_centered(bx + bw / 2, by + bh / 2 - 11, label, 3, text_color);
         }
@@ -1234,7 +1253,7 @@ fn draw_clock_app(screen: &Screen, clock: [u64; 7], x_offset: i64) {
     let cy = 380;
     let radius = 150;
 
-    screen.fill(x, 93, screen.width(), screen.height() - 93, BLACK);
+    screen.fill(x, 93, screen.width(), screen.height() - 93, BLACK());
 
     // Minute dots around the face, Nothing style.
     for index in 0..60 {
@@ -1245,7 +1264,7 @@ fn draw_clock_app(screen: &Screen, clock: [u64; 7], x_offset: i64) {
             cx + dx * (radius - 10) / 1024,
             cy + dy * (radius - 10) / 1024,
             if big { 3 } else { 1 },
-            if big { TEXT } else { OUTLINE },
+            if big { TEXT() } else { OUTLINE() },
         );
     }
 
@@ -1257,7 +1276,7 @@ fn draw_clock_app(screen: &Screen, clock: [u64; 7], x_offset: i64) {
         cx + CLOCK_X[hour_index] * 72 / 1024,
         cy + CLOCK_Y[hour_index] * 72 / 1024,
         8,
-        TEXT,
+        TEXT(),
     );
     let minute_index = clock[5] as usize;
     screen.line(
@@ -1266,7 +1285,7 @@ fn draw_clock_app(screen: &Screen, clock: [u64; 7], x_offset: i64) {
         cx + CLOCK_X[minute_index] * 112 / 1024,
         cy + CLOCK_Y[minute_index] * 112 / 1024,
         5,
-        TEXT,
+        TEXT(),
     );
     let second_index = clock[6] as usize;
     screen.line(
@@ -1275,68 +1294,68 @@ fn draw_clock_app(screen: &Screen, clock: [u64; 7], x_offset: i64) {
         cx + CLOCK_X[second_index] * 124 / 1024,
         cy + CLOCK_Y[second_index] * 124 / 1024,
         2,
-        RED,
+        RED(),
     );
-    screen.circle(cx, cy, 7, RED);
+    screen.circle(cx, cy, 7, RED());
 
     let mut time = [0u8; 8];
     let length = format_hms(clock[4], clock[5], clock[6], &mut time);
     let cell = 6;
     let text = str_of(&time[..length]);
     let width = Screen::dots_text_width(text, cell);
-    screen.text_dots(cx - width / 2, 570, text, cell, 2, TEXT);
+    screen.text_dots(cx - width / 2, 570, text, cell, 2, TEXT());
 
     let mut date = [0u8; 16];
     format_date(clock, &mut date);
-    screen.text_centered(cx, 650, str_of(&date), 2, MUTED);
+    screen.text_centered(cx, 650, str_of(&date), 2, MUTED());
 }
 
 fn draw_settings(screen: &Screen, settings: &Settings, x_offset: i64) {
     let x = x_offset;
     let width = screen.width();
-    screen.fill(x, 93, width, screen.height() - 93, BLACK);
+    screen.fill(x, 93, width, screen.height() - 93, BLACK());
 
-    screen.text(x + 24, 112, "CONNECTIVITY", 1, MUTED);
+    screen.text(x + 24, 112, "CONNECTIVITY", 1, MUTED());
     let rows = [
-        ("Wi-Fi", "KimiOS-5G", settings.wifi, RED),
+        ("Wi-Fi", "KimiOS-5G", settings.wifi, RED()),
         ("Bluetooth", "Not connected", settings.bluetooth, 0x00b8_c4ff),
         ("Do Not Disturb", "Off", settings.dnd, 0x00d8_b060),
     ];
     for (index, (label, subtitle, value, accent)) in rows.iter().enumerate() {
         let y = 136 + index as i64 * 100;
-        screen.round_rect(x + 20, y, width - 40, 88, 28, SURFACE);
+        screen.round_rect(x + 20, y, width - 40, 88, 28, SURFACE());
         screen.circle(x + 58, y + 44, 18, *accent);
-        screen.text(x + 88, y + 24, label, 2, TEXT);
-        screen.text(x + 88, y + 52, subtitle, 1, MUTED);
+        screen.text(x + 88, y + 24, label, 2, TEXT());
+        screen.text(x + 88, y + 52, subtitle, 1, MUTED());
         draw_switch(screen, x + width - 92, y + 28, *value);
     }
 
-    screen.text(x + 24, 456, "APPEARANCE", 1, MUTED);
-    screen.round_rect(x + 20, 480, width - 40, 168, 28, SURFACE);
+    screen.text(x + 24, 456, "APPEARANCE", 1, MUTED());
+    screen.round_rect(x + 20, 480, width - 40, 168, 28, SURFACE());
     screen.circle(x + 58, 524, 18, 0x009c_74e8);
-    screen.text(x + 88, 504, "Dark mode", 2, TEXT);
-    screen.text(x + 88, 532, "Nothing palette", 1, MUTED);
+    screen.text(x + 88, 504, "Dark mode", 2, TEXT());
+    screen.text(x + 88, 532, "Nothing palette", 1, MUTED());
     draw_switch(screen, x + width - 92, 508, settings.dark);
-    screen.fill(x + 40, 560, width - 80, 1, OUTLINE);
+    screen.fill(x + 40, 560, width - 80, 1, OUTLINE());
     screen.circle(x + 58, 604, 18, 0x00d8_9040);
-    screen.text(x + 88, 584, "UI animations", 2, TEXT);
+    screen.text(x + 88, 584, "UI animations", 2, TEXT());
     screen.text(x + 88, 612, "Experimental - disabled by default", 1, 0x00d8_9040);
     draw_switch(screen, x + width - 92, 588, settings.animations);
 
-    screen.round_rect(x + 20, 660, width - 40, 96, 28, SURFACE);
-    screen.text(x + 44, 680, "About KimiOS", 2, TEXT);
-    screen.text(x + 44, 710, "ARM64 bare metal", 1, MUTED);
-    screen.text(x + 44, 730, "1080x1920 - Material 3 / Nothing", 1, MUTED);
+    screen.round_rect(x + 20, 660, width - 40, 96, 28, SURFACE());
+    screen.text(x + 44, 680, "About KimiOS", 2, TEXT());
+    screen.text(x + 44, 710, "ARM64 bare metal", 1, MUTED());
+    screen.text(x + 44, 730, "1080x1920 - Material 3 / Nothing", 1, MUTED());
 }
 
 fn draw_switch(screen: &Screen, x: i64, y: i64, on: bool) {
-    let track = if on { RED_DIM } else { SURFACE_MAX };
+    let track = if on { RED_DIM() } else { SURFACE_MAX() };
     screen.round_rect(x, y, 52, 32, 16, track);
     if on {
-        screen.round_rect(x, y, 52, 32, 16, RED_DIM);
+        screen.round_rect(x, y, 52, 32, 16, RED_DIM());
     }
     let knob = if on { x + 38 } else { x + 14 };
-    screen.circle(knob, y + 16, 11, if on { RED } else { MUTED });
+    screen.circle(knob, y + 16, 11, if on { RED() } else { MUTED() });
 }
 
 fn settings_hit(screen: &Screen, point: (i64, i64)) -> Option<usize> {
@@ -1373,12 +1392,12 @@ fn draw_placeholder(screen: &Screen, app: AppKind, x_offset: i64) {
     let x = x_offset;
     let width = screen.width();
     let cx = x + width / 2;
-    screen.fill(x, 93, width, screen.height() - 93, BLACK);
-    screen.round_rect(cx - 52, 250, 104, 104, 30, SURFACE);
-    draw_glyph(screen, app, cx, 302, 100, TEXT);
-    screen.text_centered(cx, 400, app.label(), 3, TEXT);
-    screen.round_rect(cx - 110, 460, 220, 52, 26, SURFACE);
-    screen.text_centered(cx, 476, "Coming soon", 2, MUTED);
+    screen.fill(x, 93, width, screen.height() - 93, BLACK());
+    screen.round_rect(cx - 52, 250, 104, 104, 30, SURFACE());
+    draw_glyph(screen, app, cx, 302, 100, TEXT());
+    screen.text_centered(cx, 400, app.label(), 3, TEXT());
+    screen.round_rect(cx - 110, 460, 220, 52, 26, SURFACE());
+    screen.text_centered(cx, 476, "Coming soon", 2, MUTED());
     screen.text_centered(cx, 540, "Material 3 / Nothing concept", 1, 0x0060_606c);
 }
 
@@ -1391,7 +1410,7 @@ fn draw_shade(screen: &Screen, ui: &Ui, clock: [u64; 7], y_offset: i64) {
     // Scrim only over the part the sheet does not cover.
     let scrim_top = (610 + y_offset).clamp(0, height);
     if scrim_top < height {
-        screen.fill_blend(0, scrim_top, width, height - scrim_top, BLACK, 160);
+        screen.fill_blend(0, scrim_top, width, height - scrim_top, BLACK(), 160);
     }
 
     // Sheet with rounded bottom corners.
@@ -1402,10 +1421,10 @@ fn draw_shade(screen: &Screen, ui: &Ui, clock: [u64; 7], y_offset: i64) {
 
     let mut time = [0u8; 5];
     format_time(clock[4], clock[5], &mut time);
-    screen.text(28, y_offset + 30, str_of(&time), 2, TEXT);
+    screen.text(28, y_offset + 30, str_of(&time), 2, TEXT());
     let title = "Quick settings";
     let title_x = (width - Screen::text_width(title, 1)) / 2;
-    screen.text(title_x, y_offset + 34, title, 1, MUTED);
+    screen.text(title_x, y_offset + 34, title, 1, MUTED());
 
     for index in 0..4 {
         let column = index % 2;
@@ -1424,27 +1443,27 @@ fn draw_shade(screen: &Screen, ui: &Ui, clock: [u64; 7], y_offset: i64) {
             2 => ("Do Not Disturb", if enabled { "On" } else { "Off" }),
             _ => ("Torch", if enabled { "On" } else { "Off" }),
         };
-        let card = if enabled { RED_DIM } else { SURFACE_HI };
+        let card = if enabled { RED_DIM() } else { SURFACE_HI() };
         screen.round_rect(x, y, 208, 96, 30, card);
         shade_glyph(screen, index, x + 26, y + 30, enabled);
-        screen.text(x + 22, y + 56, title, 1, TEXT);
+        screen.text(x + 22, y + 56, title, 1, TEXT());
         let subtitle_x = x + 208 - 14 - Screen::text_width(subtitle, 1);
-        screen.text(subtitle_x, y + 56, subtitle, 1, MUTED);
+        screen.text(subtitle_x, y + 56, subtitle, 1, MUTED());
     }
 
     // Brightness slider.
-    screen.text(24, y_offset + 300, "BRIGHTNESS", 1, MUTED);
-    screen.round_rect(24, y_offset + 322, width - 48, 22, 11, SURFACE_HI);
+    screen.text(24, y_offset + 300, "BRIGHTNESS", 1, MUTED());
+    screen.round_rect(24, y_offset + 322, width - 48, 22, 11, SURFACE_HI());
     let fill = (width - 48) * ui.settings.brightness / 100;
-    screen.round_rect(24, y_offset + 322, fill, 22, 11, TEXT);
-    screen.circle(24 + fill, y_offset + 333, 14, RED);
+    screen.round_rect(24, y_offset + 322, fill, 22, 11, TEXT());
+    screen.circle(24 + fill, y_offset + 333, 14, RED());
 
-    screen.text(24, y_offset + 366, "NOTIFICATIONS", 1, MUTED);
+    screen.text(24, y_offset + 366, "NOTIFICATIONS", 1, MUTED());
     notification_card(
         screen,
         24,
         y_offset + 390,
-        RED,
+        RED(),
         "Messages",
         "3 new messages",
         "now",
@@ -1460,12 +1479,12 @@ fn draw_shade(screen: &Screen, ui: &Ui, clock: [u64; 7], y_offset: i64) {
     );
 
     // Settings shortcut in the header.
-    screen.ring(width - 42, y_offset + 40, 11, 2, TEXT);
-    screen.circle(width - 42, y_offset + 40, 3, TEXT);
+    screen.ring(width - 42, y_offset + 40, 11, 2, TEXT());
+    screen.circle(width - 42, y_offset + 40, 3, TEXT());
 }
 
 fn shade_glyph(screen: &Screen, index: usize, x: i64, y: i64, enabled: bool) {
-    let color = if enabled { TEXT } else { MUTED };
+    let color = if enabled { TEXT() } else { MUTED() };
     match index {
         0 => {
             let base = y + 8;
@@ -1598,6 +1617,7 @@ impl AppKind {
             AppKind::Browser => "Browser",
             AppKind::Apk => "APK",
             AppKind::Dvm => "DEX",
+            AppKind::Market => "Market",
         }
     }
 }

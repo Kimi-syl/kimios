@@ -1,0 +1,61 @@
+{
+  "base": "http://10.0.2.2:8080",
+  "packages": [
+    {
+      "name": "nord",
+      "desc": "Nord \u2014 arctic blue palette",
+      "kind": "theme",
+      "file": "themes/nord.theme",
+      "run": false
+    },
+    {
+      "name": "dracula",
+      "desc": "Dracula \u2014 purple dark",
+      "kind": "theme",
+      "file": "themes/dracula.theme",
+      "run": false
+    },
+    {
+      "name": "cyberpunk",
+      "desc": "Cyberpunk \u2014 neon cyan",
+      "kind": "theme",
+      "file": "themes/cyberpunk.theme",
+      "run": false
+    },
+    {
+      "name": "sakura",
+      "desc": "Sakura \u2014 soft pink",
+      "kind": "theme",
+      "file": "themes/sakura.theme",
+      "run": false
+    },
+    {
+      "name": "pixel-bold",
+      "desc": "Pixel Bold \u2014 chunky 8x8",
+      "kind": "font",
+      "file": "fonts/pixel-bold.kfont",
+      "run": false
+    },
+    {
+      "name": "pixel-wide",
+      "desc": "Pixel Wide \u2014 spaced 8x8",
+      "kind": "font",
+      "file": "fonts/pixel-wide.kfont",
+      "run": false
+    },
+    {
+      "name": "hello",
+      "desc": "Static Linux hello world",
+      "kind": "app",
+      "file": "bin/hello",
+      "run": true
+    },
+    {
+      "name": "fib",
+      "desc": "Fibonacci (malloc/brk)",
+      "kind": "app",
+      "file": "bin/fib",
+      "run": true
+    }
+  ]
+}

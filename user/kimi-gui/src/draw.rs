@@ -365,7 +365,7 @@ impl Screen {
     /// Nothing OS type (NType82), anti-aliased. `scale` keeps the old
     /// 8px-cell layout units; the em size is 11 logical px per scale step.
     pub fn text(&self, x: i64, y: i64, text: &str, scale: i64, color: u32) -> i64 {
-        self.font_text(x, y, text, 11 * scale, color, &font_data::SANS)
+        self.font_text(x, y, text, 11 * scale, color, crate::theme::ui_font())
     }
 
     pub fn text_mono(&self, x: i64, y: i64, text: &str, scale: i64, color: u32) -> i64 {
@@ -450,7 +450,7 @@ impl Screen {
     }
 
     pub fn text_width(text: &str, scale: i64) -> i64 {
-        Self::font_width(text, 11 * scale, &font_data::SANS)
+        Self::font_width(text, 11 * scale, crate::theme::ui_font())
     }
 
     pub fn font_width(text: &str, size: i64, font: &Font) -> i64 {
