@@ -1185,6 +1185,49 @@ pub fn linux_mmap(length: u64, executable: bool) -> Option<u64> {
     Some(address)
 }
 
+/// File-backed private mmap (musl ldso maps shared libraries this way). Copies
+/// the file's pages into fresh frames mapped at `addr` (MAP_FIXED) or the next
+/// anonymous-mmap address; writes stay private to this process.
+#[allow(static_mut_refs)]
+pub fn linux_mmap_file(addr: u64, length: u64, prot: u64, fd: u64, offset: u64, fixed: bool) -> Option<u64> {
+    let slot = current_slot()?;
+    let (kind, inode) = fd_target(fd)?;
+    if kind != FD_DISK {
+        return None;
+    }
+    let fsize = crate::diskfs::inode_size(inode)?;
+    let length = (length + 0xfff) & !0xfff;
+    let executable = prot & 0x4 != 0;
+    let process = unsafe { &mut PROCESSES[slot] };
+    let address = if fixed && addr != 0 { addr & !0xfff } else { process.linux_mmap };
+    if length == 0 {
+        return None;
+    }
+    let pages = (length / 4096) as usize;
+    let space = process.space.as_mut()?;
+    if space.spare_frames() < pages + 2 {
+        return None;
+    }
+    for page in 0..pages {
+        let a = address + (page as u64) * 4096;
+        let frame = space.alloc_frame()?;
+        unsafe {
+            core::ptr::write_bytes(frame as *mut u8, 0, 4096);
+        }
+        let file_off = offset + (page as u64) * 4096;
+        if file_off < fsize {
+            let buf = unsafe { core::slice::from_raw_parts_mut(frame as *mut u8, 4096) };
+            let want = (fsize - file_off).min(4096) as usize;
+            crate::diskfs::read(inode, file_off, &mut buf[..want]);
+        }
+        space.map_page(a, frame, executable);
+    }
+    if !fixed || addr == 0 {
+        process.linux_mmap = address + length;
+    }
+    Some(address)
+}
+
 /// Positional read for a Linux file descriptor; advances the file position.
 #[allow(static_mut_refs)]
 pub fn fd_read(fd: u64, buffer: &mut [u8]) -> Option<usize> {

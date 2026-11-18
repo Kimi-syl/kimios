@@ -14,3 +14,4 @@
 # tooling caches
 /.serena
 /ios/host-harness/shelltest/target
+/disk256.img

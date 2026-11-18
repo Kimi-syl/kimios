@@ -471,10 +471,7 @@ fn load_segments(
 /// the Alpine sysroot at /disk/alpine/root. Returns a static slice (RamFS data
 /// is static; sysroot files are read into a leaked kernel-heap buffer).
 fn read_linux_file(path: &str) -> Result<&'static [u8], &'static str> {
-    if let Some(f) = crate::ramfs::index_of(path).and_then(crate::ramfs::file_at) {
-        return Ok(f.data);
-    }
-    // sysroot fallback: alpine/root + path
+    // sysroot first (Alpine musl/libs), RamFS fallback (test fixtures)
     let mut sb = [0u8; 160];
     let prefix = b"alpine/root";
     sb[..prefix.len()].copy_from_slice(prefix);
@@ -484,7 +481,15 @@ fn read_linux_file(path: &str) -> Result<&'static [u8], &'static str> {
     sb[n..n + take].copy_from_slice(&pb[..take]);
     n += take;
     let sp = core::str::from_utf8(&sb[..n]).map_err(|_| "bad sysroot path")?;
-    let inode = crate::diskfs::lookup(sp).ok_or("interpreter not found")?;
+    let inode = match crate::diskfs::lookup(sp) {
+        Some(i) => i,
+        None => {
+            if let Some(f) = crate::ramfs::index_of(path).and_then(crate::ramfs::file_at) {
+                return Ok(f.data);
+            }
+            return Err("interpreter not found");
+        }
+    };
     let (_, size, _) = crate::diskfs::stat(sp).ok_or("interp stat failed")?;
     let size = size as usize;
     let layout = core::alloc::Layout::from_size_align(size.max(1), 16).map_err(|_| "bad size")?;

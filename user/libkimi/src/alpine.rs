@@ -123,18 +123,19 @@ trait Sink {
     fn emit(&mut self, data: &[u8]);
 }
 
+// 32 KiB DEFLATE history lives in BSS, not the (small) user stack.
+static mut WIN_BUF: [u8; 32768] = [0; 32768];
 struct Window {
-    buf: [u8; 32768],
     pos: usize,
 }
 impl Window {
     fn push<S: Sink>(&mut self, sink: &mut S, b: u8) {
-        self.buf[self.pos] = b;
+        unsafe { WIN_BUF[self.pos] = b; }
         self.pos = (self.pos + 1) & 0x7fff;
         sink.emit(&[b]);
     }
     fn back(&self, distance: usize) -> u8 {
-        self.buf[(self.pos.wrapping_sub(distance)) & 0x7fff]
+        unsafe { WIN_BUF[(self.pos.wrapping_sub(distance)) & 0x7fff] }
     }
 }
 
@@ -171,7 +172,7 @@ fn block<R: Reader, S: Sink>(
 }
 
 fn inflate_stream<R: Reader, S: Sink>(br: &mut SBits<R>, sink: &mut S) -> bool {
-    let mut win = Window { buf: [0; 32768], pos: 0 };
+    let mut win = Window { pos: 0 };
     loop {
         let final_block = br.bits(1);
         let typ = br.bits(2);
@@ -290,7 +291,7 @@ fn gzip_header_rest<R: Reader>(br: &mut SBits<R>) -> bool {
 /// index appender) does large sequential writes instead of per-byte calls.
 struct BufSink<S: Sink> {
     inner: S,
-    buf: [u8; 8192],
+    buf: [u8; 4096],
     len: usize,
 }
 impl<S: Sink> Sink for BufSink<S> {
@@ -322,7 +323,7 @@ impl<S: Sink> BufSink<S> {
 /// index in member 2), so the tar sink must be fed across all members. Returns
 /// the sink on success (so callers can read counters / close handles).
 fn gunzip_all<R: Reader, S: Sink>(br: &mut SBits<R>, sink: S) -> Option<S> {
-    let mut bs = BufSink { inner: sink, buf: [0; 8192], len: 0 };
+    let mut bs = BufSink { inner: sink, buf: [0; 4096], len: 0 };
     if !gzip_header(br) {
         return None;
     }
@@ -610,7 +611,7 @@ fn gunzip_member_buf(input: &[u8], out: &mut [u8]) -> Option<(usize, usize)> {
 
 fn with_index_stanzas(mut f: impl FnMut(&[u8]) -> bool) {
     let Some(h) = k::open(INDEX) else { return };
-    let mut chunk = [0u8; 8192];
+    let mut chunk = [0u8; 4096];
     let mut off = 0usize;
     let mut stanza = [0u8; 4096];
     let mut slen = 0usize;
@@ -759,8 +760,8 @@ fn http_to_file(url: &str, dest: &str) -> bool {
     }
     k::net_tcp_send(slot, &req[..n]);
     let Some(h) = k::create(dest) else { k::net_tcp_close(slot); return false };
-    let mut buf = [0u8; 8192];
-    let mut pending = [0u8; 8192];
+    let mut buf = [0u8; 4096];
+    let mut pending = [0u8; 4096];
     let mut plen = 0;
     let mut header_done = false;
     let mut off = 0u64;

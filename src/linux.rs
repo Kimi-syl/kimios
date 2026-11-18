@@ -187,6 +187,22 @@ fn resolve_path(path: &str, out: &mut [u8]) -> Option<usize> {
         out[n..n + c.len()].copy_from_slice(c);
         n += c.len();
     }
+    // Translate Linux system paths into the Alpine sysroot so dynamically-linked
+    // musl binaries find their interpreter and shared libraries (/lib, /usr/...).
+    let s = core::str::from_utf8(&out[..n]).unwrap_or("");
+    const SYS: [&str; 9] = ["/bin", "/sbin", "/lib", "/lib64", "/usr", "/etc", "/var", "/tmp", "/opt"];
+    let needs = SYS.iter().any(|p| s == *p || (s.starts_with(p) && s.as_bytes().get(p.len()) == Some(&b'/')));
+    if needs {
+        let prefix = b"/disk/alpine/root";
+        if n + prefix.len() < out.len() {
+            let old = n;
+            n += prefix.len();
+            for i in (0..old).rev() {
+                out[i + prefix.len()] = out[i];
+            }
+            out[..prefix.len()].copy_from_slice(prefix);
+        }
+    }
     Some(n)
 }
 
@@ -307,7 +323,7 @@ pub fn dispatch(frame: &mut ExceptionFrame, number: u64) -> Option<u64> {
         L_DUP => Some(process::fd_dup(a0, None).unwrap_or(eno(9))),
         L_DUP3 => Some(process::fd_dup(a0, Some(a1)).unwrap_or(eno(9))),
         L_BRK => Some(process::linux_brk(a0)),
-        L_MMAP => Some(l_mmap(a1, a2, a3, a4, a5)),
+        L_MMAP => Some(l_mmap(a0, a1, a2, a3, a4, a5)),
         L_MUNMAP | L_MPROTECT | L_MADVISE => Some(0),
         L_GETPID | L_GETTID | L_SET_TID_ADDRESS => Some(process::sys_getpid()),
         L_GETUID | L_GETEUID | L_GETGID | L_GETEGID => Some(0),
@@ -851,16 +867,17 @@ fn l_renameat(olddirfd: u64, old_ptr: u64, newdirfd: u64, new_ptr: u64) -> u64 {
 
 // -- misc -------------------------------------------------------------------
 
-fn l_mmap(length: u64, prot: u64, flags: u64, fd: u64, _offset: u64) -> u64 {
+fn l_mmap(addr: u64, length: u64, prot: u64, flags: u64, fd: u64, offset: u64) -> u64 {
     let anonymous = flags & 0x20 != 0;
-    if !anonymous || fd != u64::MAX {
-        return eno(38);
-    }
+    let fixed = flags & 0x10 != 0;
     let executable = prot & 0x4 != 0;
-    match process::linux_mmap(length, executable) {
-        Some(address) => address,
-        None => eno(12),
+    if anonymous && fd == u64::MAX {
+        return process::linux_mmap(length, executable).unwrap_or(eno(12));
     }
+    if fd != u64::MAX {
+        return process::linux_mmap_file(addr, length, prot, fd, offset, fixed).unwrap_or(eno(12));
+    }
+    eno(38)
 }
 
 fn l_clock_gettime(_clock: u64, pointer: u64) -> u64 {
