@@ -400,7 +400,7 @@ fn build_linux_stack(
 // ---------------------------------------------------------------------------
 
 const LINUX_EXEC_BASE: u64 = 0x0040_0000;
-const LINUX_INTERP_BASE: u64 = 0x4000_0000;
+const LINUX_INTERP_BASE: u64 = 0x6000_0000;
 
 /// Load PT_LOAD segments of `elf` at `base`, returning
 /// (entry_rel, phdr_va_abs, data_end_abs, phent, phnum).
