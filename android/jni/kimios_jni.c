@@ -159,18 +159,26 @@ static uint64_t fs_create(const char *path) {
 }
 static uint64_t fs_read(uint64_t h, uint64_t off, void *buf, uint64_t len) {
     int idx = (int)h - 100; if (idx < 0 || idx >= 64 || !handles[idx].used) return 0;
-    char *data = NULL; size_t sz = 0;
     if (handles[idx].kind == 0) {
         int ri = ram_index(handles[idx].path); if (ri < 0) return 0;
-        sz = strlen(ram_data[ri]); data = malloc(sz + 1); memcpy(data, ram_data[ri], sz);
-    } else { char p[512]; disk_path(handles[idx].path, p, sizeof p); data = read_all(p, &sz); if (!data) return 0; }
-    uint64_t n = 0;
-    if (off < sz) { n = len < (sz - off) ? len : (sz - off); memcpy(buf, data + off, n); }
-    free(data); return n;
+        const char *d = ram_data[ri]; size_t sz = strlen(d);
+        if (off >= sz) return 0;
+        uint64_t n = len < (sz - off) ? len : (sz - off); memcpy(buf, d + off, n); return n;
+    }
+    char p[512]; disk_path(handles[idx].path, p, sizeof p);
+    int fd = open(p, O_RDONLY); if (fd < 0) return 0;
+    if (lseek(fd, (off_t)off, SEEK_SET) < 0) { close(fd); return 0; }
+    ssize_t n = read(fd, buf, len); close(fd); return n < 0 ? 0 : (uint64_t)n;
 }
 static uint64_t fs_write(uint64_t h, uint64_t off, const void *buf, uint64_t len) {
     int idx = (int)h - 100; if (idx < 0 || idx >= 64 || !handles[idx].used || handles[idx].kind != 1) return 0;
     char p[512]; disk_path(handles[idx].path, p, sizeof p);
+    struct stat st; size_t cursz = (stat(p, &st) == 0) ? (size_t)st.st_size : 0;
+    if (off == cursz) {
+        int fd = open(p, O_WRONLY | O_CREAT, 0644); if (fd < 0) return 0;
+        lseek(fd, (off_t)off, SEEK_SET); ssize_t w = write(fd, buf, len); close(fd);
+        return w == (ssize_t)len ? len : 0;
+    }
     size_t sz = 0; char *data = read_all(p, &sz); if (!data) { data = malloc(1); sz = 0; }
     size_t need = off + len;
     if (need > sz) { data = realloc(data, need + 1); memset(data + sz, 0, need - sz); sz = need; }

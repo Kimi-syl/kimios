@@ -101,28 +101,50 @@ final class KimiFS {
     }
 
     func readFile(_ h: UInt64, offset: UInt64, into buf: UnsafeMutableRawPointer, len: UInt64) -> UInt64 {
-        let data: Data?
         switch lookupFD(h) {
-        case .ram(let name): data = ramfs[name]?.data(using: .utf8)
-        case .disk(let rel): data = readDisk(rel)
-        case .none: return 0
+        case .ram(let name):
+            guard let d = ramfs[name]?.data(using: .utf8) else { return 0 }
+            let off = Int(offset)
+            if off >= d.count { return 0 }
+            let n = min(Int(len), d.count - off)
+            d.withUnsafeBytes { raw in
+                if let base = raw.baseAddress { memcpy(buf, base + off, n) }
+            }
+            return UInt64(n)
+        case .disk(let rel):
+            // Efficient positional read (no whole-file load) for large packages.
+            guard let url = diskURL(rel), !isDir(url),
+                  let fh = FileHandle(forReadingFrom: url) else { return 0 }
+            defer { fh.closeFile() }
+            fh.seek(toFileOffset: offset)
+            let d = fh.readData(ofLength: Int(len))
+            guard !d.isEmpty, let base = d.withUnsafeBytes({ $0.baseAddress }) else { return 0 }
+            memcpy(buf, base, d.count)
+            return UInt64(d.count)
+        case .none:
+            return 0
         }
-        guard let d = data else { return 0 }
-        let off = Int(offset)
-        if off >= d.count { return 0 }
-        let n = min(Int(len), d.count - off)
-        d.withUnsafeBytes { raw in
-            if let base = raw.baseAddress { memcpy(buf, base + off, n) }
-        }
-        return UInt64(n)
     }
 
     func writeFile(_ h: UInt64, offset: UInt64, from buf: UnsafeRawPointer, len: UInt64) -> UInt64 {
         guard case .disk(let rel) = lookupFD(h), let url = diskURL(rel) else { return 0 }
-        var existing = (try? Data(contentsOf: url)) ?? Data()
         let off = Int(offset), n = Int(len)
+        let chunk = Data(bytes: buf, count: n)
+        // Sequential append fast path (streaming extraction): no whole-file read.
+        if let fh = FileHandle(forWritingTo: url) {
+            let size = Int(fh.seekToEndOfFile())
+            if off == size {
+                fh.seek(toFileOffset: offset)
+                fh.write(chunk)
+                fh.closeFile()
+                return UInt64(n)
+            }
+            fh.closeFile()
+        }
+        // Random write: read-modify-write (small files only).
+        var existing = (try? Data(contentsOf: url)) ?? Data()
         if existing.count < off + n { existing.append(Data(count: off + n - existing.count)) }
-        existing.replaceSubrange(off..<(off + n), with: Data(bytes: buf, count: n))
+        existing.replaceSubrange(off..<(off + n), with: chunk)
         do { try existing.write(to: url); return UInt64(n) } catch { return 0 }
     }
 

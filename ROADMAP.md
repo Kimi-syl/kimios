@@ -32,6 +32,7 @@ route to a `kimi_host_syscall` dispatcher; everything above is unchanged.
 | Networking (DNS + TCP; Browser/dns/fetch/kpkg) | done | done |
 | Time / rtc / ps / mem | done | done |
 | Marketplace + runtime themes/fonts (kpkg-powered, [`market/`](market/README.md)) | done | done |
+| Alpine `apk` compatibility (`apkg`: APKINDEX/deps/download/extract; nodejs+python3 verified) | done | done |
 | Thin platform shell (UIKit Activity / SurfaceView Activity) | done | done |
 | CI build → artifact (`.ipa` / signed APK) | done (`macos-latest`) | done (`ubuntu`) |
 | Signing | unsigned (sideload re-sign) | phone debug key (`b1339cd3…`) |
@@ -112,7 +113,10 @@ Priority is the library-OS product; kernel items continue as the foundation.
    onto host services (sandbox FS, BSD sockets, host memory) — the same WSL1 model
    as `src/linux.rs`, but native, no QEMU. StikDebug enables JIT on iPad; Android
    needs a similar path. Then `run /disk/<binary>` / `kpkg run busybox …` work on
-   the device at native speed.
+   the device at native speed. To **execute** the Alpine packages `apkg` already
+   downloads (nodejs, python3 — dynamic musl), this also needs a dynamic ELF
+   loader (`PT_INTERP`/`DT_NEEDED`/relocations), musl on host syscalls, and real
+   threads/futex/epoll/sockets/dlopen in the ABI.
 3. **Library-OS polish:** richer FS (file picker / import), TLS networking
    (HTTPS browser/kpkg), background audio, performance/battery tuning of the
    render+input loop.

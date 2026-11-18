@@ -27,10 +27,38 @@ pub extern "C" fn kimi_shell_test() {
     k::shell::exec(b"ps");
     k::shell::exec(b"dns example.com");
     k::shell::exec(b"fetch example.com /");
+    k::print("=== Alpine apk test ===\n");
+    k::shell::exec(b"apkg update");
+    k::shell::exec(b"apkg info musl");
+    k::shell::exec(b"apkg install musl");
+    k::shell::exec(b"ls /disk/alpine/root");
     k::print("=== done ===\n");
 }
 
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo) -> ! {
     k::exit(99)
+}
+
+#[no_mangle]
+pub extern "C" fn kimi_gz_test(src: u64, dst: u64) -> u64 {
+    unsafe fn cstr(p: *const u8) -> &'static str {
+        let mut n = 0;
+        while *p.add(n) != 0 { n += 1; }
+        core::str::from_utf8(core::slice::from_raw_parts(p, n)).unwrap_or("")
+    }
+    let s = unsafe { cstr(src as *const u8) };
+    let d = unsafe { cstr(dst as *const u8) };
+    k::alpine::debug_extract(s, d)
+}
+
+#[no_mangle]
+pub extern "C" fn kimi_apkg_only() {
+    k::print("=== apkg: python3 + nodejs (live Alpine) ===\n");
+    k::shell::exec(b"apkg update");
+    k::shell::exec(b"apkg info python3");
+    k::shell::exec(b"apkg info nodejs");
+    k::shell::exec(b"apkg install nodejs");
+    k::shell::exec(b"ls /disk/alpine/root/usr/bin");
+    k::print("=== apkg done ===\n");
 }

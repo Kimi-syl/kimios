@@ -7,6 +7,7 @@
 #![no_std]
 
 pub mod apk;
+pub mod alpine;
 pub mod dvm;
 pub mod kpkg;
 pub mod shell;

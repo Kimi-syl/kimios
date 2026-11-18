@@ -63,3 +63,37 @@ variants generated from the public-domain font8x8.
 `user/kimi-gui/src/font.rs` (font8x8). The built-in `Pixel 8x8` atlas lives in
 `user/kimi-gui/src/font_data.rs` (`PIXEL`) and can be exported with
 `font_store::export_pixel`.
+
+## Alpine Linux `apk` compatibility (`apkg`)
+
+kpkg also speaks **Alpine's `apk` format** via the `apkg` command (in the Terminal
+or CLI), backed by [`user/libkimi/src/alpine.rs`](../user/libkimi/src/alpine.rs):
+
+```text
+apkg update [root-url]   fetch APKINDEX.tar.gz (main + community), default Alpine v3.20
+apkg list                list indexed packages
+apkg info <name>         version / size / depends / description
+apkg install <name>      resolve deps, download .apk files, extract to /disk/alpine/root
+```
+
+Implemented:
+- **APKINDEX.tar.gz** parsing (multi-member gzip + tar; the index spans gzip
+  members — `.SIGN` in member 1, `APKINDEX` in member 2).
+- **`.apk` packages** (control tar with `.PKGINFO` + data tar), streamed into the
+  sysroot `/disk/alpine/root` with a 32 KiB-window streaming inflater — large
+  packages need no big buffers.
+- **Dependency resolution** including `so:` shared-library providers and `/bin/sh`
+  virtual provides, with version-constraint stripping.
+- Plain-HTTP downloads from the Alpine CDN (kpkg has no TLS), with retry/backoff.
+
+Verified against the live Alpine v3.20 aarch64 repo: `musl`, `python3` (→
+`usr/bin/python3.12`) and `nodejs` (→ `usr/bin/node`, a real aarch64 PIE with
+interpreter `/lib/ld-musl-aarch64.so.1`) download and extract with their full
+dependency closures.
+
+**Execution caveat (honest):** Alpine binaries are *dynamically linked against
+musl*. Downloading/extracting them works; **running** them additionally requires a
+dynamic ELF loader (`PT_INTERP`/`DT_NEEDED`/relocations), musl libc on KimiOS
+syscalls, and a fuller Linux ABI (real threads/futex/epoll/sockets/dlopen — the
+current kernel ABI has futex as a no-op). That is the Desktop Lite runtime
+milestone (see ROADMAP), not yet implemented. `apkg` prints this note on install.

@@ -597,3 +597,15 @@ pub fn install_to(name: &str, dest: &str) -> bool {
     close(handle);
     ok.is_some() && offset > 0
 }
+
+// -- helpers exposed for the Alpine apk backend -----------------------------
+
+/// Public wrapper around the URL splitter (host buffer borrowed from caller).
+pub fn parse_url_pub<'a>(url: &'a str, host_out: &'a mut [u8]) -> Option<(&'a str, u16, &'a str)> {
+    parse_url(url, host_out)
+}
+
+/// Resolve a host to the big-endian IPv4 u32 the TCP API uses (literal or DNS).
+pub fn resolve_host(host: &str) -> Option<u32> {
+    parse_ipv4(host).or_else(|| net_resolve(host))
+}

@@ -494,6 +494,37 @@ pub fn exec(input: &[u8]) {
             }
             _ => k::kpkg::help(),
         }
+    } else if command == &b"apkg"[..] {
+        let (sub, rest) = split_word(argument);
+        let rest = trim(rest);
+        match sub {
+            b"update" => {
+                let url = core::str::from_utf8(rest).unwrap_or("");
+                k::print("apkg: fetching Alpine APKINDEX (main + community)...\n");
+                if k::alpine::update(url) {
+                    k::print("apkg: index ready\n");
+                } else {
+                    k::print("apkg: update failed (HTTP repo reachable?)\n");
+                }
+            }
+            b"list" => k::alpine::list(),
+            b"install" => match core::str::from_utf8(rest) {
+                Ok(name) if !name.is_empty() => { k::alpine::install(name); }
+                _ => k::print("usage: apkg install <name>\n"),
+            },
+            b"info" => match core::str::from_utf8(rest) {
+                Ok(name) if !name.is_empty() => k::alpine::info(name),
+                _ => k::print("usage: apkg info <name>\n"),
+            },
+            _ => {
+                k::print("apkg — Alpine Linux apk compatibility\n");
+                k::print("  apkg update [root-url]  fetch APKINDEX (default Alpine v3.20)\n");
+                k::print("  apkg list               list indexed packages\n");
+                k::print("  apkg install <name>     download + extract pkg + deps to /disk/alpine/root\n");
+                k::print("  apkg info <name>        show version/size/deps\n");
+                k::print("e.g. apkg install musl / python3 / nodejs\n");
+            }
+        }
     } else if command == &b"net"[..] {
         let timeout = parse_u64(argument).unwrap_or(5000);
         k::net_status(timeout);

@@ -114,12 +114,12 @@ impl<'a> BitReader<'a> {
     }
 }
 
-struct Huffman {
-    counts: [u16; 16],
-    symbols: [u16; 288],
+pub(crate) struct Huffman {
+    pub(crate) counts: [u16; 16],
+    pub(crate) symbols: [u16; 288],
 }
 
-fn build_huffman(lengths: &[u8]) -> Huffman {
+pub(crate) fn build_huffman(lengths: &[u8]) -> Huffman {
     let mut h = Huffman { counts: [0; 16], symbols: [0; 288] };
     for &len in lengths {
         h.counts[len as usize] += 1;
@@ -156,18 +156,18 @@ fn decode_symbol(br: &mut BitReader, h: &Huffman) -> u16 {
     0
 }
 
-const LEN_BASE: [u16; 29] = [
+pub(crate) const LEN_BASE: [u16; 29] = [
     3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31, 35, 43, 51, 59, 67, 83, 99, 115,
     131, 163, 195, 227, 258,
 ];
-const LEN_EXTRA: [u8; 29] = [
+pub(crate) const LEN_EXTRA: [u8; 29] = [
     0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0,
 ];
-const DIST_BASE: [u16; 30] = [
+pub(crate) const DIST_BASE: [u16; 30] = [
     1, 2, 3, 4, 5, 7, 9, 13, 17, 25, 33, 49, 65, 97, 129, 193, 257, 385, 513, 769, 1025, 1537,
     2049, 3073, 4097, 6145, 8193, 12289, 16385, 24577,
 ];
-const DIST_EXTRA: [u8; 30] = [
+pub(crate) const DIST_EXTRA: [u8; 30] = [
     0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12,
     13, 13,
 ];
@@ -217,6 +217,13 @@ fn inflate_block(
 
 /// Inflate a DEFLATE stream into `out`, returning the number of bytes written.
 pub fn inflate(input: &[u8], out: &mut [u8]) -> usize {
+    inflate_ex(input, out).0
+}
+
+/// Like [`inflate`], but also returns the number of input bytes consumed (the
+/// DEFLATE stream length). Needed to locate the next member in a multi-stream
+/// gzip file (Alpine `.apk` packages concatenate control + data gzip members).
+pub fn inflate_ex(input: &[u8], out: &mut [u8]) -> (usize, usize) {
     let mut br = BitReader::new(input);
     let mut out_pos = 0usize;
     loop {
@@ -232,7 +239,7 @@ pub fn inflate(input: &[u8], out: &mut [u8]) -> usize {
                 br.pos += 4;
                 for _ in 0..len {
                     if br.pos >= br.data.len() || out_pos >= out.len() {
-                        return out_pos;
+                        return (out_pos, br.pos);
                     }
                     out[out_pos] = br.data[br.pos];
                     br.pos += 1;
@@ -280,7 +287,7 @@ pub fn inflate(input: &[u8], out: &mut [u8]) -> usize {
                         i += 1;
                     } else if symbol == 16 {
                         if i == 0 {
-                            return out_pos;
+                            return (out_pos, br.pos);
                         }
                         let prev = lengths[i - 1];
                         let repeat = 3 + br.bits(2) as usize;
@@ -298,7 +305,7 @@ pub fn inflate(input: &[u8], out: &mut [u8]) -> usize {
                         let repeat = 11 + br.bits(7) as usize;
                         i += repeat;
                     } else {
-                        return out_pos;
+                        return (out_pos, br.pos);
                     }
                 }
                 let lit = build_huffman(&lengths[..hlit]);
@@ -313,7 +320,7 @@ pub fn inflate(input: &[u8], out: &mut [u8]) -> usize {
             break;
         }
     }
-    out_pos
+    (out_pos, br.pos)
 }
 
 // ---------------------------------------------------------------------------

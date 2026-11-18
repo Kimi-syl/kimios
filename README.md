@@ -53,6 +53,14 @@ rewrites its `svc` instructions to call the dispatcher (there are no EL0 excepti
 vectors on a host). With that, Desktop Lite runs real Linux binaries at native
 speed on the device — the goal, achieved the efficient way.
 
+**Alpine `apk` compatibility:** kpkg also speaks Alpine's package format via
+`apkg` (`apkg update / info / install <name>`): it parses APKINDEX repos and `.apk`
+packages (multi-member gzip + tar), resolves `so:` dependencies, and streams
+packages into a sysroot — verified by downloading **nodejs** and **python3** (real
+aarch64 musl binaries) with their full dependency closures from the live Alpine
+repo. *Running* them still needs the dynamic loader + musl + fuller ABI above;
+`apkg` handles the package-management half today. See [market/README.md](market/README.md).
+
 ## The library-OS insight
 
 The userland (`user/libkimi` + `user/kimi-gui` + apps + shell) is `no_std` with
