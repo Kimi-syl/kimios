@@ -37,8 +37,19 @@ route to a `kimi_host_syscall` dispatcher; everything above is unchanged.
 | CI build → artifact (`.ipa` / signed APK) | done (`macos-latest`) | done (`ubuntu`) |
 | Signing | unsigned (sideload re-sign) | phone debug key (`b1339cd3…`) |
 | Native contract verification (shell, DNS, HTTP fetch; GUI render+touch) | done | done (shared harness) |
-| On-device runtime verification | pending hardware | pending hardware |
-| Desktop Lite binary hosting (JIT ELF loader + host Linux-ABI translation) | not yet | not yet |
+| On-device runtime verification | pending hardware | done (Andarium, SDK 37) |
+| Desktop Lite binary hosting (native musl ELF execution) | not yet | **done** (python3.14 + node24 on device) |
+
+**Desktop Lite achieved natively on Android.** Because the Android host *is* a
+Linux kernel, the libOS runs dynamic musl ELF guests directly — a forked child
+maps the exe + `ld-musl` (`mmap(NULL)`), builds a SysV auxv/stack, and jumps to
+the interpreter; the guest's real `svc #0` syscalls are serviced by the device
+kernel (threads/futex/epoll/sockets/dlopen/`/proc` all native, no ABI emulation).
+Three platform mitigations make it work: a SIGSYS→ENOSYS shim (seccomp probes),
+targetSdk 28 (`untrusted_app_27` W^X/execve), and 4 KiB pages. CPython 3.14.10
+and Node v24.22.3 verified executing on the Andarium device. Full design, the
+bionic-sigchain/TLS bug that blocked Node, and build/deploy steps:
+[docs/desktop-lite-native.md](docs/desktop-lite-native.md).
 
 Verified natively without a device: a `no_std` shell-test staticlib + C
 dispatcher runs the real libkimi shell (file CRUD, nested dirs, RamFS, df,
@@ -104,19 +115,16 @@ DEX interpreter; shared CLI/Terminal shell; touch→display latency instrumentat
 
 Priority is the library-OS product; kernel items continue as the foundation.
 
-1. **On-device verification** of the iOS/Android ports (render + touch + FS/net
-   on real hardware) once a test device is available; fix any platform-shell
-   runtime issues.
-2. **Desktop Lite natively — JIT ELF loader + host Linux-ABI translation** (the
-   core payoff): map real aarch64 Linux ELF/PE images, rewrite `svc` to call the
-   host dispatcher (no EL0 vectors on host), and translate Linux syscall numbers
-   onto host services (sandbox FS, BSD sockets, host memory) — the same WSL1 model
-   as `src/linux.rs`, but native, no QEMU. StikDebug enables JIT on iPad; Android
-   needs a similar path. Then `run /disk/<binary>` / `kpkg run busybox …` work on
-   the device at native speed. To **execute** the Alpine packages `apkg` already
-   downloads (nodejs, python3 — dynamic musl), this also needs a dynamic ELF
-   loader (`PT_INTERP`/`DT_NEEDED`/relocations), musl on host syscalls, and real
-   threads/futex/epoll/sockets/dlopen in the ABI.
+1. **On-device verification.** Android done (Andarium SDK 37: GUI render+touch,
+   FS/net, and native python3.14/node24 guests). iOS still pending hardware.
+2. **Desktop Lite natively — Android DONE** ([docs/desktop-lite-native.md](docs/desktop-lite-native.md)):
+   a forked child maps dynamic musl ELFs and runs them on the device kernel
+   (no ABI emulation — Android *is* Linux). Remaining: port the loader to iOS
+   (no `fork`, stricter JIT/W^X — StikDebug-style enablement); wire
+   `run /disk/<binary>` / a Terminal app to `nativeRunElf`; stdin/REPL pipes;
+   production hardening against the phantom-process killer (`:guest` registered
+   process); 16 KiB-page sysroot. The QEMU-path `src/linux.rs` ABI growth is now
+   secondary to the native product path.
 3. **Library-OS polish:** richer FS (file picker / import), TLS networking
    (HTTPS browser/kpkg), background audio, performance/battery tuning of the
    render+input loop.

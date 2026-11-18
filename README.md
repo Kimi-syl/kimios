@@ -44,22 +44,27 @@ binaries and BusyBox run at EL0 (`run /disk/<binary>`, `kpkg run busybox …`).
 That works, but it pays QEMU emulation overhead and a display-transport latency
 floor on every frame and every touch.
 
-The library-OS does the **same thing far more efficiently**: the userland is
-already native, so a Linux binary just needs to be loaded and its syscalls
-translated onto the *host* dispatcher (which implements them with iOS/Android
-APIs — sandbox FS, BSD sockets, host memory). No QEMU, no EL1/MMU, no VNC. The
-missing piece is a **JIT ELF loader** that maps a real aarch64 Linux image and
-rewrites its `svc` instructions to call the dispatcher (there are no EL0 exception
-vectors on a host). With that, Desktop Lite runs real Linux binaries at native
-speed on the device — the goal, achieved the efficient way.
+The library-OS does the **same thing far more efficiently** — and on Android it
+is **done**. The key realization: an Android app already runs on a real aarch64
+**Linux kernel**, so a musl-linked Linux binary's `svc #0` syscalls are serviced
+by the device kernel *natively* (threads, futex, epoll, sockets, `mprotect`,
+`dlopen`, `/proc` — no emulation, no `svc` rewriting). The libOS only needs to
+**load** the binary and jump to it: `android/jni/kimi_elf.c` forks a child, maps
+the dynamic musl ELF + `ld-musl` interpreter with `mmap(NULL)`, builds a SysV
+auxv/stack, and enters the interpreter. Three platform mitigations make it work
+(a SIGSYS→ENOSYS seccomp shim, targetSdk 28 for W^X, 4 KiB pages). **CPython
+3.14 and Node.js 24 execute on the real device** at native speed. Full design +
+the bionic-sigchain/TLS bug that blocked Node:
+[docs/desktop-lite-native.md](docs/desktop-lite-native.md). iOS guest execution
+is the remaining port (no `fork`, stricter JIT).
 
 **Alpine `apk` compatibility:** kpkg also speaks Alpine's package format via
 `apkg` (`apkg update / info / install <name>`): it parses APKINDEX repos and `.apk`
-packages (multi-member gzip + tar), resolves `so:` dependencies, and streams
-packages into a sysroot — verified by downloading **nodejs** and **python3** (real
-aarch64 musl binaries) with their full dependency closures from the live Alpine
-repo. *Running* them still needs the dynamic loader + musl + fuller ABI above;
-`apkg` handles the package-management half today. See [market/README.md](market/README.md).
+packages (multi-member gzip + tar), resolves `so:` dependencies, preserves
+symlinks (`SYS_SYMLINK`), and streams packages into a sandbox sysroot — verified
+by installing **nodejs** and **python3** (real aarch64 musl binaries) with their
+full dependency closures from the live Alpine repo, then **running** them
+natively. See [market/README.md](market/README.md).
 
 ## The library-OS insight
 
@@ -209,15 +214,17 @@ Full per-phase history: **[docs/phases.md](docs/phases.md)**.
 ## Status and honest caveats
 
 - **Library-OS ports build and are functionally complete** (FS, net, all apps),
-  verified end-to-end natively (real shell, DNS, HTTP fetch; GUI render + touch
-  via a host harness) and in CI. On-device runtime verification is pending
-  hardware access (no test device attached); the contract is proven, the Swift /
-  JNI shells are standard platform code.
-- **Desktop Lite on device (the next step):** running real Linux binaries
-  natively needs the JIT ELF loader + host-side Linux syscall translation — not
-  yet built. Everything compiled-in (GUI, apps, shell) runs ahead-of-time at
-  native speed today. APKs are inspected (not executed); DEX runs on the built-in
-  mini-Dalvik, exactly as on bare metal.
+  verified end-to-end natively (real shell, DNS, HTTP fetch; GUI render + touch)
+  and in CI. **Android is verified on real hardware** (Andarium, SDK 37: GUI
+  render+touch and native Linux guests). iOS on-device verification is pending
+  hardware.
+- **Desktop Lite on device — DONE on Android.** Real dynamic musl Linux binaries
+  (CPython 3.14, Node.js 24) execute natively via a forked-child ELF loader on the
+  device kernel — no QEMU, no ABI emulation
+  ([docs/desktop-lite-native.md](docs/desktop-lite-native.md)). iOS guest
+  execution is the remaining port. Everything compiled-in (GUI, apps, shell) runs
+  ahead-of-time at native speed. APKs are inspected (not executed); DEX runs on
+  the built-in mini-Dalvik, exactly as on bare metal.
 - **Bare metal on real silicon** (Redmi Note 11, `spes`) is blocked: locked
   bootloader, boot chain not dumped/verified. QEMU `virt` is the working kernel
   target. See [docs/hardware.md](docs/hardware.md).
