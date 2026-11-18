@@ -26,6 +26,7 @@
 #include <android/log.h>
 #include <stdint.h>
 #include <stddef.h>
+#include <stdio.h>
 #include <string.h>
 #include <signal.h>
 #include <ucontext.h>
@@ -290,7 +291,42 @@ static uint64_t build_stack(uint64_t stack_top, uint64_t phdr, uint64_t phent,
 }
 
 // ---------------- SIGSYS -> ENOSYS shim ----------------
-static struct sigaction g_old_sigsys;
+// Guest signal handlers MUST be installed with raw rt_sigaction + SA_RESTORER,
+// NOT bionic sigaction(): bionic wraps handlers in its sigchain dispatcher,
+// which reads bionic TLS via TPIDR_EL0. The guest thread's TPIDR_EL0 belongs to
+// musl, so the sigchain dispatcher null-derefs (fault 0x308) the moment any
+// signal (e.g. the io_uring SIGSYS probe) is delivered. A raw kernel handler
+// with our own rt_sigreturn restorer bypasses sigchain; the handler itself is
+// compiled no_stack_protector so it never touches TPIDR-relative TLS.
+#define SA_RESTORER 0x04000000UL
+#define K_SA_SIGINFO 4UL
+struct k_sigaction {
+    void *handler;
+    unsigned long flags;
+    void *restorer;
+    uint64_t mask;
+};
+__attribute__((naked)) static void k_sigreturn(void) {
+    __asm__ volatile("mov x8, #139\n\tsvc #0\n\t"); // rt_sigreturn
+}
+static void k_install_sig(int sig, void *handler) {
+    struct k_sigaction ksa;
+    ksa.handler = handler;
+    ksa.flags = K_SA_SIGINFO | SA_RESTORER;
+    ksa.restorer = (void *)k_sigreturn;
+    ksa.mask = 0;
+    k_sys(SYS_rt_sigaction, sig, (long)&ksa, 0, 8, 0, 0);
+}
+static void k_sig_default(int sig) {
+    struct k_sigaction dfl;
+    dfl.handler = (void *)0; // SIG_DFL
+    dfl.flags = 0;
+    dfl.restorer = 0;
+    dfl.mask = 0;
+    k_sys(SYS_rt_sigaction, sig, (long)&dfl, 0, 8, 0, 0);
+}
+
+__attribute__((no_stack_protector))
 static void sigsys_handler(int sig, siginfo_t *si, void *ucv) {
     if (si->si_code == SYS_SECCOMP) {
         int nr = si->si_syscall;
@@ -303,22 +339,41 @@ static void sigsys_handler(int sig, siginfo_t *si, void *ucv) {
             return;
         }
     }
-    if (g_old_sigsys.sa_flags & SA_SIGINFO) {
-        if (g_old_sigsys.sa_sigaction) g_old_sigsys.sa_sigaction(sig, si, ucv);
-    } else if (g_old_sigsys.sa_handler == SIG_DFL) {
-        signal(sig, SIG_DFL);
-        raise(sig);
-    } else if (g_old_sigsys.sa_handler && g_old_sigsys.sa_handler != SIG_IGN) {
-        g_old_sigsys.sa_handler(sig);
-    }
+    k_sig_default(sig); // unhandled: restore default, return -> re-fatal
 }
+
+// ---------------- guest fatal-signal diagnostics ----------------
+static char *hex64(char *p, uint64_t v) {
+    static const char d[] = "0123456789abcdef";
+    *p++ = '0'; *p++ = 'x';
+    for (int i = 60; i >= 0; i -= 4) *p++ = d[(v >> i) & 15];
+    return p;
+}
+__attribute__((no_stack_protector))
+static void fatal_handler(int sig, siginfo_t *si, void *ucv) {
+    ucontext_t *uc = (ucontext_t *)ucv;
+    char buf[192];
+    char *p = buf;
+    const char *m = "GUEST-FATAL sig=";
+    while (*m) *p++ = *m++;
+    *p++ = '0' + (sig / 10 % 10); *p++ = '0' + (sig % 10);
+    m = " addr="; while (*m) *p++ = *m++;
+    p = hex64(p, (uint64_t)(uintptr_t)si->si_addr);
+    m = " pc="; while (*m) *p++ = *m++;
+    p = hex64(p, (uint64_t)uc->uc_mcontext.pc);
+    *p++ = '\n';
+    k_sys(SYS_write, 2, (long)buf, (long)(p - buf), 0, 0, 0);
+    k_sig_default(sig);
+}
+static void kimi_fatal_diagnose_install(void) {
+    int sigs[] = { SIGSEGV, SIGBUS, SIGILL, SIGABRT, SIGFPE };
+    for (unsigned i = 0; i < sizeof sigs / sizeof sigs[0]; i++)
+        k_install_sig(sigs[i], (void *)fatal_handler);
+}
+
 static void install_sigsys_shim(void) {
-    struct sigaction sa;
-    memset(&sa, 0, sizeof sa);
-    sa.sa_sigaction = sigsys_handler;
-    sa.sa_flags = SA_SIGINFO;
-    sigemptyset(&sa.sa_mask);
-    sigaction(SIGSYS, &sa, &g_old_sigsys);
+    k_install_sig(SIGSYS, (void *)sigsys_handler);
+    kimi_fatal_diagnose_install();
 }
 
 // ---------------- load + enter ----------------
