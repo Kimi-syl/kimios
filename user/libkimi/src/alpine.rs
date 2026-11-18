@@ -63,16 +63,18 @@ struct SBits<R: Reader> {
     len: usize,
     bitbuf: u32,
     bitcnt: u32,
+    eof: bool,
 }
 impl<R: Reader> SBits<R> {
     fn new(r: R) -> Self {
-        SBits { r, buf: [0; 4096], pos: 0, len: 0, bitbuf: 0, bitcnt: 0 }
+        SBits { r, buf: [0; 4096], pos: 0, len: 0, bitbuf: 0, bitcnt: 0, eof: false }
     }
     fn byte(&mut self) -> u32 {
         if self.pos >= self.len {
             self.len = self.r.fill(&mut self.buf);
             self.pos = 0;
             if self.len == 0 {
+                self.eof = true;
                 return 0;
             }
         }
@@ -127,11 +129,13 @@ trait Sink {
 static mut WIN_BUF: [u8; 32768] = [0; 32768];
 struct Window {
     pos: usize,
+    written: usize,
 }
 impl Window {
     fn push<S: Sink>(&mut self, sink: &mut S, b: u8) {
         unsafe { WIN_BUF[self.pos] = b; }
         self.pos = (self.pos + 1) & 0x7fff;
+        self.written += 1;
         sink.emit(&[b]);
     }
     fn back(&self, distance: usize) -> u8 {
@@ -147,7 +151,13 @@ fn block<R: Reader, S: Sink>(
     dist: &Huffman,
 ) -> bool {
     loop {
+        if br.eof {
+            return false;
+        }
         let sym = decode(br, lit);
+        if br.eof {
+            return false;
+        }
         if sym < 256 {
             win.push(sink, sym as u8);
         } else if sym == 256 {
@@ -159,10 +169,13 @@ fn block<R: Reader, S: Sink>(
             }
             let length = LEN_BASE[idx] as usize + br.bits(LEN_EXTRA[idx] as u32) as usize;
             let dsym = decode(br, dist) as usize;
-            if dsym >= 30 {
+            if dsym >= 30 || br.eof {
                 return false;
             }
             let distance = DIST_BASE[dsym] as usize + br.bits(DIST_EXTRA[dsym] as u32) as usize;
+            if distance > win.written || br.eof {
+                return false;
+            }
             for _ in 0..length {
                 let b = win.back(distance);
                 win.push(sink, b);
@@ -172,17 +185,26 @@ fn block<R: Reader, S: Sink>(
 }
 
 fn inflate_stream<R: Reader, S: Sink>(br: &mut SBits<R>, sink: &mut S) -> bool {
-    let mut win = Window { pos: 0 };
+    let mut win = Window { pos: 0, written: 0 };
     loop {
         let final_block = br.bits(1);
         let typ = br.bits(2);
+        if br.eof {
+            return false;
+        }
         match typ {
             0 => {
                 br.align();
                 let len = br.bits(16) as usize;
                 let _nlen = br.bits(16);
+                if br.eof {
+                    return false;
+                }
                 for _ in 0..len {
                     let b = br.bits(8) as u8;
+                    if br.eof {
+                        return false;
+                    }
                     win.push(sink, b);
                 }
             }
@@ -212,6 +234,9 @@ fn inflate_stream<R: Reader, S: Sink>(br: &mut SBits<R>, sink: &mut S) -> bool {
                 let mut i = 0;
                 while i < total {
                     let s = decode(br, &code_huff);
+                    if br.eof {
+                        return false;
+                    }
                     if s < 16 {
                         lengths[i] = s as u8;
                         i += 1;
@@ -365,6 +390,7 @@ struct TarSink<'a> {
     longname: [u8; 256],
     longname_len: usize,
     pub files: usize,
+    pub links: usize,
 }
 
 fn octal(b: &[u8]) -> usize {
@@ -405,7 +431,7 @@ impl<'a> TarSink<'a> {
     fn new(dest: &'a str) -> Self {
         TarSink {
             dest, hdr: [0; 512], hdr_len: 0, file_remaining: 0, pad_remaining: 0,
-            handle: None, offset: 0, longname: [0; 256], longname_len: 0, files: 0,
+            handle: None, offset: 0, longname: [0; 256], longname_len: 0, files: 0, links: 0,
         }
     }
 
@@ -455,8 +481,9 @@ impl<'a> TarSink<'a> {
                     nl += 1;
                 }
             }
-            // ustar prefix
-            if &h[257..262] == b"ustar" && h[345] != 0 {
+            // POSIX ustar prefix (magic "ustar\0"); GNU tar ("ustar  ") stores
+            // atime at 345, so only honour the prefix for the POSIX variant.
+            if &h[257..263] == b"ustar\0" && h[345] != 0 {
                 let mut full = [0u8; 256];
                 let mut fl = 0;
                 for &b in &h[345..500] {
@@ -507,7 +534,11 @@ impl<'a> TarSink<'a> {
             }
             b'0' | 0 => self.start_file(&name[..nl], size),
             _ => {
-                // symlinks/hardlinks/etc: skip data
+                // symlinks/hardlinks/pax headers/etc: skip data. KimiFS has no
+                // symlink inode type, so links are counted but not created.
+                if typeflag == b'2' {
+                    self.links += 1;
+                }
                 self.file_remaining = size;
                 self.pad_remaining = (512 - (size % 512)) % 512;
                 self.handle = None;
@@ -566,12 +597,6 @@ impl Sink for TarSink<'_> {
     }
 }
 
-/// Stream-decompress a single gzip member from a reader into a tar sink.
-fn gunzip_tar<R: Reader>(r: R, dest: &str) -> bool {
-    let mut br = SBits::new(r);
-    gunzip_all(&mut br, TarSink::new(dest)).is_some()
-}
-
 // ---------------------------------------------------------------------------
 // control member (buffer-based, small) for .PKGINFO
 // ---------------------------------------------------------------------------
@@ -601,6 +626,9 @@ fn gunzip_member_buf(input: &[u8], out: &mut [u8]) -> Option<(usize, usize)> {
     if flg & 2 != 0 {
         p += 2;
     }
+    if p >= input.len() {
+        return None;
+    }
     let (written, consumed) = crate::apk::inflate_ex(&input[p..], out);
     Some((written, p + consumed + 8))
 }
@@ -618,6 +646,7 @@ fn with_index_stanzas(mut f: impl FnMut(&[u8]) -> bool) {
     let mut line = [0u8; 512];
     let mut llen = 0usize;
     let mut in_stanza = false;
+    let mut stopped_early = false;
     'outer: loop {
         let n = k::read_file(h, off, &mut chunk);
         if n == 0 {
@@ -629,6 +658,7 @@ fn with_index_stanzas(mut f: impl FnMut(&[u8]) -> bool) {
                 if llen == 0 {
                     if in_stanza {
                         if !f(&stanza[..slen]) {
+                            stopped_early = true;
                             break 'outer;
                         }
                         slen = 0;
@@ -650,7 +680,9 @@ fn with_index_stanzas(mut f: impl FnMut(&[u8]) -> bool) {
             }
         }
     }
-    if in_stanza && slen > 0 {
+    // Flush a trailing unterminated stanza only when the input was exhausted;
+    // after an early stop the callback already saw (and rejected) this stanza.
+    if !stopped_early && in_stanza && slen > 0 {
         f(&stanza[..slen]);
     }
     k::close(h);
@@ -745,6 +777,24 @@ fn resolve_dep(token: &str) -> Option<Pkg> {
 // HTTP download (reuse kpkg's plain-HTTP body fetch via a small inline client)
 // ---------------------------------------------------------------------------
 
+/// Case-insensitive lookup of an HTTP header value within a header block.
+fn header_value<'a>(hdr: &'a [u8], name: &[u8]) -> Option<&'a [u8]> {
+    let mut start = 0;
+    while start < hdr.len() {
+        let end = hdr[start..].windows(2).position(|w| w == b"\r\n").map(|p| start + p).unwrap_or(hdr.len());
+        let line = &hdr[start..end];
+        if line.len() > name.len() && line[..name.len()].eq_ignore_ascii_case(name) && line[name.len()] == b':' {
+            let mut v = &line[name.len() + 1..];
+            while let Some((&b' ', rest)) = v.split_first() {
+                v = rest;
+            }
+            return Some(v);
+        }
+        start = end + 2;
+    }
+    None
+}
+
 fn http_to_file(url: &str, dest: &str) -> bool {
     let mut hb = [0u8; 128];
     let Some((host, port, path)) = crate::kpkg::parse_url_pub(url, &mut hb) else { return false };
@@ -764,7 +814,9 @@ fn http_to_file(url: &str, dest: &str) -> bool {
     let mut pending = [0u8; 4096];
     let mut plen = 0;
     let mut header_done = false;
+    let mut expect: Option<u64> = None;
     let mut off = 0u64;
+    let mut ok = false;
     loop {
         let got = k::net_tcp_recv(slot, &mut buf, 15000);
         if got == 0 {
@@ -776,13 +828,18 @@ fn http_to_file(url: &str, dest: &str) -> bool {
             plen += copy;
             if let Some(pos) = pending[..plen].windows(4).position(|w| w == b"\r\n\r\n") {
                 header_done = true;
+                let hdr = &pending[..pos];
                 // check status line for 200
-                let ok = pending[..plen].starts_with(b"HTTP/1.1 200") || pending[..plen].starts_with(b"HTTP/1.0 200");
-                if !ok {
-                    k::close(h);
-                    k::net_tcp_close(slot);
-                    let _ = k::unlink(dest);
-                    return false;
+                let status_ok = hdr.starts_with(b"HTTP/1.1 200") || hdr.starts_with(b"HTTP/1.0 200");
+                // chunked bodies carry framing we do not decode; refuse them
+                let chunked = header_value(hdr, b"transfer-encoding")
+                    .map(|v| v.windows(7).any(|w| w.eq_ignore_ascii_case(b"chunked")))
+                    .unwrap_or(false);
+                expect = header_value(hdr, b"content-length")
+                    .and_then(|v| core::str::from_utf8(v).ok())
+                    .and_then(|s| s.trim().parse().ok());
+                if !status_ok || chunked {
+                    break;
                 }
                 let bs = pos + 4;
                 if bs < plen {
@@ -790,15 +847,28 @@ fn http_to_file(url: &str, dest: &str) -> bool {
                     off += (plen - bs) as u64;
                 }
                 plen = 0;
+            } else if plen == pending.len() {
+                break; // header larger than the buffer; cannot parse
             }
         } else {
             k::write_file(h, off as usize, &buf[..got]);
             off += got as u64;
         }
     }
+    // A dropped connection mid-body must not pass as a complete download:
+    // verify against Content-Length when the server sent one.
+    if header_done && off > 0 {
+        ok = match expect {
+            Some(len) => off == len,
+            None => true,
+        };
+    }
     k::close(h);
     k::net_tcp_close(slot);
-    header_done && off > 0
+    if !ok {
+        let _ = k::unlink(dest);
+    }
+    ok
 }
 
 // ---------------------------------------------------------------------------
@@ -856,7 +926,17 @@ pub fn update(root_url: &str) -> bool {
         let n = url_join(root.as_bytes(), repo, "APKINDEX.tar.gz", &mut url);
         let url_str = core::str::from_utf8(&url[..n]).unwrap_or("");
         let tmpgz = "/disk/alpine/idx.tar.gz";
-        if !http_to_file(url_str, tmpgz) {
+        let mut fetched = false;
+        for attempt in 0..4 {
+            if attempt > 0 {
+                k::sleep_ms(200);
+            }
+            if http_to_file(url_str, tmpgz) {
+                fetched = true;
+                break;
+            }
+        }
+        if !fetched {
             continue;
         }
         let Some(h) = k::open(tmpgz) else { continue };
@@ -1055,6 +1135,8 @@ pub fn install(name: &str) -> bool {
     k::print("\n");
 
     let mut ok = 0;
+    let mut total_files = 0usize;
+    let mut total_links = 0usize;
     for i in 0..sn {
         let pname = core::str::from_utf8(&seen[i][..seen_len[i]]).unwrap_or("");
         let Some(p) = find_by_name(pname) else { continue };
@@ -1084,12 +1166,26 @@ pub fn install(name: &str) -> bool {
             k::print("\n");
             continue;
         }
-        if extract_apk(TMP, SYSROOT) {
+        if let Some((files, links)) = extract_apk(TMP, SYSROOT) {
             ok += 1;
+            total_files += files;
+            total_links += links;
             k::print("  + ");
             k::print(pname);
             k::print(" ");
             k::print_bytes(&p.ver[..p.ver_len]);
+            k::print(" (");
+            k::print_u64(files as u64);
+            k::print(" files");
+            if links > 0 {
+                k::print(", ");
+                k::print_u64(links as u64);
+                k::print(" symlinks skipped");
+            }
+            k::print(")\n");
+        } else {
+            k::print("  ! extract failed: ");
+            k::print(pname);
             k::print("\n");
         }
         let _ = k::unlink(TMP);
@@ -1099,33 +1195,86 @@ pub fn install(name: &str) -> bool {
     k::print_u64(ok);
     k::print("/");
     k::print_u64(sn as u64);
-    k::print(" packages\n");
+    k::print(" packages, ");
+    k::print_u64(total_files as u64);
+    k::print(" files (");
+    k::print_u64(total_links as u64);
+    k::print(" symlinks skipped)\n");
     k::print("note: binaries are dynamic musl; running them needs the dynamic\n");
     k::print("loader + musl + fuller Linux ABI (Desktop Lite runtime milestone).\n");
     ok > 0
 }
 
-/// Extract a downloaded `.apk` (control + data gzip members) into dest.
-fn extract_apk(path: &str, dest: &str) -> bool {
-    let Some((_, size)) = k::stat(path) else { return false };
-    let Some(h) = k::open(path) else { return false };
-    // read enough for the control member (metadata is small)
-    let mut head = [0u8; 262144];
-    let want = (size as usize).min(head.len());
-    let n = k::read_file(h, 0, &mut head[..want]);
-    let mut control = [0u8; 262144];
-    let data_start = match gunzip_member_buf(&head[..n], &mut control) {
-        Some((_w, consumed)) => consumed,
-        None => {
-            k::close(h);
-            return false;
+// Scratch for member probing lives in BSS: 2 x 256 KiB on the stack would
+// overflow the 64 KiB bare-metal user stack. Single-threaded, non-reentrant.
+static mut APK_HEAD: [u8; 262144] = [0; 262144];
+static mut APK_CONTROL: [u8; 262144] = [0; 262144];
+
+/// True if a decompressed tar member is the signature or control member
+/// (contains `.SIGN*` / `.PKGINFO` entries) rather than payload data.
+fn is_control_tar(tar: &[u8]) -> bool {
+    let mut pos = 0;
+    while pos + 512 <= tar.len() {
+        let h = &tar[pos..pos + 512];
+        if h.iter().all(|&b| b == 0) {
+            break;
         }
-    };
-    // (control tar holds .PKGINFO; data member follows at data_start)
+        let name = &h[..100];
+        if name.windows(5).any(|w| w == b".SIGN") || name.windows(8).any(|w| w == b".PKGINFO") {
+            return true;
+        }
+        let size = octal(&h[124..136]);
+        pos += 512 + ((size + 511) / 512) * 512;
+    }
+    false
+}
+
+/// Extract a downloaded `.apk` into dest. Alpine packages are concatenated
+/// gzip members: a `.SIGN` tar, a control tar (`.PKGINFO` + scripts), then the
+/// data tar (older packages may omit the signature member). Skip the metadata
+/// members and stream only the data tar into the sysroot. Returns
+/// `(regular files extracted, symlinks skipped)`.
+fn extract_apk(path: &str, dest: &str) -> Option<(usize, usize)> {
+    let (_, size) = k::stat(path)?;
+    let h = k::open(path)?;
+    let head = unsafe { &mut *core::ptr::addr_of_mut!(APK_HEAD) };
+    let control = unsafe { &mut *core::ptr::addr_of_mut!(APK_CONTROL) };
+    let mut data_start = 0usize;
+    let mut found_data = false;
+    while data_start < size as usize {
+        let want = ((size as usize) - data_start).min(head.len());
+        let mut got = 0;
+        while got < want {
+            let n = k::read_file(h, data_start + got, &mut head[got..want]);
+            if n == 0 {
+                break;
+            }
+            got += n;
+        }
+        if got < 18 {
+            break;
+        }
+        let Some((written, consumed)) = gunzip_member_buf(&head[..got], control) else { break };
+        if written == control.len() {
+            // Too large to be signature/control: this is the data member.
+            found_data = true;
+            break;
+        }
+        if is_control_tar(&control[..written]) {
+            data_start += consumed;
+            continue;
+        }
+        found_data = true;
+        break;
+    }
+    if !found_data {
+        k::close(h);
+        return None;
+    }
     let fr = FileReader { handle: h, offset: data_start };
-    let ok = gunzip_tar(fr, dest);
+    let res = gunzip_all(&mut SBits::new(fr), TarSink::new(dest));
     k::close(h);
-    ok
+    res.map(|s| (s.files, s.links))
 }
 
 /// Print metadata for an installed/available package.

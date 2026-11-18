@@ -58,7 +58,9 @@ pub extern "C" fn kimi_apkg_only() {
     k::shell::exec(b"apkg update");
     k::shell::exec(b"apkg info python3");
     k::shell::exec(b"apkg info nodejs");
+    k::shell::exec(b"apkg install python3");
     k::shell::exec(b"apkg install nodejs");
     k::shell::exec(b"ls /disk/alpine/root/usr/bin");
+    k::shell::exec(b"ls /disk/alpine/root/lib");
     k::print("=== apkg done ===\n");
 }

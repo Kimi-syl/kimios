@@ -50,7 +50,9 @@ static char *read_all(const char *p,size_t *len){
     int fd=open(p,O_RDONLY);if(fd<0)return NULL;
     struct stat st;fstat(fd,&st);size_t sz=st.st_size;
     char *b=malloc(sz+1);if(!b){close(fd);return NULL;}
-    size_t got=read(fd,b,sz);close(fd);b[got]=0;*len=got;return b;
+    size_t got=0;
+    while(got<sz){ssize_t n=read(fd,b+got,sz-got);if(n<=0)break;got+=(size_t)n;}
+    close(fd);b[got]=0;*len=got;return b;
 }
 
 static uint64_t fs_open(const char *path){
@@ -87,20 +89,23 @@ static uint64_t fs_read(uint64_t h,uint64_t off,void *buf,uint64_t len){
     char p[512];disk_path(handles[idx].path,p,sizeof p);
     int fd=open(p,O_RDONLY);if(fd<0)return 0;
     if(lseek(fd,(off_t)off,SEEK_SET)<0){close(fd);return 0;}
-    ssize_t n=read(fd,buf,len);close(fd);return n<0?0:(uint64_t)n;
+    uint64_t got=0;
+    while(got<len){ssize_t n=read(fd,(char*)buf+got,len-got);if(n<=0)break;got+=(uint64_t)n;}
+    close(fd);return got;
 }
 static uint64_t fs_write(uint64_t h,uint64_t off,const void *buf,uint64_t len){
     int idx=(int)h-100;if(idx<0||idx>=64||!handles[idx].used||handles[idx].kind!=1)return 0;
     char p[512];disk_path(handles[idx].path,p,sizeof p);
     struct stat st; size_t cursz=(stat(p,&st)==0)?(size_t)st.st_size:0;
-    if(off==cursz){int fd=open(p,O_WRONLY|O_CREAT,0644);if(fd<0)return 0;lseek(fd,(off_t)off,SEEK_SET);ssize_t w=write(fd,buf,len);close(fd);return w==(ssize_t)len?len:0;}
+    if(off==cursz){int fd=open(p,O_WRONLY|O_CREAT,0644);if(fd<0)return 0;lseek(fd,(off_t)off,SEEK_SET);uint64_t w=0;while(w<len){ssize_t n=write(fd,(const char*)buf+w,len-w);if(n<=0)break;w+=(uint64_t)n;}close(fd);return w==len?len:0;}
     size_t sz=0;char *data=read_all(p,&sz);if(!data){data=malloc(1);sz=0;}
     size_t need=off+len;
     if(need>sz){data=realloc(data,need+1);memset(data+sz,0,need-sz);sz=need;}
     memcpy(data+off,buf,len);
     int fd=open(p,O_WRONLY|O_CREAT|O_TRUNC,0644);if(fd<0){free(data);return 0;}
-    ssize_t w=write(fd,data,sz);close(fd);free(data);
-    return w==(ssize_t)sz?len:0;
+    size_t w=0;while(w<sz){ssize_t n=write(fd,data+w,sz-w);if(n<=0)break;w+=(size_t)n;}
+    close(fd);free(data);
+    return w==sz?len:0;
 }
 static uint64_t fs_close(uint64_t h){int idx=(int)h-100;if(idx<0||idx>=64||!handles[idx].used)return ERROR;handles[idx].used=0;return 0;}
 
@@ -159,12 +164,15 @@ static uint64_t net_connect(uint64_t ip,uint64_t port,uint64_t timeout){
     struct sockaddr_in a;memset(&a,0,sizeof a);a.sin_family=AF_INET;a.sin_port=htons((uint16_t)port);a.sin_addr.s_addr=inet_addr(ipstr);
     (void)timeout;
     if(connect(fd,(struct sockaddr*)&a,sizeof a)!=0){close(fd);return ERROR;}
-    if(nsock>=16){close(fd);return ERROR;}
-    socks[nsock]=fd;return nsock++;
+    // reuse closed slots: nsock is a high-water mark, not a live count
+    int slot=-1;
+    for(int i=0;i<nsock;i++)if(socks[i]==-1){slot=i;break;}
+    if(slot<0){if(nsock>=16){close(fd);return ERROR;}slot=nsock++;}
+    socks[slot]=fd;return (uint64_t)slot;
 }
-static uint64_t net_send(uint64_t slot,const void *buf,uint64_t len){if(slot>=(uint64_t)nsock)return 0;ssize_t n=send(socks[slot],buf,len,0);return n<0?0:(uint64_t)n;}
+static uint64_t net_send(uint64_t slot,const void *buf,uint64_t len){if(slot>=(uint64_t)nsock||socks[slot]<0)return 0;uint64_t w=0;while(w<len){ssize_t n=send(socks[slot],(const char*)buf+w,len-w,0);if(n<=0)break;w+=(uint64_t)n;}return w;}
 static uint64_t net_recv(uint64_t slot,void *buf,uint64_t len,uint64_t timeout){
-    if(slot>=(uint64_t)nsock)return 0;
+    if(slot>=(uint64_t)nsock||socks[slot]<0)return 0;
     struct timeval tv;tv.tv_sec=timeout/1000;tv.tv_usec=(timeout%1000)*1000;
     setsockopt(socks[slot],SOL_SOCKET,SO_RCVTIMEO,&tv,sizeof tv);
     ssize_t n=recv(socks[slot],buf,len,0);return n<=0?0:(uint64_t)n;
@@ -216,10 +224,12 @@ uint64_t kimi_host_syscall(uint64_t n,uint64_t a0,uint64_t a1,uint64_t a2,uint64
 }
 
 int main(void){
-  snprintf(diskRoot,sizeof diskRoot,"/tmp/kimios-apkg-XXXXXX");if(!mkdtemp(diskRoot)){perror("mkdtemp");return 1;}
+  const char *env=getenv("KIMI_DISK_ROOT");
+  if(env&&*env){snprintf(diskRoot,sizeof diskRoot,"%s",env);mkdir_p(diskRoot);}
+  else{snprintf(diskRoot,sizeof diskRoot,"/tmp/kimios-apkg-XXXXXX");if(!mkdtemp(diskRoot)){perror("mkdtemp");return 1;}}
   start_ns=now_ns();
+  fprintf(stderr,"[host] disk=%s\n",diskRoot);
   extern void kimi_apkg_only(void);
   kimi_apkg_only();
-  fprintf(stderr,"[host] disk=%s\n",diskRoot);
   return 0;
 }
