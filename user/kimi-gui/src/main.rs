@@ -799,15 +799,22 @@ fn gui_run() -> ! {
             dirty = true;
         }
 
-        // Animating home (edit-mode jiggle / drag) moves icons every frame; the
-        // wallpaper must be repainted each frame or old icon pixels ghost into
-        // duplicated logos. Force a full background repaint while animating.
-        if ui.scene == Scene::Home && (ui.edit_mode || ui.drag.is_some() || ui.folder_view.is_some()) {
+        // Animating home (edit-mode jiggle / folder view) moves icons every
+        // frame; repaint the wallpaper each frame or old pixels ghost into
+        // duplicated logos. (Icon drag uses the fast snapshot path below.)
+        if ui.scene == Scene::Home && (ui.edit_mode || ui.folder_view.is_some()) {
             ui.paint_bg = true;
+        }
+        if ui.drag.is_none() {
+            unsafe { DRAG_BG_VALID = false; }
         }
 
         if dirty {
-            render(&screen, &mut ui, clock);
+            if ui.scene == Scene::Home && ui.drag.is_some() {
+                drag_render(&screen, &mut ui, clock);
+            } else {
+                render(&screen, &mut ui, clock);
+            }
             dirty = false;
         }
 
@@ -1913,7 +1920,7 @@ fn render(screen: &Screen, ui: &mut Ui, clock: [u64; 7]) {
     } else {
         draw_status_bar(screen, clock, ui);
     }
-    if let Some(point) = ui.press {
+    if let Some(point) = ui.press.filter(|_| ui.drag.is_none()) {
         screen.ring(point.0, point.1, 18, 3, 0x00a0_a8b8);
         screen.circle(point.0, point.1, 3, TEXT());
     }
@@ -2004,6 +2011,72 @@ fn paint_wallpaper(screen: &Screen, y_offset: i64, dark: bool) {
             }
             y += 24;
         }
+    }
+}
+
+// --- Fast icon drag: snapshot the static home once, then per move only blit
+// the snapshot + redraw the moving icon (avoids re-rendering all supersampled
+// text every touch event, which made dragging unusably laggy). ---
+static DRAG_BG_CAPTURE: AtomicU64 = AtomicU64::new(0);
+static mut DRAG_BG: [u32; 1080 * 1920] = [0; 1080 * 1920];
+static mut DRAG_BG_VALID: bool = false;
+
+fn loc_center(loc: Loc, width: i64, height: i64) -> (i64, i64) {
+    match loc {
+        Loc::Grid(i) | Loc::Grid2(i) => grid_center(width, height, i),
+        Loc::Dock(i) => (76 + i as i64 * 109, height - 120 + 46),
+        Loc::Folder(_, _) => (width / 2, height / 2),
+    }
+}
+
+fn draw_drag_overlay(screen: &Screen, ui: &Ui) {
+    let (width, height) = (screen.width(), screen.height());
+    let (_, _, icon) = grid_metrics(height);
+    if let Some(hover) = ui.drag.and_then(|d| d.hover) {
+        let (cx, cy) = loc_center(hover, width, height);
+        let r = if matches!(hover, Loc::Dock(_)) { 36 } else { icon / 2 + 8 };
+        screen.ring(cx, cy, r, 3, RED());
+    }
+    if let Some(drag) = ui.drag {
+        let size = icon + 10;
+        screen.round_rect(
+            ui.touch.0 - size / 2 - 4, ui.touch.1 - size / 2 - 4,
+            size + 8, size + 8, size / 4, 0x0000_0000,
+        );
+        draw_slot_icon(screen, ui, drag.slot, ui.touch.0, ui.touch.1, size, true);
+    }
+}
+
+fn drag_render(screen: &Screen, ui: &mut Ui, clock: [u64; 7]) {
+    let (pw, ph) = screen.physical_size();
+    if pw != 1080 || ph != 1920 {
+        render(screen, ui, clock);
+        return;
+    }
+    unsafe {
+        let stride = screen.stride_pixels() as usize;
+        if !DRAG_BG_VALID {
+            // Capture the static home (origin slot empty, no overlay) once.
+            DRAG_BG_CAPTURE.store(1, Ordering::Relaxed);
+            ui.paint_bg = true;
+            render(screen, ui, clock);
+            DRAG_BG_CAPTURE.store(0, Ordering::Relaxed);
+            let src = screen.back_ptr();
+            for y in 0..1920usize {
+                core::ptr::copy_nonoverlapping(src.add(y * stride), DRAG_BG.as_mut_ptr().add(y * 1080), 1080);
+            }
+            DRAG_BG_VALID = true;
+        } else {
+            let dst = screen.back_ptr();
+            for y in 0..1920usize {
+                core::ptr::copy_nonoverlapping(DRAG_BG.as_ptr().add(y * 1080), dst.add(y * stride), 1080);
+            }
+            screen.reset_dirty();
+        }
+        screen.set_app_space(false);
+        draw_drag_overlay(screen, ui);
+        screen.mark_full_dirty();
+        present_dirty(screen);
     }
 }
 
@@ -2191,7 +2264,8 @@ fn draw_home(
     let (_, _, icon) = grid_metrics(height);
     let jiggle = if ui.edit_mode { ((k::uptime_ms() / 140) % 2) as i64 * 2 - 1 } else { 0 };
     let drag_from = ui.drag.map(|d| d.from);
-    let drag_hover = ui.drag.and_then(|d| d.hover);
+    let capturing = DRAG_BG_CAPTURE.load(Ordering::Relaxed) == 1;
+    let drag_hover = if capturing { None } else { ui.drag.and_then(|d| d.hover) };
     for (index, slot) in ui.layout.page(ui.home_page).iter().enumerate() {
         let loc = if ui.home_page == 1 { Loc::Grid2(index) } else { Loc::Grid(index) };
         if drag_from == Some(loc) {
@@ -2236,17 +2310,19 @@ fn draw_home(
         draw_folder_view(screen, ui, f, y_offset);
     }
 
-    if let Some(drag) = ui.drag {
-        let size = icon + 10;
-        screen.round_rect(
-            ui.touch.0 - size / 2 - 4,
-            ui.touch.1 - size / 2 - 4,
-            size + 8,
-            size + 8,
-            size / 4,
-            0x0000_0000,
-        );
-        draw_slot_icon(screen, ui, drag.slot, ui.touch.0, ui.touch.1, size, true);
+    if !capturing {
+        if let Some(drag) = ui.drag {
+            let size = icon + 10;
+            screen.round_rect(
+                ui.touch.0 - size / 2 - 4,
+                ui.touch.1 - size / 2 - 4,
+                size + 8,
+                size + 8,
+                size / 4,
+                0x0000_0000,
+            );
+            draw_slot_icon(screen, ui, drag.slot, ui.touch.0, ui.touch.1, size, true);
+        }
     }
 
     draw_home_indicator(screen);

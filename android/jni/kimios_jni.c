@@ -8,6 +8,7 @@
 // No QEMU — native ARM64. Mirrors ios/app/Sources/KimiHost.swift + KimiFS/KimiNet.
 
 #include <jni.h>
+#include <arm_neon.h>
 #include <android/native_window.h>
 #include <android/native_window_jni.h>
 #include <android/log.h>
@@ -283,13 +284,15 @@ static void blit_to_window(void) {
     uint32_t *dst = (uint32_t *)buf.bits;
     int w = FB_W < buf.width ? FB_W : buf.width;
     int h = FB_H < buf.height ? FB_H : buf.height;
-    // GUI pixels are 0x00RRGGBB -> memory bytes B,G,R,X, which is exactly
-    // BGRX_8888, so the blit is a plain memcpy (no per-pixel swizzle).
-    if (buf.stride == FB_W && w == FB_W) {
-        memcpy(dst, front, (size_t)FB_W * h * 4);
-    } else {
-        for (int y = 0; y < h; y++)
-            memcpy(dst + (size_t)y * buf.stride, front + (size_t)y * FB_W, (size_t)w * 4);
+    // GUI pixels 0x00RRGGBB -> window RGBX_8888 via bswap32>>8 (R/B swap).
+    // NEON processes 4 pixels/iteration (vrev32 = bswap32, then >>8).
+    for (int y = 0; y < h; y++) {
+        uint32_t *d = dst + (size_t)y * buf.stride;
+        const uint32_t *s = front + (size_t)y * FB_W;
+        int x = 0;
+        for (; x + 4 <= w; x += 4)
+            vst1q_u32(d + x, vshrq_n_u32(vrev32q_u8(vld1q_u32(s + x)), 8));
+        for (; x < w; x++) d[x] = __builtin_bswap32(s[x]) >> 8;
     }
     ANativeWindow_unlockAndPost(window);
 }
@@ -827,7 +830,7 @@ Java_com_kimios_libos_KimiBridge_nativeSetSurface(JNIEnv *env, jclass cls, jobje
     if (window) { ANativeWindow_release(window); window = NULL; }
     if (surface) {
         window = ANativeWindow_fromSurface(env, surface);
-        if (window) ANativeWindow_setBuffersGeometry(window, FB_W, FB_H, WINDOW_FORMAT_BGRX_8888);
+        if (window) ANativeWindow_setBuffersGeometry(window, FB_W, FB_H, WINDOW_FORMAT_RGBX_8888);
     }
 }
 
