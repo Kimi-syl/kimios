@@ -277,13 +277,17 @@ public final class KimiApiServer {
 
     // ---- sandbox ----
 
-    /** Resolve a /disk/... path under diskRoot; reject traversal + escapes. */
+    /** Resolve a /disk/... path (or an absolute path under diskRoot, e.g.
+     *  KIMI_PLUGIN_DIR) under diskRoot; reject traversal + escapes. */
     private static File resolve(String path) {
         String root = KimiBridge.getDiskRoot();
         if (root == null) throw new IllegalStateException("no disk root");
-        if (path == null || (!path.equals("/disk") && !path.startsWith("/disk/")))
-            throw new IllegalArgumentException("path must be /disk/...");
-        String rel = path.equals("/disk") ? "" : path.substring(6);
+        if (path == null) throw new IllegalArgumentException("path required");
+        String rel;
+        if (path.equals("/disk") || path.equals(root)) rel = "";
+        else if (path.startsWith("/disk/")) rel = path.substring(6);
+        else if (path.startsWith(root + "/")) rel = path.substring(root.length() + 1);
+        else throw new IllegalArgumentException("path must be /disk/... or under the sandbox");
         if (rel.contains("..")) throw new SecurityException("path traversal rejected");
         File rootF = new File(root);
         File f = rel.isEmpty() ? rootF : new File(rootF, rel);

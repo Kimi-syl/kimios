@@ -701,6 +701,9 @@ static uint64_t fs_plugin_run(const char *id, int background) {
             if (*t) argv[n++] = t;
     }
     argv[n] = NULL;
+    // The ELF to load is the interpreter for python/node plugins (exe is the
+    // script argument); the native entry itself for native plugins.
+    const char *load_exe = (is_py || is_node) ? interp : exe;
     GuestEnv ge;
     char kport[48], kpid[300], kdir[600];
     char *envp[16];
@@ -713,7 +716,7 @@ static uint64_t fs_plugin_run(const char *id, int background) {
     envp[e] = NULL;
     if (background) {
         int in = -1, of = -1;
-        pid_t pid = kimi_guest_spawn(exe, sysroot, argv, envp, &in, &of);
+        pid_t pid = kimi_guest_spawn(load_exe, sysroot, argv, envp, &in, &of);
         if (pid < 0) return ERROR;
         if (in >= 0) close(in);
         plugin_bg_arg *a = malloc(sizeof(plugin_bg_arg));
@@ -729,7 +732,7 @@ static uint64_t fs_plugin_run(const char *id, int background) {
     }
     static char out[8192];
     size_t olen = 0; int code = 0;
-    if (kimi_guest_capture(exe, sysroot, argv, envp, out, sizeof out, &olen, &code) < 0) return ERROR;
+    if (kimi_guest_capture(load_exe, sysroot, argv, envp, out, sizeof out, &olen, &code) < 0) return ERROR;
     LOG("plugin %s code=%d out=%s", id, code, out);
     return (uint64_t)code;
 }
