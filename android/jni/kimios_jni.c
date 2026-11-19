@@ -52,6 +52,10 @@ JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *reserved) {
 static jclass g_bridge;
 static jmethodID g_fetch_mid, g_local_time_mid, g_location_mid, g_open_url_mid,
                  g_audio_mid, g_audio_query_mid, g_import_mid;
+static jmethodID g_web_init_mid, g_web_buf_mid, g_web_render_mid, g_web_touch_mid,
+                 g_web_load_mid, g_web_back_mid, g_web_fwd_mid, g_web_reload_mid,
+                 g_web_url_mid, g_web_title_mid, g_web_canback_mid, g_web_canfwd_mid,
+                 g_web_viewport_mid, g_web_pause_mid, g_web_resume_mid;
 
 static JNIEnv *gui_env(int *attached) {
     *attached = 0;
@@ -114,6 +118,90 @@ static uint64_t audio_cmd(const char *path, int cmd) {
         if (!(*env)->ExceptionCheck(env)) r = (uint64_t)v;
     }
     if (jp) (*env)->DeleteLocalRef(env, jp);
+    gui_done(env, attached);
+    return r;
+}
+
+// ---- SYS_WEB helpers: cached-method calls from the GUI pthread ----
+// ()J
+static uint64_t call_long(jmethodID mid) {
+    if (!g_bridge || !mid) return ERROR;
+    int attached = 0; JNIEnv *env = gui_env(&attached);
+    if (!env) return ERROR;
+    uint64_t r = ERROR;
+    jlong v = (*env)->CallStaticLongMethod(env, g_bridge, mid);
+    if (!(*env)->ExceptionCheck(env)) r = (uint64_t)v;
+    gui_done(env, attached);
+    return r;
+}
+// (II)J
+static uint64_t call_ii_long(jmethodID mid, jint a, jint b) {
+    if (!g_bridge || !mid) return ERROR;
+    int attached = 0; JNIEnv *env = gui_env(&attached);
+    if (!env) return ERROR;
+    uint64_t r = ERROR;
+    jlong v = (*env)->CallStaticLongMethod(env, g_bridge, mid, a, b);
+    if (!(*env)->ExceptionCheck(env)) r = (uint64_t)v;
+    gui_done(env, attached);
+    return r;
+}
+// (III)J
+static uint64_t call_iii_long(jmethodID mid, jint a, jint b, jint c) {
+    if (!g_bridge || !mid) return ERROR;
+    int attached = 0; JNIEnv *env = gui_env(&attached);
+    if (!env) return ERROR;
+    uint64_t r = ERROR;
+    jlong v = (*env)->CallStaticLongMethod(env, g_bridge, mid, a, b, c);
+    if (!(*env)->ExceptionCheck(env)) r = (uint64_t)v;
+    gui_done(env, attached);
+    return r;
+}
+// (Z)J
+static uint64_t call_z_long(jmethodID mid, int v) {
+    if (!g_bridge || !mid) return ERROR;
+    int attached = 0; JNIEnv *env = gui_env(&attached);
+    if (!env) return ERROR;
+    uint64_t r = ERROR;
+    jlong jv = (*env)->CallStaticLongMethod(env, g_bridge, mid, (jboolean)(v ? JNI_TRUE : JNI_FALSE));
+    if (!(*env)->ExceptionCheck(env)) r = (uint64_t)jv;
+    gui_done(env, attached);
+    return r;
+}
+// ()Ljava/lang/String; -> copy UTF-8 into out (bounded, NUL-terminated),
+// returns copied length (like fs_listdir). ERROR on exception/null.
+static uint64_t call_str_out(jmethodID mid, char *out, uint64_t cap) {
+    if (!g_bridge || !mid || !out || cap == 0) return ERROR;
+    int attached = 0; JNIEnv *env = gui_env(&attached);
+    if (!env) return ERROR;
+    uint64_t r = ERROR;
+    jstring js = (jstring)(*env)->CallStaticObjectMethod(env, g_bridge, mid);
+    if (!(*env)->ExceptionCheck(env) && js) {
+        const char *s = (*env)->GetStringUTFChars(env, js, NULL);
+        if (s) {
+            uint64_t len = strlen(s);
+            uint64_t n = len < cap - 1 ? len : cap - 1;
+            memcpy(out, s, n); out[n] = 0;
+            (*env)->ReleaseStringUTFChars(env, js, s);
+            r = n;
+        }
+    }
+    if (js) (*env)->DeleteLocalRef(env, js);
+    gui_done(env, attached);
+    return r;
+}
+// nativeWebBuf() -> direct ByteBuffer address (like SYS_FB_BACK). The buffer
+// is re-queried every call so a viewport realloc is picked up automatically.
+static uint64_t web_buf_addr(void) {
+    if (!g_bridge || !g_web_buf_mid) return ERROR;
+    int attached = 0; JNIEnv *env = gui_env(&attached);
+    if (!env) return ERROR;
+    uint64_t r = ERROR;
+    jobject buf = (*env)->CallStaticObjectMethod(env, g_bridge, g_web_buf_mid);
+    if (!(*env)->ExceptionCheck(env) && buf) {
+        void *p = (*env)->GetDirectBufferAddress(env, buf);
+        if (p) r = (uint64_t)(uintptr_t)p;
+        (*env)->DeleteLocalRef(env, buf);
+    }
     gui_done(env, attached);
     return r;
 }
@@ -512,6 +600,43 @@ uint64_t kimi_host_syscall(uint64_t n, uint64_t a0, uint64_t a1, uint64_t a2, ui
         char abs[512]; disk_path(rel, abs, sizeof abs);
         return call_str_long(g_import_mid, abs);
     }
+    case 48: { // SYS_WEB: embedded browser, sub-op in a0 (libkimi web_* wrappers)
+        switch (a0) {
+        case 0: { // init(w=a1, h=a2) device px
+            if (a1 == 0 || a2 == 0 || a1 > 4096 || a2 > 4096) return ERROR;
+            uint64_t r = call_ii_long(g_web_init_mid, (jint)a1, (jint)a2);
+            return r == 0 ? 0 : ERROR;
+        }
+        case 1: return web_buf_addr(); // buf(): RGBA pixel buffer address
+        case 2: return call_z_long(g_web_render_mid, (int)(a1 != 0)); // render(force): seq
+        case 3: { // touch(x=a1, y=a2, action=a3: 0 down, 1 up, 2 move, 3 cancel)
+            uint64_t r = call_iii_long(g_web_touch_mid, (jint)a1, (jint)a2, (jint)a3);
+            return r == 0 ? 0 : ERROR;
+        }
+        case 4: { // load(url_ptr=a1, url_len=a2)
+            char url[2048];
+            str_arg(a1, a2, url, sizeof url);
+            if (!url[0]) return ERROR;
+            uint64_t r = call_str_long(g_web_load_mid, url);
+            return r == 0 ? 0 : ERROR;
+        }
+        case 5: { uint64_t r = call_long(g_web_back_mid);    return r == 0 ? 0 : ERROR; }
+        case 6: { uint64_t r = call_long(g_web_fwd_mid);     return r == 0 ? 0 : ERROR; }
+        case 7: { uint64_t r = call_long(g_web_reload_mid);  return r == 0 ? 0 : ERROR; }
+        case 8: return call_str_out(g_web_url_mid, (char *)a1, a2);   // url(buf, cap) -> len
+        case 9: return call_str_out(g_web_title_mid, (char *)a1, a2); // title(buf, cap) -> len
+        case 10: return call_long(g_web_canback_mid); // 0/1
+        case 11: return call_long(g_web_canfwd_mid);  // 0/1
+        case 12: { // viewport(w=a1, h=a2): re-layout + realloc pixel buffer
+            if (a1 == 0 || a2 == 0 || a1 > 4096 || a2 > 4096) return ERROR;
+            uint64_t r = call_ii_long(g_web_viewport_mid, (jint)a1, (jint)a2);
+            return r == 0 ? 0 : ERROR;
+        }
+        case 13: { uint64_t r = call_long(g_web_pause_mid);  return r == 0 ? 0 : ERROR; }
+        case 14: { uint64_t r = call_long(g_web_resume_mid); return r == 0 ? 0 : ERROR; }
+        default: return ERROR;
+        }
+    }
     case 23: { if (a1 < 1) return ERROR; uint64_t *o = (uint64_t *)a0; o[0] = 1; o[1] = 0; o[2] = 2; o[3] = 0; return 1; }
     case 12: return 2048;
     case 22: return 0;
@@ -555,6 +680,21 @@ Java_com_kimios_libos_KimiBridge_nativeInit(JNIEnv *env, jclass cls, jstring fil
         g_audio_mid       = (*env)->GetStaticMethodID(env, g_bridge, "nativeAudio",      "(Ljava/lang/String;I)J");
         g_audio_query_mid = (*env)->GetStaticMethodID(env, g_bridge, "nativeAudioQuery", "()[J");
         g_import_mid      = (*env)->GetStaticMethodID(env, g_bridge, "nativeImportFile", "(Ljava/lang/String;)J");
+        g_web_init_mid     = (*env)->GetStaticMethodID(env, g_bridge, "nativeWebInit",        "(II)J");
+        g_web_buf_mid      = (*env)->GetStaticMethodID(env, g_bridge, "nativeWebBuf",         "()Ljava/nio/ByteBuffer;");
+        g_web_render_mid   = (*env)->GetStaticMethodID(env, g_bridge, "nativeWebRender",      "(Z)J");
+        g_web_touch_mid    = (*env)->GetStaticMethodID(env, g_bridge, "nativeWebTouch",       "(III)J");
+        g_web_load_mid     = (*env)->GetStaticMethodID(env, g_bridge, "nativeWebLoad",        "(Ljava/lang/String;)J");
+        g_web_back_mid     = (*env)->GetStaticMethodID(env, g_bridge, "nativeWebBack",        "()J");
+        g_web_fwd_mid      = (*env)->GetStaticMethodID(env, g_bridge, "nativeWebForward",     "()J");
+        g_web_reload_mid   = (*env)->GetStaticMethodID(env, g_bridge, "nativeWebReload",      "()J");
+        g_web_url_mid      = (*env)->GetStaticMethodID(env, g_bridge, "nativeWebUrl",         "()Ljava/lang/String;");
+        g_web_title_mid    = (*env)->GetStaticMethodID(env, g_bridge, "nativeWebTitle",       "()Ljava/lang/String;");
+        g_web_canback_mid  = (*env)->GetStaticMethodID(env, g_bridge, "nativeWebCanGoBack",   "()J");
+        g_web_canfwd_mid   = (*env)->GetStaticMethodID(env, g_bridge, "nativeWebCanGoForward","()J");
+        g_web_viewport_mid = (*env)->GetStaticMethodID(env, g_bridge, "nativeWebViewport",    "(II)J");
+        g_web_pause_mid    = (*env)->GetStaticMethodID(env, g_bridge, "nativeWebPause",       "()J");
+        g_web_resume_mid   = (*env)->GetStaticMethodID(env, g_bridge, "nativeWebResume",      "()J");
         if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
         LOG("bridge class + method IDs cached");
     }

@@ -94,40 +94,141 @@ public final class KimiBridge {
         };
     }
 
-    /** Called from C (SYS_LOCATION): last known fix as
-     *  [lat_f64_bits, lon_f64_bits, accuracy_m, has_fix]. No fix -> has_fix=0. */
-    public static long[] nativeLocation() {
-        long[] r = new long[] {0, 0, 0, 0};
-        Context ctx = appContext;
-        if (ctx == null) return r;
+    private static final long FIX_FRESH_MS = 30 * 60 * 1000;   // last-known freshness
+    private static final long CACHE_REUSE_MS = 5 * 60 * 1000;  // skip slow path if cache fresh
+    private static final long IP_RETRY_MS = 60 * 1000;         // backoff after IP-geo failure
+    private static volatile long[] cachedFix;
+    private static volatile long cachedFixAt;
+    private static volatile long ipFailAt;
+
+    private static long[] fixFromLocation(Location l) {
+        long[] r = new long[] {
+                Double.doubleToRawLongBits(l.getLatitude()),
+                Double.doubleToRawLongBits(l.getLongitude()),
+                (long) l.getAccuracy(), 1};
+        cachedFix = r;
+        cachedFixAt = System.currentTimeMillis();
+        return r.clone();
+    }
+
+    /** HTTPS GET + JSON parse of an IP-geolocation endpoint. Returns
+     *  [lat_bits, lon_bits, 0 (IP accuracy), 1] or null. No permission needed. */
+    private static long[] ipGeoFix(String endpoint, int timeoutMs) {
+        java.net.HttpURLConnection c = null;
         try {
-            if (ctx.checkSelfPermission(android.Manifest.permission.ACCESS_FINE_LOCATION)
-                        != PackageManager.PERMISSION_GRANTED
-                    && ctx.checkSelfPermission(android.Manifest.permission.ACCESS_COARSE_LOCATION)
-                        != PackageManager.PERMISSION_GRANTED) {
-                return r;
+            c = (java.net.HttpURLConnection) new java.net.URL(endpoint).openConnection();
+            c.setInstanceFollowRedirects(true);
+            c.setConnectTimeout(timeoutMs);
+            c.setReadTimeout(timeoutMs);
+            c.setRequestProperty("User-Agent", "KimiOS-libos");
+            if (c.getResponseCode() != 200) return null;
+            java.io.InputStream in = c.getInputStream();
+            java.io.ByteArrayOutputStream bos = new java.io.ByteArrayOutputStream();
+            byte[] buf = new byte[4096];
+            int n; long total = 0;
+            while ((n = in.read(buf)) > 0 && total < 65536) { bos.write(buf, 0, n); total += n; }
+            in.close();
+            org.json.JSONObject j = new org.json.JSONObject(bos.toString("UTF-8"));
+            if (!j.optBoolean("success", true)) return null;   // ipwho.is failure payload
+            if (j.optBoolean("error", false)) return null;     // ipapi.co failure payload
+            if (!j.has("latitude") || !j.has("longitude")) return null;
+            double lat = j.getDouble("latitude"), lon = j.getDouble("longitude");
+            if (lat < -90 || lat > 90 || lon < -180 || lon > 180) return null;
+            long[] r = new long[] {
+                    Double.doubleToRawLongBits(lat), Double.doubleToRawLongBits(lon), 0, 1};
+            cachedFix = r;
+            cachedFixAt = System.currentTimeMillis();
+            android.util.Log.i("KimiOS", "location via IP geo (" + endpoint + ")");
+            return r.clone();
+        } catch (Exception e) {
+            android.util.Log.e("KimiOS", "ip geo " + endpoint + " failed: " + e);
+            return null;
+        } finally {
+            if (c != null) c.disconnect();
+        }
+    }
+
+    /** Called from C (SYS_LOCATION): layered fix as
+     *  [lat_f64_bits, lon_f64_bits, accuracy_m, has_fix]. No fix -> has_fix=0.
+     *  Order: fresh last-known (gps/network/passive) -> cached fix (5 min) ->
+     *  active requestLocationUpdates (8 s timeout) -> ipwho.is / ipapi.co IP
+     *  geolocation (no permission, works with zero GPS) -> stale last-known /
+     *  any cached fix. May block the calling (GUI) thread up to ~10 s for a
+     *  fix; never blocks forever. */
+    public static long[] nativeLocation() {
+        final long[] none = new long[] {0, 0, 0, 0};
+        Context ctx = appContext;
+        if (ctx == null) return cachedFix != null ? cachedFix.clone() : none;
+        Location best = null;
+        try {
+            boolean permitted =
+                    ctx.checkSelfPermission(android.Manifest.permission.ACCESS_FINE_LOCATION)
+                            == PackageManager.PERMISSION_GRANTED
+                    || ctx.checkSelfPermission(android.Manifest.permission.ACCESS_COARSE_LOCATION)
+                            == PackageManager.PERMISSION_GRANTED;
+            LocationManager lm = permitted
+                    ? (LocationManager) ctx.getSystemService(Context.LOCATION_SERVICE) : null;
+            if (lm != null) {
+                String[] providers = {LocationManager.GPS_PROVIDER, LocationManager.NETWORK_PROVIDER,
+                        LocationManager.PASSIVE_PROVIDER};
+                for (String p : providers) {
+                    try {
+                        Location l = lm.getLastKnownLocation(p);
+                        if (l != null && (best == null || l.getTime() > best.getTime())) best = l;
+                    } catch (Exception ignored) {}
+                }
+                if (best != null && System.currentTimeMillis() - best.getTime() <= FIX_FRESH_MS)
+                    return fixFromLocation(best);
             }
-            LocationManager lm = (LocationManager) ctx.getSystemService(Context.LOCATION_SERVICE);
-            if (lm == null) return r;
-            Location best = null;
-            String[] providers = {LocationManager.GPS_PROVIDER, LocationManager.NETWORK_PROVIDER,
-                    LocationManager.PASSIVE_PROVIDER};
-            for (String p : providers) {
-                try {
-                    Location l = lm.getLastKnownLocation(p);
-                    if (l != null && (best == null || l.getTime() > best.getTime())) best = l;
-                } catch (Exception ignored) {}
-            }
-            if (best != null) {
-                r[0] = Double.doubleToRawLongBits(best.getLatitude());
-                r[1] = Double.doubleToRawLongBits(best.getLongitude());
-                r[2] = (long) best.getAccuracy();
-                r[3] = 1;
+            long[] cache = cachedFix;
+            if (cache != null && System.currentTimeMillis() - cachedFixAt <= CACHE_REUSE_MS)
+                return cache.clone();
+            if (lm != null) {
+                final java.util.concurrent.CountDownLatch latch =
+                        new java.util.concurrent.CountDownLatch(1);
+                final java.util.concurrent.atomic.AtomicReference<Location> got =
+                        new java.util.concurrent.atomic.AtomicReference<Location>();
+                android.location.LocationListener listener = new android.location.LocationListener() {
+                    @Override public void onLocationChanged(Location loc) {
+                        if (loc != null && got.compareAndSet(null, loc)) latch.countDown();
+                    }
+                    @Override public void onStatusChanged(String p, int s, android.os.Bundle e) {}
+                    @Override public void onProviderEnabled(String p) {}
+                    @Override public void onProviderDisabled(String p) {}
+                };
+                boolean registered = false;
+                for (String p : new String[]{LocationManager.GPS_PROVIDER,
+                        LocationManager.NETWORK_PROVIDER}) {
+                    try {
+                        if (lm.isProviderEnabled(p)) {
+                            lm.requestLocationUpdates(p, 0L, 0f, listener, android.os.Looper.getMainLooper());
+                            registered = true;
+                        }
+                    } catch (Exception ignored) {}
+                }
+                if (registered) {
+                    try {
+                        latch.await(8, java.util.concurrent.TimeUnit.SECONDS);
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                    } finally {
+                        try { lm.removeUpdates(listener); } catch (Exception ignored) {}
+                    }
+                }
+                Location active = got.get();
+                if (active != null) return fixFromLocation(active);
             }
         } catch (Exception e) {
             android.util.Log.e("KimiOS", "location failed: " + e);
         }
-        return r;
+        if (System.currentTimeMillis() - ipFailAt > IP_RETRY_MS) {
+            long[] ip = ipGeoFix("https://ipwho.is/", 5000);
+            if (ip == null) ip = ipGeoFix("https://ipapi.co/json/", 4000);
+            if (ip != null) return ip;
+            ipFailAt = System.currentTimeMillis();
+        }
+        if (best != null) return fixFromLocation(best);
+        return cachedFix != null ? cachedFix.clone() : none;
     }
 
     /** Called from C (SYS_OPEN_URL): open url in a real WebView (WebActivity).
@@ -146,6 +247,57 @@ public final class KimiBridge {
             return -1;
         }
     }
+
+    // ---- SYS_WEB=48: embedded offscreen browser (KimiWeb). Called from C on
+    // the GUI pthread; every WebView operation hops to the main looper. ----
+
+    /** Sub-op 0: create/resize the offscreen WebView (device px). 0 ok. */
+    public static long nativeWebInit(int w, int h) {
+        Context ctx = activity != null ? activity : appContext;
+        return KimiWeb.init(ctx, w, h);
+    }
+
+    /** Sub-op 1: direct ByteBuffer holding RGBA pixels (C: GetDirectBufferAddress). */
+    public static java.nio.ByteBuffer nativeWebBuf() { return KimiWeb.buf(); }
+
+    /** Sub-op 2: pull-render; returns seqlock sequence (even = stable frame). */
+    public static long nativeWebRender(boolean force) { return KimiWeb.render(force); }
+
+    /** Sub-op 3: touch; action 0=down, 1=up, 2=move, 3=cancel. 0 ok. */
+    public static long nativeWebTouch(int x, int y, int action) { return KimiWeb.touch(x, y, action); }
+
+    /** Sub-op 4: navigate. 0 ok. */
+    public static long nativeWebLoad(String url) { return KimiWeb.load(url); }
+
+    /** Sub-op 5. 0 ok. */
+    public static long nativeWebBack() { return KimiWeb.back(); }
+
+    /** Sub-op 6. 0 ok. */
+    public static long nativeWebForward() { return KimiWeb.forward(); }
+
+    /** Sub-op 7. 0 ok. */
+    public static long nativeWebReload() { return KimiWeb.reload(); }
+
+    /** Sub-op 8: cached current URL (never null). */
+    public static String nativeWebUrl() { return KimiWeb.url(); }
+
+    /** Sub-op 9: cached page title (never null). */
+    public static String nativeWebTitle() { return KimiWeb.title(); }
+
+    /** Sub-op 10: 0/1 from volatile cache. */
+    public static long nativeWebCanGoBack() { return KimiWeb.canGoBack(); }
+
+    /** Sub-op 11: 0/1 from volatile cache. */
+    public static long nativeWebCanGoForward() { return KimiWeb.canGoForward(); }
+
+    /** Sub-op 12: resize viewport; reallocates bitmap + pixel buffer. 0 ok. */
+    public static long nativeWebViewport(int w, int h) { return KimiWeb.viewport(w, h); }
+
+    /** Sub-op 13: pause JS timers etc. 0 ok. */
+    public static long nativeWebPause() { return KimiWeb.pause(); }
+
+    /** Sub-op 14. 0 ok. */
+    public static long nativeWebResume() { return KimiWeb.resume(); }
 
     private static final Object AUDIO_LOCK = new Object();
     private static MediaPlayer player;

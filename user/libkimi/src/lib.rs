@@ -649,6 +649,44 @@ pub fn import_file(dir: &str) -> bool {
     syscall3(SYS_IMPORT_FILE, dir.as_ptr() as u64, dir.len() as u64, 0) == 0
 }
 
+/// Embedded browser (SYS_WEB=48, multiplexed sub-op in a0). The host renders a
+/// WebView offscreen into an RGBA buffer that KimiOS blits into its own
+/// framebuffer content rect — KimiOS keeps the chrome. Host-only.
+pub const SYS_WEB: u64 = 48;
+/// Create the offscreen WebView at device-pixel content size w×h.
+pub fn web_init(w: u32, h: u32) -> bool { syscall4(SYS_WEB, 0, w as u64, h as u64, 0) == 0 }
+/// Pointer to the RGBA pixel buffer (w*h*4 bytes), like fb_back.
+pub fn web_buf() -> Option<*mut u8> {
+    let p = syscall3(SYS_WEB, 1, 0, 0);
+    if p == ERROR || p == 0 { None } else { Some(p as *mut u8) }
+}
+/// Pull a rendered frame; returns a sequence number (even = stable frame,
+/// odd = writing). `force` requests a redraw even if not dirty (JS animation).
+pub fn web_render(force: bool) -> u64 { syscall3(SYS_WEB, 2, force as u64, 0) }
+/// Forward a touch (view-local device px) to the WebView. action: 0=down,1=up,2=move,3=cancel.
+pub fn web_touch(x: u32, y: u32, action: u32) -> bool {
+    syscall5(SYS_WEB, 3, x as u64, y as u64, action as u64, 0) == 0
+}
+pub fn web_load(url: &str) -> bool { syscall4(SYS_WEB, 4, url.as_ptr() as u64, url.len() as u64, 0) == 0 }
+pub fn web_back() -> bool { syscall3(SYS_WEB, 5, 0, 0) == 0 }
+pub fn web_forward() -> bool { syscall3(SYS_WEB, 6, 0, 0) == 0 }
+pub fn web_reload() -> bool { syscall3(SYS_WEB, 7, 0, 0) == 0 }
+/// Current URL into buf; returns length.
+pub fn web_url(buf: &mut [u8]) -> usize {
+    let n = syscall4(SYS_WEB, 8, buf.as_mut_ptr() as u64, buf.len() as u64, 0);
+    if n == ERROR { 0 } else { n as usize }
+}
+/// Page title into buf; returns length.
+pub fn web_title(buf: &mut [u8]) -> usize {
+    let n = syscall4(SYS_WEB, 9, buf.as_mut_ptr() as u64, buf.len() as u64, 0);
+    if n == ERROR { 0 } else { n as usize }
+}
+pub fn web_can_back() -> bool { syscall3(SYS_WEB, 10, 0, 0) == 1 }
+pub fn web_can_forward() -> bool { syscall3(SYS_WEB, 11, 0, 0) == 1 }
+pub fn web_viewport(w: u32, h: u32) -> bool { syscall4(SYS_WEB, 12, w as u64, h as u64, 0) == 0 }
+pub fn web_pause() -> bool { syscall3(SYS_WEB, 13, 0, 0) == 0 }
+pub fn web_resume() -> bool { syscall3(SYS_WEB, 14, 0, 0) == 0 }
+
 /// File metadata: `(kind, size)` where kind 0 is RamFS and 1 is a disk file.
 pub fn stat(path: &str) -> Option<(u64, u64)> {
     let mut fields = [0u64; 3];

@@ -67,18 +67,65 @@ pub struct Files {
     status_len: usize,
 }
 
+#[derive(Clone, Copy)]
+struct ForecastDay {
+    week: [u8; 3],
+    icon: u64,
+    max: i64,
+    min: i64,
+}
+
+const FEELS_NONE: i64 = i64::MIN;
+
 pub struct Weather {
     fahrenheit: bool,
     has_fix: bool,
     has_data: bool,
     temp: i64,
+    feels: i64,
+    humidity: i64,
     wind: i64,
     code: u64,
+    provider: u8,
+    cond: [u8; 24],
+    cond_len: usize,
     lat: i64,
     lon: i64,
     accuracy: u64,
+    forecast: [ForecastDay; 9],
+    forecast_count: usize,
     status: [u8; 64],
     status_len: usize,
+}
+
+impl Weather {
+    fn new() -> Self {
+        Self {
+            fahrenheit: false,
+            has_fix: false,
+            has_data: false,
+            temp: 0,
+            feels: FEELS_NONE,
+            humidity: -1,
+            wind: -1,
+            code: 0,
+            provider: 0,
+            cond: [0u8; 24],
+            cond_len: 0,
+            lat: 0,
+            lon: 0,
+            accuracy: 0,
+            forecast: [ForecastDay { week: [b' '; 3], icon: 0, max: 0, min: 0 }; 9],
+            forecast_count: 0,
+            status: [0u8; 64],
+            status_len: 0,
+        }
+    }
+
+    fn set_cond(&mut self, text: &str) {
+        self.cond_len = text.len().min(self.cond.len());
+        self.cond[..self.cond_len].copy_from_slice(&text.as_bytes()[..self.cond_len]);
+    }
 }
 
 pub struct Terminal {
@@ -93,6 +140,11 @@ const BROWSER_WIDTH: usize = 50;
 const BROWSER_LINES: usize = 90;
 const BROWSER_BODY: usize = 8000;
 
+const WEB_X0: i64 = 20;
+const WEB_Y0: i64 = 196;
+const WEB_X1: i64 = 460;
+const WEB_Y1: i64 = 700;
+
 pub struct Browser {
     url: [u8; 128],
     url_len: usize,
@@ -105,6 +157,25 @@ pub struct Browser {
     status_len: usize,
     title: [u8; 64],
     title_len: usize,
+    web_ok: bool,
+    web_started: bool,
+    loaded: bool,
+    last_seq: u64,
+    last_force_ms: u64,
+    fbw: i64,
+    fbh: i64,
+    stride: i64,
+    rx: i64,
+    ry: i64,
+    rw: i64,
+    rh: i64,
+    page_url: [u8; 256],
+    page_url_len: usize,
+    page_title: [u8; 96],
+    page_title_len: usize,
+    can_back: bool,
+    can_fwd: bool,
+    touch_active: bool,
 }
 
 impl Browser {
@@ -121,6 +192,25 @@ impl Browser {
             status_len: 0,
             title: [0u8; 64],
             title_len: 0,
+            web_ok: false,
+            web_started: false,
+            loaded: false,
+            last_seq: 0,
+            last_force_ms: 0,
+            fbw: 0,
+            fbh: 0,
+            stride: 0,
+            rx: 0,
+            ry: 0,
+            rw: 0,
+            rh: 0,
+            page_url: [0u8; 256],
+            page_url_len: 0,
+            page_title: [0u8; 96],
+            page_title_len: 0,
+            can_back: false,
+            can_fwd: false,
+            touch_active: false,
         };
         let default = b"example.com";
         browser.url[..default.len()].copy_from_slice(default);
@@ -133,6 +223,214 @@ impl Browser {
         self.status[..length].copy_from_slice(&text.as_bytes()[..length]);
         self.status_len = length;
     }
+
+    fn init_web(&mut self) {
+        if self.web_started {
+            return;
+        }
+        self.web_started = true;
+        let Some((w, h, stride, _)) = k::fb_info() else {
+            return;
+        };
+        self.fbw = w as i64;
+        self.fbh = h as i64;
+        self.stride = (stride / 4) as i64;
+        self.rx = WEB_X0 * self.fbw / 480;
+        self.ry = WEB_Y0 * self.fbh / 800;
+        self.rw = WEB_X1 * self.fbw / 480 - self.rx;
+        self.rh = WEB_Y1 * self.fbh / 800 - self.ry;
+        if self.rw <= 0 || self.rh <= 0 || self.stride < self.fbw {
+            return;
+        }
+        self.web_ok = k::web_init(self.rw as u32, self.rh as u32);
+    }
+
+    fn open(&mut self) {
+        self.init_web();
+        if self.web_ok {
+            k::web_resume();
+            self.editing = false;
+            if !self.loaded {
+                self.loaded = true;
+                if !k::web_load("https://example.com") {
+                    self.web_ok = false;
+                }
+            }
+        }
+        if !self.web_ok {
+            self.editing = self.line_count == 0;
+        }
+    }
+
+    fn sync_meta(&mut self) {
+        if !self.web_ok {
+            return;
+        }
+        self.page_url_len = k::web_url(&mut self.page_url).min(self.page_url.len());
+        self.page_title_len = k::web_title(&mut self.page_title).min(self.page_title.len());
+        self.can_back = k::web_can_back();
+        self.can_fwd = k::web_can_forward();
+    }
+
+    fn local_point(&self, point: (i64, i64)) -> (u32, u32) {
+        let x = point.0 * self.fbw / 480 - self.rx;
+        let y = point.1 * self.fbh / 800 - self.ry;
+        (
+            x.clamp(0, self.rw - 1) as u32,
+            y.clamp(0, self.rh - 1) as u32,
+        )
+    }
+
+    fn blit(&self, bottom_app: i64) -> i64 {
+        if !self.web_ok {
+            return 0;
+        }
+        let Some(src) = k::web_buf() else {
+            return 0;
+        };
+        let Some(dst) = k::fb_back() else {
+            return 0;
+        };
+        let mut h = self.rh;
+        if bottom_app < WEB_Y1 {
+            h = (bottom_app * self.fbh / 800 - self.ry).clamp(0, self.rh);
+        }
+        blit_rgba_to_xrgb(
+            src,
+            self.rw,
+            h,
+            dst as *mut u32,
+            self.stride,
+            self.rx,
+            self.ry,
+            self.fbw,
+            self.fbh,
+        )
+    }
+}
+
+fn in_web_content(point: (i64, i64)) -> bool {
+    point.0 >= WEB_X0 && point.0 < WEB_X1 && point.1 >= WEB_Y0 && point.1 < WEB_Y1
+}
+
+/// Bounds-checked RGBA→XRGB blit of a sw×sh source into the back buffer at
+/// (dx,dy); clips to max_w×max_h. Returns the number of rows written.
+pub fn blit_rgba_to_xrgb(
+    src: *const u8,
+    sw: i64,
+    sh: i64,
+    dst: *mut u32,
+    stride: i64,
+    dx: i64,
+    dy: i64,
+    max_w: i64,
+    max_h: i64,
+) -> i64 {
+    if src.is_null() || dst.is_null() || sw <= 0 || sh <= 0 || dx < 0 || dy < 0 || stride <= 0 {
+        return 0;
+    }
+    let w = sw.min(max_w - dx);
+    let h = sh.min(max_h - dy);
+    if w <= 0 || h <= 0 {
+        return 0;
+    }
+    for y in 0..h {
+        let s = unsafe { src.add((y * sw * 4) as usize) };
+        let d = unsafe { dst.add(((dy + y) * stride + dx) as usize) };
+        for x in 0..w {
+            let (r, g, b) = unsafe {
+                (
+                    *s.add((x * 4) as usize) as u32,
+                    *s.add((x * 4 + 1) as usize) as u32,
+                    *s.add((x * 4 + 2) as usize) as u32,
+                )
+            };
+            unsafe { *d.add(x as usize) = (r << 16) | (g << 8) | b };
+        }
+    }
+    h
+}
+
+pub fn browser_pause(apps: &mut Apps) {
+    let browser = &mut apps.browser;
+    if browser.web_ok {
+        if browser.touch_active {
+            k::web_touch(0, 0, 3);
+            browser.touch_active = false;
+        }
+        k::web_pause();
+    }
+}
+
+pub fn browser_resume(apps: &mut Apps) {
+    if apps.browser.web_ok {
+        k::web_resume();
+    }
+}
+
+/// Per-frame WebView pull while the Browser window is visible. Blits a new
+/// stable frame into the content rect and presents it. Returns true on blit.
+pub fn browser_frame(apps: &mut Apps, osk: bool) -> bool {
+    let browser = &mut apps.browser;
+    if !browser.web_ok {
+        return false;
+    }
+    let now = k::uptime_ms();
+    let force = now.saturating_sub(browser.last_force_ms) >= 100;
+    if force {
+        browser.last_force_ms = now;
+    }
+    let seq = k::web_render(force);
+    if seq == 0 || seq & 1 != 0 || seq == browser.last_seq {
+        return false;
+    }
+    browser.last_seq = seq;
+    browser.sync_meta();
+    let bottom = if osk { crate::keyboard::TOP } else { WEB_Y1 };
+    let h = browser.blit(bottom);
+    if h > 0 {
+        k::fb_present(
+            browser.rx as u64,
+            browser.ry as u64,
+            (browser.rx + browser.rw) as u64,
+            (browser.ry + h) as u64,
+        );
+    }
+    true
+}
+
+pub fn browser_touch_down(apps: &mut Apps, point: (i64, i64)) -> bool {
+    let browser = &mut apps.browser;
+    if !browser.web_ok || browser.touch_active || !in_web_content(point) {
+        return false;
+    }
+    let (x, y) = browser.local_point(point);
+    browser.touch_active = k::web_touch(x, y, 0);
+    browser.touch_active
+}
+
+pub fn browser_touch_move(apps: &mut Apps, point: (i64, i64)) {
+    let browser = &mut apps.browser;
+    if !browser.touch_active {
+        return;
+    }
+    let (x, y) = browser.local_point(point);
+    if !in_web_content(point) {
+        browser.touch_active = false;
+        k::web_touch(x, y, 3);
+        return;
+    }
+    k::web_touch(x, y, 2);
+}
+
+pub fn browser_touch_up(apps: &mut Apps, point: (i64, i64)) {
+    let browser = &mut apps.browser;
+    if !browser.touch_active {
+        return;
+    }
+    browser.touch_active = false;
+    let (x, y) = browser.local_point(point);
+    k::web_touch(x, y, 1);
 }
 
 pub struct ApkApp {
@@ -534,7 +832,7 @@ pub fn home_music_toggle(apps: &mut Apps) {
     apps.music.toggle();
 }
 
-pub fn home_weather(weather: &Weather) -> Option<(i64, &'static str)> {
+pub fn home_weather(weather: &Weather) -> Option<(i64, &str)> {
     if !weather.has_data {
         return None;
     }
@@ -543,7 +841,12 @@ pub fn home_weather(weather: &Weather) -> Option<(i64, &'static str)> {
     } else {
         round_tenths(weather.temp)
     };
-    Some((temp, weather_text(weather.code)))
+    let cond = if weather.cond_len > 0 {
+        slice_str(&weather.cond[..weather.cond_len])
+    } else {
+        weather_text(weather.code)
+    };
+    Some((temp, cond))
 }
 
 impl Notes {
@@ -939,52 +1242,293 @@ impl Weather {
     fn refresh(&mut self) {
         let Some((lat, lon, accuracy)) = location_fix() else {
             self.has_fix = false;
-            self.set_status("Location unavailable - enable location");
+            self.set_status("Location unavailable");
             return;
         };
         self.has_fix = true;
         self.lat = lat;
         self.lon = lon;
         self.accuracy = accuracy;
-        let mut url = [0u8; 256];
-        let mut used = 0;
-        push_str(&mut url, &mut used, b"https://api.open-meteo.com/v1/forecast?latitude=");
-        let mut coord = [0u8; 24];
-        push_str(&mut url, &mut used, format_coord(lat, &mut coord).as_bytes());
-        push_str(&mut url, &mut used, b"&longitude=");
-        push_str(&mut url, &mut used, format_coord(lon, &mut coord).as_bytes());
-        push_str(&mut url, &mut used, b"&current_weather=true");
-        if k::fetch_url(slice_str(&url[..used]), "/disk/weather.json").is_none() {
-            self.set_status("Fetch failed - check network");
-            return;
+        let hk = (221_500..=226_000).contains(&lat) && (1_138_000..=1_144_500).contains(&lon);
+        let mut body = [0u8; 8192];
+        if hk {
+            if k::fetch_url(
+                "https://data.weather.gov.hk/weatherAPI/opendata/weather.php?dataType=rhrread&lang=en",
+                "/disk/weather.json",
+            )
+            .is_none()
+            {
+                self.set_status("Fetch failed - check network");
+                return;
+            }
+            let n = read_disk_file("/disk/weather.json", &mut body);
+            if !parse_hko(self, &body[..n]) {
+                self.has_data = false;
+                self.set_status("Bad weather data");
+                return;
+            }
+            self.forecast_count = 0;
+            if k::fetch_url(
+                "https://data.weather.gov.hk/weatherAPI/opendata/weather.php?dataType=fnd&lang=en",
+                "/disk/weather_fnd.json",
+            )
+            .is_some()
+            {
+                let n = read_disk_file("/disk/weather_fnd.json", &mut body);
+                parse_fnd(self, &body[..n]);
+            }
+            self.has_data = true;
+            self.set_status("Live from HKO");
+        } else {
+            let mut url = [0u8; 256];
+            let mut used = 0;
+            push_str(&mut url, &mut used, b"https://api.open-meteo.com/v1/forecast?latitude=");
+            let mut coord = [0u8; 24];
+            push_str(&mut url, &mut used, format_coord(lat, &mut coord).as_bytes());
+            push_str(&mut url, &mut used, b"&longitude=");
+            push_str(&mut url, &mut used, format_coord(lon, &mut coord).as_bytes());
+            push_str(
+                &mut url,
+                &mut used,
+                b"&current=temperature_2m,relative_humidity_2m,apparent_temperature,weather_code,wind_speed_10m&timezone=auto",
+            );
+            if k::fetch_url(slice_str(&url[..used]), "/disk/weather.json").is_none() {
+                self.set_status("Fetch failed - check network");
+                return;
+            }
+            let n = read_disk_file("/disk/weather.json", &mut body);
+            if !parse_open_meteo(self, &body[..n]) {
+                self.has_data = false;
+                self.set_status("Bad weather data");
+                return;
+            }
+            self.forecast_count = 0;
+            self.has_data = true;
+            self.set_status("Live from Open-Meteo");
         }
-        let mut body = [0u8; 2048];
-        let mut n = 0;
-        if let Some(handle) = k::open("/disk/weather.json") {
-            n = k::read_file(handle, 0, &mut body);
-            k::close(handle);
+    }
+}
+
+fn read_disk_file(path: &str, buf: &mut [u8]) -> usize {
+    let Some(handle) = k::open(path) else {
+        return 0;
+    };
+    let n = k::read_file(handle, 0, buf);
+    k::close(handle);
+    n
+}
+
+fn json_str(data: &[u8], key: &[u8], out: &mut [u8]) -> Option<usize> {
+    let mut i = json_find(data, key)?;
+    while i < data.len() && (data[i] == b' ' || data[i] == b':') {
+        i += 1;
+    }
+    if i >= data.len() || data[i] != b'"' {
+        return None;
+    }
+    i += 1;
+    let mut n = 0;
+    while i < data.len() && data[i] != b'"' {
+        if n < out.len() {
+            out[n] = data[i];
+            n += 1;
         }
-        let data = &body[..n];
-        let Some(start) = json_find(data, b"current_weather") else {
-            self.set_status("Bad weather response");
-            return;
+        i += 1;
+    }
+    Some(n)
+}
+
+fn json_str_is(data: &[u8], key: &[u8], want: &[u8]) -> bool {
+    let mut buf = [0u8; 48];
+    match json_str(data, key, &mut buf) {
+        Some(n) => &buf[..n] == want,
+        None => false,
+    }
+}
+
+fn json_int(data: &[u8], key: &[u8]) -> Option<i64> {
+    let mut i = json_find(data, key)?;
+    while i < data.len() && matches!(data[i], b' ' | b'\t' | b'\r' | b'\n' | b':' | b'[') {
+        i += 1;
+    }
+    let negative = i < data.len() && data[i] == b'-';
+    if negative {
+        i += 1;
+    }
+    let mut value = 0i64;
+    let mut digits = 0;
+    while i < data.len() && data[i].is_ascii_digit() {
+        value = value.saturating_mul(10).saturating_add((data[i] - b'0') as i64);
+        digits += 1;
+        i += 1;
+    }
+    if digits == 0 {
+        return None;
+    }
+    Some(if negative { -value } else { value })
+}
+
+fn hko_place_value(data: &[u8], section: &[u8], place: &[u8]) -> Option<i64> {
+    let start = json_find(data, section)?;
+    let mut i = start + json_find(&data[start..], b"data")?;
+    loop {
+        while i < data.len() && matches!(data[i], b' ' | b'\t' | b'\r' | b'\n' | b':' | b',' | b'[') {
+            i += 1;
+        }
+        if i >= data.len() || data[i] != b'{' {
+            return None;
+        }
+        let close = data[i..].iter().position(|&b| b == b'}')?;
+        let obj = &data[i..i + close];
+        if json_str_is(obj, b"place", place) {
+            return json_num_x10(obj, b"value");
+        }
+        i += close + 1;
+    }
+}
+
+fn json_object_at(data: &[u8], from: usize) -> Option<(usize, usize)> {
+    let mut i = from;
+    while i < data.len() && data[i] != b'{' {
+        if data[i] == b']' {
+            return None;
+        }
+        i += 1;
+    }
+    if i >= data.len() {
+        return None;
+    }
+    let start = i;
+    let mut depth = 0usize;
+    let mut in_str = false;
+    let mut escape = false;
+    while i < data.len() {
+        let c = data[i];
+        if in_str {
+            if escape {
+                escape = false;
+            } else if c == b'\\' {
+                escape = true;
+            } else if c == b'"' {
+                in_str = false;
+            }
+        } else if c == b'"' {
+            in_str = true;
+        } else if c == b'{' {
+            depth += 1;
+        } else if c == b'}' {
+            depth -= 1;
+            if depth == 0 {
+                return Some((start, i + 1));
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+fn hko_icon_text(code: u64) -> &'static str {
+    match code {
+        50 => "Sunny",
+        51 => "Sunny Periods",
+        52 => "Sunny Intervals",
+        53 => "Sunny, Few Showers",
+        54 => "Sunny, Showers",
+        60 => "Cloudy",
+        61 => "Overcast",
+        62 => "Light Rain",
+        63 => "Rain",
+        64 => "Heavy Rain",
+        65 => "Thunderstorms",
+        70..=75 => "Fine",
+        76 => "Mainly Cloudy",
+        77 => "Mainly Fine",
+        80 => "Windy",
+        81 => "Dry",
+        82 => "Humid",
+        83 => "Fog",
+        84 => "Mist",
+        85 => "Haze",
+        90 => "Hot",
+        91 => "Warm",
+        92 => "Cool",
+        93 => "Cold",
+        _ => "Unknown",
+    }
+}
+
+fn parse_hko(weather: &mut Weather, data: &[u8]) -> bool {
+    let Some(temp) = hko_place_value(data, b"temperature", b"Hong Kong Observatory") else {
+        return false;
+    };
+    weather.temp = temp;
+    weather.humidity = hko_place_value(data, b"humidity", b"Hong Kong Observatory")
+        .map(|v| v / 10)
+        .unwrap_or(-1);
+    weather.feels = FEELS_NONE;
+    weather.wind = -1;
+    weather.code = 0;
+    weather.provider = 1;
+    let icon = json_int(data, b"icon").unwrap_or(0).max(0) as u64;
+    weather.set_cond(hko_icon_text(icon));
+    true
+}
+
+fn parse_open_meteo(weather: &mut Weather, data: &[u8]) -> bool {
+    let Some(start) = json_find(data, b"current") else {
+        return false;
+    };
+    let Some(open) = data[start..].iter().position(|&b| b == b'{') else {
+        return false;
+    };
+    let obj_start = start + open;
+    let Some(close) = data[obj_start..].iter().position(|&b| b == b'}') else {
+        return false;
+    };
+    let obj = &data[obj_start..obj_start + close];
+    let Some(temp) = json_num_x10(obj, b"temperature_2m") else {
+        return false;
+    };
+    weather.temp = temp;
+    weather.humidity = json_num_x10(obj, b"relative_humidity_2m")
+        .map(|v| v / 10)
+        .unwrap_or(-1);
+    weather.feels = json_num_x10(obj, b"apparent_temperature").unwrap_or(FEELS_NONE);
+    weather.wind = json_num_x10(obj, b"wind_speed_10m").unwrap_or(-1);
+    weather.code = (json_num_x10(obj, b"weather_code").unwrap_or(0) / 10).max(0) as u64;
+    weather.provider = 2;
+    weather.set_cond(weather_text(weather.code));
+    true
+}
+
+fn parse_fnd(weather: &mut Weather, data: &[u8]) {
+    weather.forecast_count = 0;
+    let Some(start) = json_find(data, b"weatherForecast") else {
+        return;
+    };
+    let mut i = start;
+    while weather.forecast_count < 9 {
+        let Some((s, e)) = json_object_at(data, i) else {
+            break;
         };
-        let Some(open) = data[start..].iter().position(|&b| b == b'{') else {
-            self.set_status("Bad weather response");
-            return;
-        };
-        let obj = &data[start + open..];
-        let end = obj.iter().position(|&b| b == b'}').unwrap_or(obj.len());
-        let obj = &obj[..end];
-        let Some(temp) = json_num_x10(obj, b"temperature") else {
-            self.set_status("Bad weather data");
-            return;
-        };
-        self.temp = temp;
-        self.wind = json_num_x10(obj, b"windspeed").unwrap_or(0);
-        self.code = (json_num_x10(obj, b"weathercode").unwrap_or(0) / 10).max(0) as u64;
-        self.has_data = true;
-        self.set_status("Live from open-meteo.com");
+        let obj = &data[s..e];
+        let mut day = ForecastDay { week: [b' '; 3], icon: 0, max: 0, min: 0 };
+        let mut week = [0u8; 16];
+        if let Some(n) = json_str(obj, b"week", &mut week) {
+            for j in 0..3 {
+                day.week[j] = if j < n { week[j].to_ascii_uppercase() } else { b' ' };
+            }
+        }
+        day.icon = json_int(obj, b"ForecastIcon").unwrap_or(0).max(0) as u64;
+        if let Some(p) = json_find(obj, b"forecastMaxtemp") {
+            day.max = json_num_x10(&obj[p..], b"value").unwrap_or(0);
+        }
+        if let Some(p) = json_find(obj, b"forecastMintemp") {
+            day.min = json_num_x10(&obj[p..], b"value").unwrap_or(0);
+        }
+        weather.forecast[weather.forecast_count] = day;
+        weather.forecast_count += 1;
+        i = e;
     }
 }
 
@@ -1057,19 +1601,7 @@ impl Apps {
                 status: [0u8; 48],
                 status_len: 0,
             },
-            weather: Weather {
-                fahrenheit: false,
-                has_fix: false,
-                has_data: false,
-                temp: 0,
-                wind: 0,
-                code: 0,
-                lat: 0,
-                lon: 0,
-                accuracy: 0,
-                status: [0u8; 64],
-                status_len: 0,
-            },
+            weather: Weather::new(),
             terminal,
             browser: Browser::new(),
             apk: ApkApp {
@@ -1102,7 +1634,7 @@ pub fn open(apps: &mut Apps, app: AppKind) {
         AppKind::Maps => apps.maps.refresh(),
         AppKind::Weather => apps.weather.refresh(),
         AppKind::Files => apps.files.refresh(),
-        AppKind::Browser => apps.browser.editing = apps.browser.line_count == 0,
+        AppKind::Browser => apps.browser.open(),
         AppKind::Apk => apps.apk.refresh(),
         AppKind::Dvm => apps.dvm.refresh(),
         AppKind::Market => apps.market.refresh(),
@@ -1625,7 +2157,7 @@ fn weather_tap(apps: &mut Apps, point: (i64, i64)) {
     }
 }
 
-pub fn draw(screen: &Screen, apps: &Apps, app: AppKind, clock: [u64; 7], osk: bool) {
+pub fn draw(screen: &Screen, apps: &mut Apps, app: AppKind, clock: [u64; 7], osk: bool) {
     match app {
         AppKind::Music => draw_music(screen, &apps.music),
         AppKind::Notes => draw_notes(screen, &apps.notes, osk),
@@ -1634,7 +2166,7 @@ pub fn draw(screen: &Screen, apps: &Apps, app: AppKind, clock: [u64; 7], osk: bo
         AppKind::Files => draw_files(screen, &apps.files),
         AppKind::Weather => draw_weather(screen, &apps.weather, clock),
         AppKind::Terminal => draw_terminal(screen, &apps.terminal, osk),
-        AppKind::Browser => draw_browser(screen, &apps.browser, osk),
+        AppKind::Browser => draw_browser(screen, &mut apps.browser, osk),
         AppKind::Apk => draw_apk(screen, &apps.apk),
         AppKind::Dvm => draw_dvm(screen, &apps.dvm),
         AppKind::Market => draw_market(screen, &apps.market),
@@ -1991,30 +2523,65 @@ fn draw_files(screen: &Screen, files: &Files) {
     }
 }
 
+fn weather_temp_text<'a>(weather: &Weather, x10: i64, buf: &'a mut [u8; 20]) -> &'a str {
+    let value = if weather.fahrenheit { x10 * 9 / 5 + 320 } else { x10 };
+    signed(round_tenths(value), buf)
+}
+
 fn draw_weather(screen: &Screen, weather: &Weather, clock: [u64; 7]) {
     let width = screen.width();
     screen.fill(0, 93, width, screen.height() - 93, BLACK());
     screen.round_rect(20, 104, width - 40, 240, 30, SURFACE());
     button(screen, 304, 104, 152, 40, if weather.fahrenheit { "USE C" } else { "USE F" }, SURFACE_HI(), MUTED());
+    let unit = if weather.fahrenheit { "F" } else { "C" };
     if weather.has_data {
-        let temp_x10 = if weather.fahrenheit {
-            weather.temp * 9 / 5 + 320
-        } else {
-            weather.temp
-        };
         let mut buf = [0u8; 20];
-        let text = signed(round_tenths(temp_x10), &mut buf);
+        let text = weather_temp_text(weather, weather.temp, &mut buf);
         screen.text(40, 132, text, 5, TEXT());
-        screen.text(40 + Screen::text_width(text, 5) + 8, 140, if weather.fahrenheit { "F" } else { "C" }, 2, MUTED());
-        screen.text(40, 220, weather_text(weather.code), 2, TEXT());
-        let mut wind = [0u8; 20];
-        let value = format_tenths(weather.wind, &mut wind);
-        let mut line = [0u8; 48];
+        screen.text(40 + Screen::text_width(text, 5) + 8, 140, unit, 2, MUTED());
+        let cond = if weather.cond_len > 0 {
+            slice_str(&weather.cond[..weather.cond_len])
+        } else {
+            weather_text(weather.code)
+        };
+        screen.text(40, 220, cond, 2, TEXT());
+        if weather.feels != FEELS_NONE {
+            let mut feels = [0u8; 20];
+            let value = weather_temp_text(weather, weather.feels, &mut feels);
+            let mut line = [0u8; 48];
+            let mut used = 0;
+            push_str(&mut line, &mut used, b"Feels like ");
+            push_str(&mut line, &mut used, value.as_bytes());
+            push_str(&mut line, &mut used, b" ");
+            push_str(&mut line, &mut used, unit.as_bytes());
+            screen.text(40, 252, slice_str(&line[..used]), 1, MUTED());
+        }
+        let mut line = [0u8; 64];
         let mut used = 0;
-        push_str(&mut line, &mut used, b"Wind ");
-        push_str(&mut line, &mut used, value.as_bytes());
-        push_str(&mut line, &mut used, b" km/h");
-        screen.text(40, 252, slice_str(&line[..used]), 1, MUTED());
+        if weather.humidity >= 0 {
+            let mut buf = [0u8; 20];
+            push_str(&mut line, &mut used, b"Humidity ");
+            push_str(&mut line, &mut used, unsigned(weather.humidity as u64, &mut buf).as_bytes());
+            push_str(&mut line, &mut used, b"%");
+        }
+        if weather.wind >= 0 {
+            if used > 0 {
+                push_str(&mut line, &mut used, b"   ");
+            }
+            let mut wind = [0u8; 20];
+            push_str(&mut line, &mut used, b"Wind ");
+            push_str(&mut line, &mut used, format_tenths(weather.wind, &mut wind).as_bytes());
+            push_str(&mut line, &mut used, b" km/h");
+        }
+        if used > 0 {
+            screen.text(40, 276, slice_str(&line[..used]), 1, MUTED());
+        }
+        let provider = match weather.provider {
+            1 => "HKO - Hong Kong",
+            2 => "Open-Meteo",
+            _ => "",
+        };
+        screen.text(40, 306, provider, 1, OUTLINE());
         screen.circle(392, 248, 34, 0x00f0_c050);
         for (dx, dy) in [(0, -1), (1, 0), (0, 1), (-1, 0), (1, 1), (-1, 1), (1, -1), (-1, -1)] {
             screen.line(392 + dx * 42, 248 + dy * 42, 392 + dx * 56, 248 + dy * 56, 2, 0x00f0_c050);
@@ -2024,7 +2591,7 @@ fn draw_weather(screen: &Screen, weather: &Weather, clock: [u64; 7]) {
         screen.text(40, 190, "Tap Refresh to try again", 1, MUTED());
     } else {
         screen.text(40, 150, "Location unavailable", 2, MUTED());
-        screen.text(40, 190, "Enable location to see weather", 1, MUTED());
+        screen.text(40, 190, "Waiting for a location fix", 1, MUTED());
     }
     button(screen, 20, 368, 140, 40, "Refresh", RED(), TEXT());
     screen.text(24, 436, "CURRENT LOCATION", 1, MUTED());
@@ -2047,6 +2614,33 @@ fn draw_weather(screen: &Screen, weather: &Weather, clock: [u64; 7]) {
         screen.text(24, 490, slice_str(&line2[..used2]), 1, MUTED());
     } else {
         screen.text(24, 464, "No fix", 1, MUTED());
+    }
+    if weather.provider == 1 && weather.forecast_count > 0 {
+        screen.text(24, 524, "9-DAY FORECAST", 1, MUTED());
+        for index in 0..4usize {
+            if index >= weather.forecast_count {
+                break;
+            }
+            let day = &weather.forecast[index];
+            let x = 20 + index as i64 * 110;
+            let y = 548i64;
+            screen.round_rect(x, y, 100, 150, 18, SURFACE());
+            screen.text(x + 12, y + 14, slice_str(&day.week), 1, TEXT());
+            let cond = hko_icon_text(day.icon);
+            let shown = cond.len().min(10);
+            screen.text(x + 12, y + 40, &cond[..shown], 1, MUTED());
+            let mut max_buf = [0u8; 20];
+            let max = weather_temp_text(weather, day.max, &mut max_buf);
+            let mut min_buf = [0u8; 20];
+            let min = weather_temp_text(weather, day.min, &mut min_buf);
+            let mut line = [0u8; 24];
+            let mut used = 0;
+            push_str(&mut line, &mut used, max.as_bytes());
+            push_str(&mut line, &mut used, b"/");
+            push_str(&mut line, &mut used, min.as_bytes());
+            screen.text(x + 12, y + 72, slice_str(&line[..used]), 2, TEXT());
+            screen.text(x + 12, y + 108, unit, 1, MUTED());
+        }
     }
     let _ = clock;
     screen.text(24, 730, slice_str(&weather.status[..weather.status_len]), 1, MUTED());
@@ -2085,7 +2679,37 @@ fn browser_tap(apps: &mut Apps, point: (i64, i64), osk: bool) {
     }
     let browser = &mut apps.browser;
     if point.0 >= 20 && point.0 < width - 90 && point.1 >= 104 && point.1 <= 148 {
+        if browser.web_ok && browser.page_url_len > 0 {
+            let n = browser.page_url_len.min(browser.url.len());
+            browser.url[..n].copy_from_slice(&browser.page_url[..n]);
+            browser.url_len = n;
+        }
         browser.editing = true;
+        return;
+    }
+    if browser.web_ok && point.1 >= 152 && point.1 <= 188 {
+        if point.0 >= 20 && point.0 <= 76 {
+            if browser.can_back {
+                k::web_back();
+                browser.set_status("Back");
+            }
+            return;
+        }
+        if point.0 >= 84 && point.0 <= 140 {
+            if browser.can_fwd {
+                k::web_forward();
+                browser.set_status("Forward");
+            }
+            return;
+        }
+        if point.0 >= 148 && point.0 <= 204 {
+            k::web_reload();
+            browser.set_status("Reloading...");
+            return;
+        }
+    }
+    if browser.web_ok && in_web_content(point) {
+        browser.editing = false;
         return;
     }
     let scroll_y = if osk { 410 } else { 700 };
@@ -2118,10 +2742,13 @@ fn browser_go(apps: &mut Apps) {
         push_str(&mut full, &mut used, b"https://");
     }
     push_str(&mut full, &mut used, url);
-    browser.set_status("Opening in browser...");
-    if k::open_url(slice_str(&full[..used])) {
-        browser.set_status("Opened in browser");
-        return;
+    if browser.web_ok {
+        browser.loaded = true;
+        if k::web_load(slice_str(&full[..used])) {
+            browser.set_status("Loading...");
+            return;
+        }
+        browser.web_ok = false;
     }
     browser_fetch_http(apps);
 }
@@ -2494,46 +3121,94 @@ fn html_to_lines(html: &[u8], browser: &mut Browser) {
     browser.title_len = title_len;
 }
 
-fn draw_browser(screen: &Screen, browser: &Browser, osk: bool) {
+fn nav_button(screen: &Screen, x: i64, y: i64, w: i64, h: i64, label: &str, enabled: bool) {
+    let (bg, fg) = if enabled { (SURFACE_HI(), TEXT()) } else { (SURFACE(), MUTED()) };
+    screen.round_rect(x, y, w, h, h / 2, bg);
+    screen.text_centered(x + w / 2, y + h / 2 - 8, label, 2, fg);
+}
+
+fn draw_browser(screen: &Screen, browser: &mut Browser, osk: bool) {
     let width = screen.width();
     screen.fill(0, 93, width, screen.height() - 93, BLACK());
 
+    if browser.web_ok {
+        browser.sync_meta();
+    }
+
     screen.round_rect(20, 104, width - 110, 44, 22, SURFACE_HI());
-    if browser.url_len == 0 {
-        screen.text(36, 118, "enter address", 1, 0x0050_505a);
-    } else {
+    if browser.editing {
+        if browser.url_len == 0 {
+            screen.text(36, 118, "enter address", 1, 0x0050_505a);
+        } else {
+            let shown = browser.url_len.min(40);
+            screen.text(36, 118, slice_str(&browser.url[..shown]), 1, TEXT());
+        }
+    } else if browser.web_ok && browser.page_url_len > 0 {
+        let shown = browser.page_url_len.min(44);
+        screen.text(36, 118, slice_str(&browser.page_url[..shown]), 1, MUTED());
+    } else if browser.url_len > 0 {
         let shown = browser.url_len.min(40);
-        screen.text(36, 118, slice_str(&browser.url[..shown]), 1, if browser.editing { TEXT() } else { MUTED() });
+        screen.text(36, 118, slice_str(&browser.url[..shown]), 1, MUTED());
+    } else {
+        screen.text(36, 118, "enter address", 1, 0x0050_505a);
     }
     screen.round_rect(width - 84, 104, 64, 44, 22, RED());
     screen.text_centered(width - 52, 116, "GO", 2, TEXT());
 
-    if browser.title_len > 0 {
+    if browser.web_ok {
+        nav_button(screen, 20, 152, 56, 36, "<", browser.can_back);
+        nav_button(screen, 84, 152, 56, 36, ">", browser.can_fwd);
+        nav_button(screen, 148, 152, 56, 36, "R", true);
+        let title = slice_str(&browser.page_title[..browser.page_title_len]);
+        let shown = title.len().min(28);
+        screen.text(216, 162, &title[..shown], 1, TEXT());
+    } else if browser.title_len > 0 {
         let shown = browser.title_len.min(44);
         screen.text(20, 162, slice_str(&browser.title[..shown]), 2, TEXT());
     }
 
-    let mut y = 196i64;
-    let visible_lines = if osk { 15 } else { 34 };
-    let end = (browser.scroll + visible_lines).min(browser.line_count);
-    for index in browser.scroll..end {
-        let length = browser.line_len[index] as usize;
-        screen.text(20, y, slice_str(&browser.lines[index][..length]), 1, TEXT());
-        y += 14;
-    }
-    if browser.line_count == 0 {
-        screen.text_centered(width / 2, 380, "Type a host and press GO", 2, MUTED());
-        if !osk {
-            screen.text_centered(width / 2, 416, "GO opens the real browser", 1, 0x0050_505a);
+    if browser.web_ok {
+        screen.fill(19, 195, 442, 1, OUTLINE());
+        screen.fill(19, 700, 442, 1, OUTLINE());
+        screen.fill(19, 195, 1, 506, OUTLINE());
+        screen.fill(460, 195, 1, 506, OUTLINE());
+        let seq = k::web_render(false);
+        if seq != 0 && seq & 1 == 0 {
+            browser.last_seq = seq;
+        }
+        if browser.last_seq != 0 {
+            let bottom = if osk { crate::keyboard::TOP } else { WEB_Y1 };
+            browser.blit(bottom);
+        } else {
+            screen.text_centered(width / 2, 380, "Loading...", 2, MUTED());
+        }
+    } else {
+        let mut y = 196i64;
+        let visible_lines = if osk { 15 } else { 34 };
+        let end = (browser.scroll + visible_lines).min(browser.line_count);
+        for index in browser.scroll..end {
+            let length = browser.line_len[index] as usize;
+            screen.text(20, y, slice_str(&browser.lines[index][..length]), 1, TEXT());
+            y += 14;
+        }
+        if browser.line_count == 0 {
+            screen.text_centered(width / 2, 380, "Type a host and press GO", 2, MUTED());
+            if !osk {
+                screen.text_centered(width / 2, 416, "Text mode - no host WebView", 1, 0x0050_505a);
+            }
         }
     }
 
     let scroll_y = if osk { 410 } else { 700 };
-    screen.round_rect(width - 110, scroll_y, 44, 40, 12, SURFACE_HI());
-    screen.text_centered(width - 88, scroll_y + 10, "up", 1, TEXT());
-    screen.round_rect(width - 60, scroll_y, 44, 40, 12, SURFACE_HI());
-    screen.text_centered(width - 38, scroll_y + 10, "dn", 1, TEXT());
-    screen.text(20, scroll_y + 12, slice_str(&browser.status[..browser.status_len]), 1, MUTED());
+    if !browser.web_ok {
+        screen.round_rect(width - 110, scroll_y, 44, 40, 12, SURFACE_HI());
+        screen.text_centered(width - 88, scroll_y + 10, "up", 1, TEXT());
+        screen.round_rect(width - 60, scroll_y, 44, 40, 12, SURFACE_HI());
+        screen.text_centered(width - 38, scroll_y + 10, "dn", 1, TEXT());
+    }
+    if !osk {
+        screen.text(20, scroll_y + 12, slice_str(&browser.status[..browser.status_len]), 1, MUTED());
+    }
 }
 
 fn apk_tap(apps: &mut Apps, point: (i64, i64)) {
@@ -2998,4 +3673,52 @@ fn draw_market(screen: &Screen, m: &Market) {
         ln += take;
     }
     screen.text_centered(width / 2, 768, slice_str(&line[..ln]), 1, MUTED());
+}
+
+/// Host-only test hook: parse a canned weather JSON body (mode 1 = HKO
+/// rhrread, 2 = Open-Meteo current, 3 = HKO fnd) into `out`.
+#[cfg(not(target_os = "none"))]
+pub fn weather_parse_test(data: &[u8], mode: u64, out: &mut [i64]) -> bool {
+    let mut weather = Weather::new();
+    match mode {
+        1 => {
+            if !parse_hko(&mut weather, data) {
+                return false;
+            }
+            out[0] = weather.temp;
+            out[1] = weather.humidity;
+            out[2] = weather.wind;
+            out[3] = weather.feels;
+            out[4] = weather.cond_len as i64;
+            out[5] = weather.provider as i64;
+            true
+        }
+        2 => {
+            if !parse_open_meteo(&mut weather, data) {
+                return false;
+            }
+            out[0] = weather.temp;
+            out[1] = weather.humidity;
+            out[2] = weather.wind;
+            out[3] = weather.feels;
+            out[4] = weather.code as i64;
+            out[5] = weather.provider as i64;
+            true
+        }
+        3 => {
+            parse_fnd(&mut weather, data);
+            out[0] = weather.forecast_count as i64;
+            if weather.forecast_count > 0 {
+                let day = weather.forecast[0];
+                out[1] = day.max;
+                out[2] = day.min;
+                out[3] = day.icon as i64;
+                out[4] = day.week[0] as i64;
+                out[5] = day.week[1] as i64;
+                out[6] = day.week[2] as i64;
+            }
+            weather.forecast_count > 0
+        }
+        _ => false,
+    }
 }

@@ -295,6 +295,11 @@ fn gui_run() -> ! {
             dirty = true;
         }
 
+        if ui.scene == Scene::App(AppKind::Browser) && !ui.shade {
+            let osk = ui.osk && apps::text_focused(&ui.apps, AppKind::Browser);
+            apps::browser_frame(&mut ui.apps, osk);
+        }
+
         if dirty {
             render(&screen, &mut ui, clock);
             dirty = false;
@@ -381,16 +386,43 @@ pub extern "C" fn kimi_test_install(name: u64, dest: u64) -> u64 {
     k::kpkg::install_to(nm, ds) as u64
 }
 
+/// Host-only test hook: parse canned weather JSON (mode 1 HKO rhrread,
+/// 2 Open-Meteo current, 3 HKO fnd); results written to out[0..8].
+#[no_mangle]
+#[cfg(not(target_os = "none"))]
+pub extern "C" fn kimi_test_weather(json: u64, len: u64, mode: u64, out: u64) -> u64 {
+    let data = unsafe { core::slice::from_raw_parts(json as *const u8, len as usize) };
+    let out = unsafe { core::slice::from_raw_parts_mut(out as *mut i64, 8) };
+    apps::weather_parse_test(data, mode, out) as u64
+}
+
+/// Host-only test hook: bounds-checked RGBA→XRGB blit; returns rows written.
+#[no_mangle]
+#[cfg(not(target_os = "none"))]
+pub extern "C" fn kimi_test_blit(
+    src: u64, sw: u64, sh: u64,
+    dst: u64, stride: u64,
+    dx: u64, dy: u64, maxw: u64, maxh: u64,
+) -> u64 {
+    apps::blit_rgba_to_xrgb(
+        src as *const u8, sw as i64, sh as i64,
+        dst as *mut u32, stride as i64,
+        dx as i64, dy as i64, maxw as i64, maxh as i64,
+    ) as u64
+}
+
 fn handle(screen: &Screen, ui: &mut Ui, event: k::InputEvent, clock: [u64; 7]) -> bool {
     let (width, height) = (screen.width(), screen.height());
 
     match (event.kind, event.code) {
         (k::EV_ABS, k::ABS_X) => {
             ui.touch.0 = scale(event.value, width);
+            browser_drag_move(screen, ui);
             false
         }
         (k::EV_ABS, k::ABS_Y) => {
             ui.touch.1 = scale(event.value, height);
+            browser_drag_move(screen, ui);
             false
         }
         (k::EV_KEY, k::KEY_ESC) if event.value != 0 => {
@@ -430,6 +462,10 @@ fn handle(screen: &Screen, ui: &mut Ui, event: k::InputEvent, clock: [u64; 7]) -
         }
         (k::EV_KEY, k::BTN_LEFT) | (k::EV_KEY, k::BTN_TOUCH) => {
             if event.value == 0 {
+                if ui.scene == Scene::App(AppKind::Browser) && !ui.shade {
+                    let point = app_point(screen, ui.touch);
+                    apps::browser_touch_up(&mut ui.apps, point);
+                }
                 let released = ui.press.take();
                 render(screen, ui, clock);
                 if let Some(start) = released {
@@ -461,6 +497,15 @@ fn handle(screen: &Screen, ui: &mut Ui, event: k::InputEvent, clock: [u64; 7]) -
             } else {
                 istamp(k::IBOX_HANDLER, k::cntpct());
                 ui.press = Some(ui.touch);
+                if ui.scene == Scene::App(AppKind::Browser) && !ui.shade {
+                    let point = app_point(screen, ui.touch);
+                    let osk_now = ui.osk && apps::text_focused(&ui.apps, AppKind::Browser);
+                    if !(osk_now && point.1 >= keyboard::TOP)
+                        && apps::browser_touch_down(&mut ui.apps, point)
+                    {
+                        return false;
+                    }
+                }
                 // Instant press feedback: draw just the touch ring over the
                 // existing frame and present only its small bounding box,
                 // instead of redrawing the whole scene (keeps clicks snappy).
@@ -470,6 +515,18 @@ fn handle(screen: &Screen, ui: &mut Ui, event: k::InputEvent, clock: [u64; 7]) -
         }
         _ => false,
     }
+}
+
+fn app_point(screen: &Screen, point: (i64, i64)) -> (i64, i64) {
+    (point.0, point.1 * 800 / screen.height())
+}
+
+fn browser_drag_move(screen: &Screen, ui: &mut Ui) {
+    if ui.scene != Scene::App(AppKind::Browser) || ui.shade || ui.press.is_none() {
+        return;
+    }
+    let point = app_point(screen, ui.touch);
+    apps::browser_touch_move(&mut ui.apps, point);
 }
 
 fn press_feedback(screen: &Screen, ui: &Ui) {
@@ -775,6 +832,13 @@ fn shade_tap(screen: &Screen, ui: &mut Ui, point: (i64, i64), clock: [u64; 7]) {
 }
 
 fn toggle_shade(screen: &Screen, ui: &mut Ui, clock: [u64; 7], open: bool) {
+    if ui.scene == Scene::App(AppKind::Browser) {
+        if open {
+            apps::browser_pause(&mut ui.apps);
+        } else {
+            apps::browser_resume(&mut ui.apps);
+        }
+    }
     ui.shade = open;
     ui.paint_bg = true;
     render(screen, ui, clock);
@@ -801,6 +865,9 @@ fn unlock(screen: &Screen, ui: &mut Ui, clock: [u64; 7]) {
 
 fn open_app(screen: &Screen, ui: &mut Ui, app: AppKind, clock: [u64; 7]) {
     let width = screen.width();
+    if ui.scene == Scene::App(AppKind::Browser) && app != AppKind::Browser {
+        apps::browser_pause(&mut ui.apps);
+    }
     apps::open(&mut ui.apps, app);
     ui.osk = match app {
         AppKind::Terminal => true,
@@ -828,6 +895,9 @@ fn open_app(screen: &Screen, ui: &mut Ui, app: AppKind, clock: [u64; 7]) {
 fn close_app(screen: &Screen, ui: &mut Ui, clock: [u64; 7]) {
     let width = screen.width();
     if let Scene::App(app) = ui.scene {
+        if app == AppKind::Browser {
+            apps::browser_pause(&mut ui.apps);
+        }
         if ui.settings.animations {
             for step in 0..=6 {
                 let offset = width * ease(step, 6) / 100;
@@ -872,7 +942,7 @@ fn present_dirty(screen: &Screen) {
     }
 }
 
-fn draw_scene(screen: &Screen, ui: &Ui, clock: [u64; 7], paint_bg: bool) {
+fn draw_scene(screen: &Screen, ui: &mut Ui, clock: [u64; 7], paint_bg: bool) {
     match ui.scene {
         Scene::Lock => {
             draw_wallpaper(screen, 0, true);
@@ -1337,7 +1407,7 @@ fn draw_home_indicator(screen: &Screen) {
 
 fn draw_app(
     screen: &Screen,
-    ui: &Ui,
+    ui: &mut Ui,
     app: AppKind,
     clock: [u64; 7],
     x_offset: i64,
@@ -1361,7 +1431,7 @@ fn draw_app(
         AppKind::Calculator => draw_calculator(screen, ui, x),
         AppKind::Clock => draw_clock_app(screen, clock, x),
         AppKind::Settings => draw_settings(screen, &ui.settings, x),
-        _ => apps::draw(screen, &ui.apps, app, clock, osk),
+        _ => apps::draw(screen, &mut ui.apps, app, clock, osk),
     }
     if osk {
         let pressed = ui
