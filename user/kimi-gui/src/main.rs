@@ -799,6 +799,13 @@ fn gui_run() -> ! {
             dirty = true;
         }
 
+        // Animating home (edit-mode jiggle / drag) moves icons every frame; the
+        // wallpaper must be repainted each frame or old icon pixels ghost into
+        // duplicated logos. Force a full background repaint while animating.
+        if ui.scene == Scene::Home && (ui.edit_mode || ui.drag.is_some() || ui.folder_view.is_some()) {
+            ui.paint_bg = true;
+        }
+
         if dirty {
             render(&screen, &mut ui, clock);
             dirty = false;
