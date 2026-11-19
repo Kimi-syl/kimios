@@ -1,0 +1,12 @@
+{
+  "id": "nord-ui",
+  "name": "Nord UI",
+  "version": "1.0",
+  "type": "ui",
+  "runtime": "native",
+  "entry": "apply.sh",
+  "args": [],
+  "permissions": [],
+  "description": "Example UI plugin: bundles the Nord arctic-blue palette as nord.ktheme (11 RRGGBB slots). ui.theme points at the bundled file; the host applies it via the existing theme system.",
+  "ui": { "theme": "nord.ktheme" }
+}

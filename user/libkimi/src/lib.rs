@@ -10,6 +10,7 @@ pub mod apk;
 pub mod alpine;
 pub mod dvm;
 pub mod kpkg;
+pub mod kplugin;
 pub mod shell;
 
 #[cfg(target_os = "none")]
@@ -692,6 +693,8 @@ pub const SYS_SYSINFO: u64 = 49;
 pub const SYS_PROCLIST: u64 = 50;
 pub const SYS_RUN_PATH: u64 = 51;
 pub const SYS_COPY: u64 = 52;
+pub const SYS_PLUGIN_API: u64 = 53;
+pub const SYS_PLUGIN_RUN: u64 = 54;
 
 /// `[cpu_pct_x10, ram_total_kb, ram_used_kb, storage_total_kb, storage_used_kb,
 /// uptime_s, proc_count, battery_pct, battery_charging, reserved]`.
@@ -728,6 +731,24 @@ pub fn copy_file(src: &str, dst: &str) -> bool {
         src.as_ptr() as u64, src.len() as u64,
         dst.as_ptr() as u64, dst.len() as u64, 0,
     ) == 0
+}
+
+/// Start/query the localhost Plugin API server; returns its port (0 if unavailable).
+pub fn plugin_api_port() -> u16 {
+    let r = syscall3(SYS_PLUGIN_API, 0, 0, 0);
+    if r == ERROR { 0 } else { r as u16 }
+}
+
+/// Run an installed plugin by id (host builds argv from the manifest runtime/entry
+/// and injects KIMI_API_PORT/KIMI_PLUGIN_ID/KIMI_PLUGIN_DIR). Returns exit code.
+pub fn plugin_run(id: &str) -> Option<u64> {
+    let r = syscall3(SYS_PLUGIN_RUN, id.as_ptr() as u64, id.len() as u64, 0);
+    if r == ERROR { None } else { Some(r) }
+}
+
+/// Run a plugin in the background (fork without waiting) — for services.
+pub fn plugin_run_bg(id: &str) -> bool {
+    syscall3(SYS_PLUGIN_RUN, id.as_ptr() as u64, id.len() as u64, 1) == 0
 }
 
 /// File metadata: `(kind, size)` where kind 0 is RamFS and 1 is a disk file.

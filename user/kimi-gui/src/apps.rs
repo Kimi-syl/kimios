@@ -650,6 +650,234 @@ impl DvmApp {
     }
 }
 
+use libkimi::kplugin::{self, PluginInfo, TYPE_APP, TYPE_SERVICE, TYPE_UI};
+
+const EMPTY_PLUGIN: PluginInfo = PluginInfo {
+    id: [0; 48], id_len: 0, name: [0; 48], name_len: 0,
+    version: [0; 16], version_len: 0, ptype: TYPE_APP, runtime: 0, enabled: false,
+};
+
+const PLUGIN_ROWS: usize = 8;
+
+pub struct Plugins {
+    items: [PluginInfo; 32],
+    count: usize,
+    scroll: usize,
+    selected: Option<usize>,
+    status: [u8; 64],
+    status_len: usize,
+    confirm_uninstall: bool,
+    view: u8,
+    import_paths: [[u8; 96]; 8],
+    import_lens: [usize; 8],
+    import_count: usize,
+}
+
+impl Plugins {
+    fn new() -> Self {
+        Self {
+            items: [EMPTY_PLUGIN; 32],
+            count: 0,
+            scroll: 0,
+            selected: None,
+            status: [0; 64],
+            status_len: 0,
+            confirm_uninstall: false,
+            view: 0,
+            import_paths: [[0; 96]; 8],
+            import_lens: [0; 8],
+            import_count: 0,
+        }
+    }
+
+    fn set_status(&mut self, text: &str) {
+        self.status_len = text.len().min(64);
+        self.status[..self.status_len].copy_from_slice(&text.as_bytes()[..self.status_len]);
+    }
+
+    fn refresh(&mut self) {
+        self.count = kplugin::list(&mut self.items);
+        self.confirm_uninstall = false;
+        if self.scroll + PLUGIN_ROWS > self.count {
+            self.scroll = self.count.saturating_sub(PLUGIN_ROWS);
+        }
+        if let Some(i) = self.selected {
+            if i >= self.count {
+                self.selected = None;
+            }
+        }
+    }
+
+    fn scan_imports(&mut self) {
+        self.import_count = 0;
+        k::kpkg::scan_plugin_imports(|path| {
+            if self.import_count >= 8 {
+                return;
+            }
+            let slot = self.import_count;
+            let b = path.as_bytes();
+            let n = b.len().min(96);
+            self.import_paths[slot][..n].copy_from_slice(&b[..n]);
+            self.import_lens[slot] = n;
+            self.import_count += 1;
+        });
+    }
+
+    fn install_import(&mut self, slot: usize) {
+        if slot >= self.import_count {
+            return;
+        }
+        let path = slice_str(&self.import_paths[slot][..self.import_lens[slot]]);
+        if kplugin::install(path) {
+            self.set_status("Plugin installed");
+            self.view = 0;
+            self.refresh();
+        } else {
+            self.set_status("Install failed (bad manifest?)");
+        }
+    }
+
+    fn toggle_selected(&mut self) {
+        let Some(i) = self.selected else { return };
+        let info = self.items[i];
+        let on = !info.enabled;
+        if kplugin::set_enabled(info.id_str(), on) {
+            self.items[i].enabled = on;
+            self.set_status(if on { "Plugin enabled" } else { "Plugin disabled" });
+        } else {
+            self.set_status("Toggle failed");
+        }
+    }
+
+    fn uninstall_selected(&mut self) {
+        let Some(i) = self.selected else { return };
+        if !self.confirm_uninstall {
+            self.confirm_uninstall = true;
+            return;
+        }
+        let id = self.items[i].id_str();
+        if kplugin::uninstall(id) {
+            self.set_status("Plugin uninstalled");
+            self.selected = None;
+            self.refresh();
+        } else {
+            self.set_status("Uninstall failed");
+        }
+    }
+
+    fn primary_action(&mut self, screen: &Screen) {
+        let Some(i) = self.selected else { return };
+        let info = self.items[i];
+        match info.ptype {
+            TYPE_APP => {
+                self.set_status("Running...");
+                screen.reset_dirty();
+                screen.text(170, 156, "Running...", 1, RED());
+                if let Some(d) = screen.dirty_rect() {
+                    k::fb_present(d[0] as u64, d[1] as u64, d[2] as u64, d[3] as u64);
+                }
+                match kplugin::run(info.id_str()) {
+                    Some(code) => {
+                        let mut line = [0u8; 64];
+                        let mut used = 0;
+                        let mut num = [0u8; 20];
+                        push_str(&mut line, &mut used, b"Exited with code ");
+                        push_str(&mut line, &mut used, unsigned(code, &mut num).as_bytes());
+                        self.set_status(slice_str(&line[..used]));
+                    }
+                    None => self.set_status("Run unavailable on this host"),
+                }
+            }
+            TYPE_UI => self.apply_ui_plugin(info),
+            TYPE_SERVICE => {
+                kplugin::start_services();
+                self.set_status("Services started");
+            }
+            _ => {}
+        }
+    }
+
+    fn apply_ui_plugin(&mut self, info: PluginInfo) {
+        let id = info.id_str();
+        if !kplugin::apply_ui(id) {
+            self.set_status("No bundled theme found");
+            return;
+        }
+        let mut path = [0u8; 160];
+        let mut used = 0;
+        push_str(&mut path, &mut used, b"/disk/plugins/");
+        push_str(&mut path, &mut used, id.as_bytes());
+        push_str(&mut path, &mut used, b"/plugin.json");
+        let mut buf = [0u8; 2048];
+        let n = read_disk_file(slice_str(&path[..used]), &mut buf);
+        let data = &buf[..n];
+        let mut applied = false;
+        let mut asset = [0u8; 48];
+        if let Some(an) = json_str(data, b"theme", &mut asset) {
+            let mut tp = [0u8; 160];
+            let mut tn = 0;
+            push_str(&mut tp, &mut tn, b"/disk/plugins/");
+            push_str(&mut tp, &mut tn, id.as_bytes());
+            push_str(&mut tp, &mut tn, b"/");
+            push_str(&mut tp, &mut tn, &asset[..an]);
+            if crate::theme::load_theme_file(slice_str(&tp[..tn]), slice_str(&asset[..an])) {
+                applied = true;
+            }
+        }
+        if let Some(an) = json_str(data, b"font", &mut asset) {
+            let mut fp = [0u8; 160];
+            let mut fnn = 0;
+            push_str(&mut fp, &mut fnn, b"/disk/plugins/");
+            push_str(&mut fp, &mut fnn, id.as_bytes());
+            push_str(&mut fp, &mut fnn, b"/");
+            push_str(&mut fp, &mut fnn, &asset[..an]);
+            if crate::font_store::load(slice_str(&fp[..fnn]), slice_str(&asset[..an])) {
+                crate::theme::apply_font(4);
+                applied = true;
+            }
+        }
+        if applied {
+            save_theme_cfg();
+            self.set_status("UI plugin applied");
+        } else {
+            self.set_status("Theme/font parse failed");
+        }
+    }
+}
+
+pub struct PluginLauncher {
+    items: [PluginInfo; 16],
+    count: usize,
+}
+
+pub fn launcher_refresh(apps: &mut Apps) {
+    let mut all = [EMPTY_PLUGIN; 32];
+    let n = kplugin::list(&mut all);
+    let launcher = &mut apps.plugin_home;
+    launcher.count = 0;
+    for i in 0..n {
+        if all[i].ptype == TYPE_APP && all[i].enabled && launcher.count < launcher.items.len() {
+            launcher.items[launcher.count] = all[i];
+            launcher.count += 1;
+        }
+    }
+}
+
+pub fn launcher_count(apps: &Apps) -> usize {
+    apps.plugin_home.count
+}
+
+pub fn launcher_name(apps: &Apps, index: usize) -> &str {
+    apps.plugin_home.items[index].name_str()
+}
+
+pub fn launcher_run(apps: &mut Apps, index: usize) -> Option<u64> {
+    if index >= apps.plugin_home.count {
+        return None;
+    }
+    kplugin::run(apps.plugin_home.items[index].id_str())
+}
+
 pub struct Apps {
     pub music: Music,
     pub notes: Notes,
@@ -663,10 +891,18 @@ pub struct Apps {
     pub dvm: DvmApp,
     pub market: Market,
     pub monitor: Monitor,
+    pub plugins: Plugins,
+    pub plugin_home: PluginLauncher,
 }
 
 fn slice_str(bytes: &[u8]) -> &str {
     core::str::from_utf8(bytes).unwrap_or("")
+}
+
+// theme::save now persists custom palettes (to /disk/theme_custom.cfg with a
+// sentinel index), so always save the current theme/font selection.
+fn save_theme_cfg() {
+    crate::theme::save();
 }
 
 fn unsigned(value: u64, buffer: &mut [u8; 20]) -> &str {
@@ -2030,6 +2266,11 @@ impl Apps {
             },
             market: Market::new(),
             monitor: Monitor::new(),
+            plugins: Plugins::new(),
+            plugin_home: PluginLauncher {
+                items: [EMPTY_PLUGIN; 16],
+                count: 0,
+            },
         }
     }
 }
@@ -2046,6 +2287,7 @@ pub fn open(apps: &mut Apps, app: AppKind) {
         AppKind::Dvm => apps.dvm.refresh(),
         AppKind::Market => apps.market.refresh(),
         AppKind::Monitor => apps.monitor.refresh(),
+        AppKind::Plugins => apps.plugins.refresh(),
         _ => {}
     }
 }
@@ -2134,6 +2376,18 @@ pub fn nav_back(apps: &mut Apps, app: AppKind) -> bool {
         AppKind::Apk => apps.apk.selected.take().is_some(),
         AppKind::Dvm => apps.dvm.selected.take().is_some(),
         AppKind::Monitor => apps.monitor.selected.take().is_some(),
+        AppKind::Plugins => {
+            let plugins = &mut apps.plugins;
+            if plugins.confirm_uninstall {
+                plugins.confirm_uninstall = false;
+                true
+            } else if plugins.view != 0 {
+                plugins.view = 0;
+                true
+            } else {
+                plugins.selected.take().is_some()
+            }
+        }
         _ => false,
     }
 }
@@ -2222,6 +2476,7 @@ pub fn key_char(code: u16, shift: bool) -> Option<(u8, bool)> {
 pub fn key(apps: &mut Apps, app: AppKind, code: u16, shift: bool) -> bool {
     match app {
         AppKind::Files => files_key(apps, code, shift),
+        AppKind::Plugins => plugins_key(apps, code),
         AppKind::Notes => {
             if apps.notes.editing.is_none() {
                 return false;
@@ -2410,7 +2665,7 @@ fn button(screen: &Screen, x: i64, y: i64, width: i64, height: i64, label: &str,
     screen.text_centered(x + width / 2, y + height / 2 - 8, label, 2, text_color);
 }
 
-pub fn tap(_screen: &Screen, apps: &mut Apps, app: AppKind, point: (i64, i64), osk: bool, _clock: [u64; 7]) {
+pub fn tap(screen: &Screen, apps: &mut Apps, app: AppKind, point: (i64, i64), osk: bool, _clock: [u64; 7]) {
     match app {
         AppKind::Music => music_tap(apps, point),
         AppKind::Notes => notes_tap(apps, point),
@@ -2423,6 +2678,7 @@ pub fn tap(_screen: &Screen, apps: &mut Apps, app: AppKind, point: (i64, i64), o
         AppKind::Dvm => dvm_tap(apps, point),
         AppKind::Market => market_tap(apps, point),
         AppKind::Monitor => monitor_tap(apps, point),
+        AppKind::Plugins => plugins_tap(screen, apps, point),
         _ => {}
     }
 }
@@ -2801,6 +3057,7 @@ pub fn draw(screen: &Screen, apps: &mut Apps, app: AppKind, clock: [u64; 7], osk
         AppKind::Dvm => draw_dvm(screen, &apps.dvm),
         AppKind::Market => draw_market(screen, &apps.market),
         AppKind::Monitor => draw_monitor(screen, &mut apps.monitor),
+        AppKind::Plugins => draw_plugins(screen, &apps.plugins),
         _ => {}
     }
 }
@@ -4428,6 +4685,251 @@ fn draw_monitor(screen: &Screen, m: &mut Monitor) {
     }
 }
 
+// ---- Plugin manager -------------------------------------------------------
+
+const PLG_LIST_Y: i64 = 180;
+const PLG_ROW_H: i64 = 60;
+const PLG_ACTION_Y: i64 = 672;
+
+fn plugin_type_badge(ptype: u8) -> &'static str {
+    match ptype {
+        TYPE_SERVICE => "SVC",
+        TYPE_UI => "UI",
+        _ => "APP",
+    }
+}
+
+fn draw_plugins(screen: &Screen, plugins: &Plugins) {
+    let width = screen.width();
+    screen.fill(0, 93, width, screen.height() - 93, BLACK());
+
+    if plugins.view == 1 {
+        button(screen, 20, 104, 100, 40, "Back", SURFACE_HI(), TEXT());
+        button(screen, 128, 104, 120, 40, "Picker", SURFACE_HI(), MUTED());
+        button(screen, 356, 104, 100, 40, "Rescan", SURFACE_HI(), MUTED());
+        screen.text(24, 156, "Install from /disk/import", 1, MUTED());
+        if plugins.status_len > 0 {
+            let shown = plugins.status_len.min(40);
+            screen.text(24, 712, slice_str(&plugins.status[..shown]), 1, GREEN());
+        }
+        if plugins.import_count == 0 {
+            screen.text_centered(width / 2, 380, "No .kplugin packages found", 2, MUTED());
+            screen.text_centered(width / 2, 416, "Drop a plugin dir into /disk/import", 1, MUTED());
+            return;
+        }
+        for row in 0..PLUGIN_ROWS {
+            let i = row;
+            if i >= plugins.import_count {
+                break;
+            }
+            let y = PLG_LIST_Y + row as i64 * PLG_ROW_H;
+            screen.round_rect(20, y, width - 40, 54, 18, SURFACE());
+            let path = slice_str(&plugins.import_paths[i][..plugins.import_lens[i]]);
+            let base = match path.rfind('/') {
+                Some(p) => &path[p + 1..],
+                None => path,
+            };
+            let shown = base.len().min(26);
+            screen.text(40, y + 12, &base[..shown], 2, TEXT());
+            screen.text(40, y + 38, "plugin package", 1, MUTED());
+            button(screen, 330, y + 7, 110, 40, "Install", RED(), TEXT());
+        }
+        return;
+    }
+
+    button(screen, 20, 104, 100, 40, "Import", RED_DIM(), TEXT());
+    button(screen, 128, 104, 120, 40, "Services", SURFACE_HI(), MUTED());
+    button(screen, 356, 104, 100, 40, "Refresh", SURFACE_HI(), MUTED());
+    let port = kplugin::api_port();
+    let mut port_buf = [0u8; 20];
+    let port_text = unsigned(port as u64, &mut port_buf);
+    let mut line = [0u8; 32];
+    let mut used = 0;
+    push_str(&mut line, &mut used, b"API :");
+    push_str(&mut line, &mut used, port_text.as_bytes());
+    screen.text(256, 116, slice_str(&line[..used]), 1, if port > 0 { GREEN() } else { MUTED() });
+
+    if plugins.status_len > 0 {
+        let shown = plugins.status_len.min(52);
+        screen.text(24, 156, slice_str(&plugins.status[..shown]), 1, GREEN());
+    } else {
+        screen.text(24, 156, "Tap a plugin to select it", 1, MUTED());
+    }
+
+    if plugins.count == 0 {
+        screen.text_centered(width / 2, 380, "No plugins installed", 2, MUTED());
+        screen.text_centered(width / 2, 416, "Import a .kplugin to get started", 1, MUTED());
+    }
+    for row in 0..PLUGIN_ROWS {
+        let i = plugins.scroll + row;
+        if i >= plugins.count {
+            break;
+        }
+        let info = &plugins.items[i];
+        let y = PLG_LIST_Y + row as i64 * PLG_ROW_H;
+        let selected = plugins.selected == Some(i);
+        screen.round_rect(20, y, width - 40, 54, 18, if selected { SURFACE_HI() } else { SURFACE() });
+        let name = info.name_str();
+        let shown = name.len().min(22);
+        screen.text(40, y + 12, &name[..shown], 2, TEXT());
+        let mut sub = [0u8; 48];
+        let mut sn = 0;
+        push_str(&mut sub, &mut sn, b"v");
+        push_str(&mut sub, &mut sn, info.version_str().as_bytes());
+        push_str(&mut sub, &mut sn, b"  ");
+        push_str(&mut sub, &mut sn, plugin_type_badge(info.ptype).as_bytes());
+        screen.text(40, y + 38, slice_str(&sub[..sn]), 1, MUTED());
+        let on = info.enabled;
+        screen.round_rect(width - 104, y + 15, 64, 24, 12, if on { RED_DIM() } else { SURFACE_MAX() });
+        screen.text_centered(width - 72, y + 19, if on { "ON" } else { "OFF" }, 1, if on { TEXT() } else { MUTED() });
+    }
+
+    if let Some(i) = plugins.selected {
+        let info = &plugins.items[i];
+        let toggle_label = if info.enabled { "Disable" } else { "Enable" };
+        button(screen, 20, PLG_ACTION_Y, 130, 44, toggle_label, SURFACE_HI(), TEXT());
+        let (mid_label, mid_bg) = match info.ptype {
+            TYPE_APP => ("Run", RED()),
+            TYPE_UI => ("Apply", RED()),
+            _ => ("Start", SURFACE_HI()),
+        };
+        button(screen, 160, PLG_ACTION_Y, 130, 44, mid_label, mid_bg, TEXT());
+        let del_label = if plugins.confirm_uninstall { "SURE?" } else { "Uninstall" };
+        let del_bg = if plugins.confirm_uninstall { RED() } else { RED_DIM() };
+        button(screen, 300, PLG_ACTION_Y, 140, 44, del_label, del_bg, TEXT());
+    }
+
+    button(screen, 20, 728, 120, 36, "UP", SURFACE_HI(), MUTED());
+    button(screen, 340, 728, 120, 36, "DOWN", SURFACE_HI(), MUTED());
+    let mut buf = [0u8; 20];
+    let count = unsigned(plugins.count as u64, &mut buf);
+    screen.text_centered(width / 2, 738, count, 1, MUTED());
+}
+
+fn plugins_tap(screen: &Screen, apps: &mut Apps, point: (i64, i64)) {
+    let plugins = &mut apps.plugins;
+    if plugins.view == 1 {
+        if point.1 >= 104 && point.1 <= 144 {
+            if point.0 >= 20 && point.0 <= 120 {
+                plugins.view = 0;
+                return;
+            }
+            if point.0 >= 128 && point.0 <= 248 {
+                if k::import_file("/disk/import") {
+                    plugins.set_status("Picker opened - Rescan after");
+                } else {
+                    plugins.set_status("Import unavailable on this host");
+                }
+                plugins.scan_imports();
+                return;
+            }
+            if point.0 >= 356 && point.0 <= 456 {
+                plugins.scan_imports();
+                return;
+            }
+        }
+        if point.1 >= PLG_LIST_Y && point.0 >= 20 && point.0 < 460 {
+            let row = ((point.1 - PLG_LIST_Y) / PLG_ROW_H) as usize;
+            if row < PLUGIN_ROWS && row < plugins.import_count {
+                plugins.install_import(row);
+            }
+        }
+        return;
+    }
+
+    if point.1 >= 104 && point.1 <= 144 {
+        if point.0 >= 20 && point.0 <= 120 {
+            plugins.view = 1;
+            plugins.scan_imports();
+            return;
+        }
+        if point.0 >= 128 && point.0 <= 248 {
+            kplugin::start_services();
+            plugins.set_status("Services started");
+            return;
+        }
+        if point.0 >= 356 && point.0 <= 456 {
+            plugins.refresh();
+            return;
+        }
+    }
+
+    if plugins.selected.is_some() && point.1 >= PLG_ACTION_Y && point.1 <= PLG_ACTION_Y + 44 {
+        if point.0 >= 20 && point.0 <= 150 {
+            plugins.toggle_selected();
+            return;
+        }
+        if point.0 >= 160 && point.0 <= 290 {
+            plugins.primary_action(screen);
+            return;
+        }
+        if point.0 >= 300 && point.0 <= 440 {
+            plugins.uninstall_selected();
+            return;
+        }
+    }
+
+    if point.1 >= 728 && point.1 <= 764 {
+        if point.0 >= 20 && point.0 <= 140 {
+            plugins.scroll = plugins.scroll.saturating_sub(1);
+            return;
+        }
+        if point.0 >= 340 && point.0 <= 460 {
+            if plugins.scroll + PLUGIN_ROWS < plugins.count {
+                plugins.scroll += 1;
+            }
+            return;
+        }
+    }
+
+    if point.1 >= PLG_LIST_Y && point.1 < PLG_LIST_Y + PLUGIN_ROWS as i64 * PLG_ROW_H
+        && point.0 >= 20 && point.0 < 460
+    {
+        let row = ((point.1 - PLG_LIST_Y) / PLG_ROW_H) as usize;
+        let index = plugins.scroll + row;
+        if row < PLUGIN_ROWS && index < plugins.count {
+            plugins.selected = Some(index);
+            plugins.confirm_uninstall = false;
+        }
+    }
+}
+
+fn plugins_key(apps: &mut Apps, code: u16) -> bool {
+    let plugins = &mut apps.plugins;
+    if plugins.view != 0 || plugins.count == 0 {
+        return false;
+    }
+    match code {
+        103 => {
+            let cur = plugins.selected.unwrap_or(0);
+            let next = cur.saturating_sub(1);
+            plugins.selected = Some(next);
+            if next < plugins.scroll {
+                plugins.scroll = next;
+            }
+            true
+        }
+        108 => {
+            let cur = plugins.selected.unwrap_or(0);
+            let next = (cur + 1).min(plugins.count - 1);
+            plugins.selected = Some(next);
+            if next >= plugins.scroll + PLUGIN_ROWS {
+                plugins.scroll = next + 1 - PLUGIN_ROWS;
+            }
+            true
+        }
+        28 => {
+            if plugins.selected.is_none() {
+                plugins.selected = Some(0);
+            } else {
+                plugins.toggle_selected();
+            }
+            true
+        }
+        _ => false,
+    }
+}
+
 // ---- Marketplace (powered by kpkg) ----------------------------------------
 
 #[derive(Clone, Copy)]
@@ -4436,8 +4938,8 @@ struct MarketItem {
     name_len: usize,
     desc: [u8; 64],
     desc_len: usize,
-    kind: u8,    // 0 theme, 1 font, 2 app
-    source: u8,  // 0 built-in, 1 repo
+    kind: u8,    // 0 theme, 1 font, 2 app, 3 plugin
+    source: u8,  // 0 built-in, 1 repo, 2 local import, 3 installed plugin
     index: usize,
     installed: bool,
 }
@@ -4449,7 +4951,7 @@ impl MarketItem {
 
 pub struct Market {
     tab: usize,
-    scroll: [usize; 3],
+    scroll: [usize; 4],
     items: [MarketItem; 40],
     count: usize,
     status: [u8; 64],
@@ -4458,6 +4960,8 @@ pub struct Market {
     import_paths: [[u8; 96]; 8],
     import_lens: [usize; 8],
     import_count: usize,
+    plugins: [PluginInfo; 16],
+    plugin_count: usize,
 }
 
 const EMPTY_ITEM: MarketItem = MarketItem {
@@ -4469,7 +4973,7 @@ impl Market {
     pub fn new() -> Self {
         let mut m = Self {
             tab: 0,
-            scroll: [0; 3],
+            scroll: [0; 4],
             items: [EMPTY_ITEM; 40],
             count: 0,
             status: [0; 64],
@@ -4478,8 +4982,10 @@ impl Market {
             import_paths: [[0; 96]; 8],
             import_lens: [0; 8],
             import_count: 0,
+            plugins: [EMPTY_PLUGIN; 16],
+            plugin_count: 0,
         };
-        m.set_status("Themes, fonts & apps — powered by kpkg");
+        m.set_status("Themes, fonts, apps & plugins — kpkg");
         m
     }
 
@@ -4520,9 +5026,21 @@ impl Market {
             self.push(p.name_str(), p.desc_str(), kind, 1, ord, installed);
             ord += 1;
         });
+        self.plugin_count = kplugin::list(&mut self.plugins);
+        for i in 0..self.plugin_count {
+            let p = self.plugins[i];
+            let mut desc = [0u8; 64];
+            let mut dn = 0;
+            push_str(&mut desc, &mut dn, b"v");
+            push_str(&mut desc, &mut dn, p.version_str().as_bytes());
+            push_str(&mut desc, &mut dn, b" ");
+            push_str(&mut desc, &mut dn, p.type_str().as_bytes());
+            push_str(&mut desc, &mut dn, if p.enabled { b" - enabled" } else { b" - disabled" });
+            self.push(p.name_str(), slice_str(&desc[..dn]), 3, 3, i, true);
+        }
         self.scan_imports();
         self.repo_ok = k::kpkg::repo_cached();
-        for t in 0..3 {
+        for t in 0..4 {
             let n = self.kind_count(t as u8);
             if self.scroll[t] + 6 > n { self.scroll[t] = n.saturating_sub(6); }
         }
@@ -4542,38 +5060,61 @@ impl Market {
         let mut buffer = [0u8; 1024];
         let Some(n) = k::listdir("/disk/import", &mut buffer) else { return };
         for name in buffer[..n].split(|&b| b == 0) {
-            if name.is_empty() || name.last() == Some(&b'/') || self.import_count >= 8 {
+            if name.is_empty() || name.first() == Some(&b'.') || self.import_count >= 8 {
                 continue;
             }
-            let kind = if name.ends_with(b".ktheme") {
+            let is_dir = name.last() == Some(&b'/');
+            let base = if is_dir { &name[..name.len() - 1] } else { name };
+            if base.is_empty() || base.len() > 40 || self.count >= self.items.len() {
+                continue;
+            }
+            let kind = if is_dir {
+                let mut probe = [0u8; 96];
+                let mut pn = 0;
+                push_str(&mut probe, &mut pn, b"/disk/import/");
+                push_str(&mut probe, &mut pn, base);
+                push_str(&mut probe, &mut pn, b"/plugin.json");
+                if k::stat(slice_str(&probe[..pn])).is_none() {
+                    continue;
+                }
+                3u8
+            } else if name.ends_with(b".ktheme") {
                 0u8
             } else if name.ends_with(b".kfont") {
                 1u8
             } else if name.ends_with(b".kpkg") {
                 2u8
+            } else if name.ends_with(b".kplugin") {
+                3u8
             } else {
                 continue;
             };
-            if name.len() > 40 || self.count >= self.items.len() {
-                continue;
-            }
             let slot = self.import_count;
             let mut path = [0u8; 96];
             let mut used = 0;
             push_str(&mut path, &mut used, b"/disk/import/");
-            push_str(&mut path, &mut used, name);
+            push_str(&mut path, &mut used, base);
             self.import_paths[slot][..used].copy_from_slice(&path[..used]);
             self.import_lens[slot] = used;
             self.import_count += 1;
-            let stem = match name.iter().rposition(|&b| b == b'.') {
-                Some(i) if i > 0 => &name[..i],
-                _ => name,
+            let stem = if kind == 3 {
+                base
+            } else {
+                match base.iter().rposition(|&b| b == b'.') {
+                    Some(i) if i > 0 => &base[..i],
+                    _ => base,
+                }
             };
             let stem_str = slice_str(stem);
-            let mut dest = [0u8; 96];
-            let dest_path = asset_path(kind, stem_str, &mut dest);
-            let installed = k::stat(dest_path).is_some();
-            self.push(stem_str, "Local file - validate & install", kind, 2, slot, installed);
+            let installed = if kind == 3 {
+                false
+            } else {
+                let mut dest = [0u8; 96];
+                let dest_path = asset_path(kind, stem_str, &mut dest);
+                k::stat(dest_path).is_some()
+            };
+            let desc = if kind == 3 { "Plugin package - install" } else { "Local file - validate & install" };
+            self.push(stem_str, desc, kind, 2, slot, installed);
         }
     }
 
@@ -4607,6 +5148,17 @@ impl Market {
             self.action_import(it);
             return;
         }
+        if it.source == 3 {
+            if it.index < self.plugin_count {
+                let p = self.plugins[it.index];
+                let on = !p.enabled;
+                kplugin::set_enabled(p.id_str(), on);
+                self.plugins[it.index].enabled = on;
+                self.set_status(if on { "Plugin enabled" } else { "Plugin disabled" });
+            }
+            self.refresh();
+            return;
+        }
         let name = it.name_str();
         match it.kind {
             0 => {
@@ -4618,7 +5170,7 @@ impl Market {
                     if !it.installed { k::kpkg::install_to(name, path); }
                     crate::theme::load_theme_file(path, name);
                 }
-                crate::theme::save();
+                save_theme_cfg();
                 self.set_status("Theme applied");
             }
             1 => {
@@ -4631,7 +5183,7 @@ impl Market {
                     crate::font_store::load(path, name);
                     crate::theme::apply_font(4);
                 }
-                crate::theme::save();
+                save_theme_cfg();
                 self.set_status("Font applied");
             }
             _ => {
@@ -4664,7 +5216,7 @@ impl Market {
         match result.kind {
             0 => {
                 if crate::theme::load_theme_file(result.dest_str(), result.name_str()) {
-                    crate::theme::save();
+                    save_theme_cfg();
                     self.set_status("Theme imported & applied");
                 } else {
                     self.set_status("Installed, but palette parse failed");
@@ -4673,11 +5225,14 @@ impl Market {
             1 => {
                 if crate::font_store::load(result.dest_str(), result.name_str()) {
                     crate::theme::apply_font(4);
-                    crate::theme::save();
+                    save_theme_cfg();
                     self.set_status("Font imported & applied");
                 } else {
                     self.set_status("Installed, but font parse failed");
                 }
+            }
+            3 => {
+                self.set_status("Plugin installed - manage it in Plugins");
             }
             _ => {
                 self.set_status("App installed - run it in Files/Terminal");
@@ -4715,7 +5270,7 @@ fn item_active(it: &MarketItem) -> bool {
 fn market_tap(apps: &mut Apps, point: (i64, i64)) {
     let m = &mut apps.market;
     if point.1 >= 100 && point.1 <= 142 {
-        m.tab = if point.0 < 165 { 0 } else if point.0 < 315 { 1 } else { 2 };
+        m.tab = ((point.0 - 20) / 112).clamp(0, 3) as usize;
         return;
     }
     if point.1 >= 150 && point.1 <= 186 {
@@ -4756,10 +5311,10 @@ fn draw_market(screen: &Screen, m: &Market) {
     let width = screen.width();
     screen.fill(0, 93, width, screen.height() - 93, BLACK());
 
-    let tabs = ["Themes", "Fonts", "Apps"];
-    for t in 0..3 {
-        let x = 20 + t as i64 * 150;
-        let w = if t == 2 { 136 } else { 140 };
+    let tabs = ["Themes", "Fonts", "Apps", "Plugins"];
+    for t in 0..4 {
+        let x = 20 + t as i64 * 112;
+        let w = if t == 3 { 116 } else { 108 };
         let active = m.tab == t;
         screen.round_rect(x, 100, w, 42, 21, if active { RED_DIM() } else { SURFACE() });
         screen.text_centered(x + w / 2, 110, tabs[t], 2, if active { TEXT() } else { MUTED() });
@@ -4790,6 +5345,7 @@ fn draw_market(screen: &Screen, m: &Market) {
             (_, 2) => "LOCAL",
             (0, _) => "THEME",
             (1, _) => "FONT",
+            (3, _) => "PLUGIN",
             _ => "APP",
         };
         screen.text(40, y + 66, tag, 1, OUTLINE());
@@ -4797,6 +5353,9 @@ fn draw_market(screen: &Screen, m: &Market) {
         let active = item_active(&it);
         let (label, bg, fg) = if it.source == 2 {
             if it.installed { ("Installed", SURFACE_HI(), MUTED()) } else { ("Import", RED(), TEXT()) }
+        } else if it.source == 3 {
+            let on = it.index < m.plugin_count && m.plugins[it.index].enabled;
+            if on { ("On", RED_DIM(), GREEN()) } else { ("Off", SURFACE_HI(), MUTED()) }
         } else if it.kind == 2 {
             if it.installed { ("Installed", SURFACE_HI(), MUTED()) } else { ("Install", SURFACE_HI(), TEXT()) }
         } else if active {

@@ -126,6 +126,26 @@ public class MainActivity extends Activity
             }, "kimi-linux").start();
             return;
         }
+        if (intent.getStringExtra("api") != null) {
+            new Thread(new Runnable() {
+                @Override public void run() {
+                    long port = KimiBridge.nativePluginTest(null, 0);
+                    android.util.Log.i("KimiOS-guest", "plugin api port=" + port);
+                }
+            }, "kimi-plugin-api").start();
+            return;
+        }
+        final String pl = intent.getStringExtra("plugin");
+        if (pl != null) {
+            final int bg = "1".equals(intent.getStringExtra("bg")) ? 1 : 0;
+            new Thread(new Runnable() {
+                @Override public void run() {
+                    long r = KimiBridge.nativePluginTest(pl, bg);
+                    android.util.Log.i("KimiOS-guest", "plugin " + pl + " result=" + r);
+                }
+            }, "kimi-plugin").start();
+            return;
+        }
         final String g = intent.getStringExtra("guest");
         if (g == null) return;
         String a = intent.getStringExtra("arg");

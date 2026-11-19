@@ -1,0 +1,11 @@
+{
+  "id": "notes-service",
+  "name": "Notes Heartbeat",
+  "version": "1.0",
+  "type": "service",
+  "runtime": "python",
+  "entry": "service.py",
+  "args": [],
+  "permissions": ["fs", "notify", "settings"],
+  "description": "Example background service: every 60s writes heartbeat.txt and posts a periodic notification. Demonstrates type=service + notify + settings. Handles SIGTERM/SIGINT."
+}

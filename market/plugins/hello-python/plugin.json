@@ -1,0 +1,11 @@
+{
+  "id": "hello-python",
+  "name": "Hello Python",
+  "version": "1.0",
+  "type": "app",
+  "runtime": "python",
+  "entry": "main.py",
+  "args": [],
+  "permissions": ["fs", "notify"],
+  "description": "Example app plugin: notifies 'Hello from <name>', writes out.txt and prints /api/info via the bundled Python SDK. Degrades gracefully offline."
+}

@@ -24,6 +24,7 @@
 #include <time.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <sys/wait.h>
 #include <sys/socket.h>
 #include <netdb.h>
 #include <arpa/inet.h>
@@ -63,6 +64,7 @@ static jmethodID g_web_init_mid, g_web_buf_mid, g_web_render_mid, g_web_touch_mi
                  g_web_load_mid, g_web_back_mid, g_web_fwd_mid, g_web_reload_mid,
                  g_web_url_mid, g_web_title_mid, g_web_canback_mid, g_web_canfwd_mid,
                  g_web_viewport_mid, g_web_pause_mid, g_web_resume_mid;
+static jmethodID g_plugin_api_mid, g_plugin_manifest_mid, g_plugin_notify_mid;
 
 static JNIEnv *gui_env(int *attached) {
     *attached = 0;
@@ -215,6 +217,31 @@ static uint64_t call_str_out(jmethodID mid, char *out, uint64_t cap) {
         }
     }
     if (js) (*env)->DeleteLocalRef(env, js);
+    gui_done(env, attached);
+    return r;
+}
+// ()[B -> copy up to cap bytes into out; returns the number copied (0 when
+// empty). ERROR on exception/null. Used by SYS_PLUGIN_API notification drain.
+static uint64_t call_bytes_out(jmethodID mid, char *out, uint64_t cap) {
+    if (!g_bridge || !mid || !out || cap == 0) return ERROR;
+    int attached = 0; JNIEnv *env = gui_env(&attached);
+    if (!env) return ERROR;
+    uint64_t r = ERROR;
+    jbyteArray arr = (jbyteArray)(*env)->CallStaticObjectMethod(env, g_bridge, mid);
+    if (!(*env)->ExceptionCheck(env) && arr) {
+        uint64_t len = (uint64_t)(*env)->GetArrayLength(env, arr);
+        uint64_t n = len < cap ? len : cap;
+        if (n == 0) r = 0;
+        else {
+            jbyte *b = (*env)->GetByteArrayElements(env, arr, NULL);
+            if (b) {
+                memcpy(out, b, n);
+                (*env)->ReleaseByteArrayElements(env, arr, b, JNI_ABORT);
+                r = n;
+            }
+        }
+        (*env)->DeleteLocalRef(env, arr);
+    }
     gui_done(env, attached);
     return r;
 }
@@ -572,6 +599,141 @@ static uint64_t fs_run_path(const char *path, const char *arg) {
     LOG("run_path %s code=%d out=%s", exe, code, out);
     return (uint64_t)code;
 }
+// ===================== plugins (SYS_PLUGIN_API=53 / SYS_PLUGIN_RUN=54) =====================
+extern pid_t kimi_guest_spawn(const char *, const char *, char *const *, char *const *, int *, int *);
+
+// Start/query the localhost Plugin API server (Java KimiApiServer, lazily
+// bound to 127.0.0.1:0 on daemon threads). Returns the port, 0 if unavailable.
+static uint64_t plugin_api_port(void) {
+    uint64_t p = call_long(g_plugin_api_mid);
+    if (p == ERROR || p == 0 || p > 65535) return 0;
+    return p;
+}
+
+// nativePluginManifest(id) -> String[]{runtime, entry, argsJoined}; bounded
+// copies into the caller's buffers. 0 ok, ERROR when missing/invalid.
+static uint64_t plugin_manifest(const char *id, char *runtime, size_t rcap,
+                                char *entry, size_t ecap, char *args, size_t acap) {
+    if (!g_bridge || !g_plugin_manifest_mid) return ERROR;
+    int attached = 0; JNIEnv *env = gui_env(&attached);
+    if (!env) return ERROR;
+    uint64_t r = ERROR;
+    jstring js = (*env)->NewStringUTF(env, id);
+    if (js && !(*env)->ExceptionCheck(env)) {
+        jobjectArray arr = (jobjectArray)(*env)->CallStaticObjectMethod(env, g_bridge, g_plugin_manifest_mid, js);
+        if (!(*env)->ExceptionCheck(env) && arr && (*env)->GetArrayLength(env, arr) >= 3) {
+            char *dst[3] = { runtime, entry, args };
+            size_t caps[3] = { rcap, ecap, acap };
+            int ok = 1;
+            for (int i = 0; i < 3 && ok; i++) {
+                jstring s = (jstring)(*env)->GetObjectArrayElement(env, arr, i);
+                if (!s) { ok = 0; break; }
+                const char *u = (*env)->GetStringUTFChars(env, s, NULL);
+                if (!u) { (*env)->DeleteLocalRef(env, s); ok = 0; break; }
+                size_t len = strlen(u); if (len >= caps[i]) len = caps[i] - 1;
+                memcpy(dst[i], u, len); dst[i][len] = 0;
+                (*env)->ReleaseStringUTFChars(env, s, u);
+                (*env)->DeleteLocalRef(env, s);
+            }
+            if (ok) r = 0;
+        }
+        if (arr) (*env)->DeleteLocalRef(env, arr);
+    }
+    if (js) (*env)->DeleteLocalRef(env, js);
+    gui_done(env, attached);
+    return r;
+}
+
+// Background plugin drainer: log guest stdout to logcat until EOF, then reap
+// the child (wait4) so services never accumulate zombies. Detached pthread;
+// the guest keeps running independently of the GUI thread.
+typedef struct { int fd; pid_t pid; char id[64]; } plugin_bg_arg;
+static void *plugin_bg_drain(void *arg) {
+    plugin_bg_arg *a = (plugin_bg_arg *)arg;
+    char buf[4096];
+    ssize_t r;
+    while ((r = read(a->fd, buf, sizeof buf - 1)) > 0) {
+        buf[r] = 0;
+        __android_log_print(ANDROID_LOG_INFO, "KimiOS-plugin", "%s", buf);
+    }
+    close(a->fd);
+    int st = 0;
+    wait4(a->pid, &st, 0, NULL);
+    int code = WIFEXITED(st) ? WEXITSTATUS(st) : (128 + WTERMSIG(st));
+    LOG("plugin %s background exit=%d", a->id, code);
+    free(a);
+    return NULL;
+}
+
+// SYS_PLUGIN_RUN: run diskRoot/plugins/<id>/ per its plugin.json manifest.
+// argv: native -> [entry, args...]; python/node -> [sysroot interpreter,
+// entry, args...] (args tokenized by spaces). env = guest_env_build plus
+// KIMI_API_PORT/KIMI_PLUGIN_ID/KIMI_PLUGIN_DIR. background=1 forks without
+// waiting (returns 0); foreground captures output and returns the exit code.
+static uint64_t fs_plugin_run(const char *id, int background) {
+    if (!*id || !safe_rel(id) || strchr(id, '/') || strchr(id, '\\')) return ERROR;
+    char mpath[512];
+    snprintf(mpath, sizeof mpath, "%s/plugins/%s/plugin.json", diskRoot, id);
+    if (!file_exists(mpath)) return ERROR;
+    char runtime[32], entry[256], args[2048];
+    if (plugin_manifest(id, runtime, sizeof runtime, entry, sizeof entry, args, sizeof args) != 0) return ERROR;
+    if (!entry[0] || entry[0] == '/' || !safe_rel(entry)) return ERROR;
+    char pdir[512], exe[600];
+    snprintf(pdir, sizeof pdir, "%s/plugins/%s", diskRoot, id);
+    snprintf(exe, sizeof exe, "%s/%s", pdir, entry);
+    if (!file_exists(exe)) return ERROR;
+    char sysroot[512]; snprintf(sysroot, sizeof sysroot, "%s/alpine/root", diskRoot);
+    int is_py = strcmp(runtime, "python") == 0;
+    int is_node = strcmp(runtime, "node") == 0;
+    char interp[600];
+    if (is_py || is_node) {
+        snprintf(interp, sizeof interp, "%s/usr/bin/%s", sysroot, is_py ? "python3" : "node");
+        if (!file_exists(interp)) return ERROR;
+    }
+    static char tokbuf[2048];
+    char *argv[64]; int n = 0;
+    if (is_py || is_node) { argv[n++] = interp; argv[n++] = exe; }
+    else argv[n++] = exe;
+    if (args[0]) {
+        strncpy(tokbuf, args, sizeof tokbuf - 1); tokbuf[sizeof tokbuf - 1] = 0;
+        char *save = NULL;
+        for (char *t = strtok_r(tokbuf, " \t", &save); t && n < 60; t = strtok_r(NULL, " \t", &save))
+            if (*t) argv[n++] = t;
+    }
+    argv[n] = NULL;
+    GuestEnv ge;
+    char kport[48], kpid[300], kdir[600];
+    char *envp[16];
+    int e = guest_env_build(sysroot, &ge, envp, is_py);
+    uint64_t port = plugin_api_port();
+    snprintf(kport, sizeof kport, "KIMI_API_PORT=%llu", (unsigned long long)port);
+    snprintf(kpid, sizeof kpid, "KIMI_PLUGIN_ID=%s", id);
+    snprintf(kdir, sizeof kdir, "KIMI_PLUGIN_DIR=%s", pdir);
+    envp[e++] = kport; envp[e++] = kpid; envp[e++] = kdir;
+    envp[e] = NULL;
+    if (background) {
+        int in = -1, of = -1;
+        pid_t pid = kimi_guest_spawn(exe, sysroot, argv, envp, &in, &of);
+        if (pid < 0) return ERROR;
+        if (in >= 0) close(in);
+        plugin_bg_arg *a = malloc(sizeof(plugin_bg_arg));
+        if (a) {
+            a->fd = of; a->pid = pid;
+            snprintf(a->id, sizeof a->id, "%s", id);
+            pthread_t th;
+            if (pthread_create(&th, NULL, plugin_bg_drain, a) == 0) pthread_detach(th);
+            else { close(of); free(a); }
+        } else close(of);
+        LOG("plugin %s background pid=%d", id, (int)pid);
+        return 0;
+    }
+    static char out[8192];
+    size_t olen = 0; int code = 0;
+    if (kimi_guest_capture(exe, sysroot, argv, envp, out, sizeof out, &olen, &code) < 0) return ERROR;
+    LOG("plugin %s code=%d out=%s", id, code, out);
+    return (uint64_t)code;
+}
+
 // SYS_COPY: byte-copy src -> dst, both /disk/... paths. Creates the dst parent
 // directory. Returns 0 ok, ERROR on failure (partial dst removed).
 static uint64_t fs_copy(const char *src, const char *dst) {
@@ -750,6 +912,22 @@ uint64_t kimi_host_syscall(uint64_t n, uint64_t a0, uint64_t a1, uint64_t a2, ui
         str_arg(a2, a3, dst, sizeof dst);
         return fs_copy(src, dst);
     }
+    case 53: { // SYS_PLUGIN_API: a0=0 start/query API server -> port;
+               // a0=1 drain notifications into buf=a1 (cap=a2) as
+               // NUL-terminated title\0body\0 strings -> bytes written.
+        if (a0 == 0) {
+            uint64_t p = call_long(g_plugin_api_mid);
+            if (p == ERROR || p == 0 || p > 65535) return ERROR;
+            return p;
+        }
+        if (a0 == 1) return call_bytes_out(g_plugin_notify_mid, (char *)a1, a2);
+        return ERROR;
+    }
+    case 54: { // SYS_PLUGIN_RUN: a0=id ptr, a1=len, a2=background (0 wait, 1 detach)
+        char id[128];
+        str_arg(a0, a1, id, sizeof id);
+        return fs_plugin_run(id, a2 != 0);
+    }
     case 23: { if (a1 < 1) return ERROR; uint64_t *o = (uint64_t *)a0; o[0] = 1; o[1] = 0; o[2] = 2; o[3] = 0; return 1; }
     case 12: return 2048;
     case 22: return 0;
@@ -810,6 +988,9 @@ Java_com_kimios_libos_KimiBridge_nativeInit(JNIEnv *env, jclass cls, jstring fil
         g_web_viewport_mid = (*env)->GetStaticMethodID(env, g_bridge, "nativeWebViewport",    "(II)J");
         g_web_pause_mid    = (*env)->GetStaticMethodID(env, g_bridge, "nativeWebPause",       "()J");
         g_web_resume_mid   = (*env)->GetStaticMethodID(env, g_bridge, "nativeWebResume",      "()J");
+        g_plugin_api_mid      = (*env)->GetStaticMethodID(env, g_bridge, "nativePluginApi",           "()J");
+        g_plugin_manifest_mid = (*env)->GetStaticMethodID(env, g_bridge, "nativePluginManifest",    "(Ljava/lang/String;)[Ljava/lang/String;");
+        g_plugin_notify_mid   = (*env)->GetStaticMethodID(env, g_bridge, "nativePluginNotifications","()[B");
         jmethodID setroot = (*env)->GetStaticMethodID(env, g_bridge, "setDiskRoot", "(Ljava/lang/String;)V");
         if (setroot) {
             jstring jr = (*env)->NewStringUTF(env, diskRoot);
@@ -929,4 +1110,20 @@ Java_com_kimios_libos_KimiBridge_nativeOpenApp(JNIEnv *env, jclass cls, jint kin
     (void)env; (void)cls;
     kimi_request_app((uint64_t)kind);
     return 0;
+}
+
+// Test/bridge entry for SYS_PLUGIN_API/RUN (intent extras "api"/"plugin").
+JNIEXPORT jlong JNICALL
+Java_com_kimios_libos_KimiBridge_nativePluginTest(JNIEnv *env, jclass cls, jstring jid, jint background) {
+    (void)cls;
+    if (!jid) {
+        uint64_t r = kimi_host_syscall(53, 0, 0, 0, 0, 0);
+        LOG("plugin api port=%llu", (unsigned long long)r);
+        return (jlong)r;
+    }
+    const char *id = (*env)->GetStringUTFChars(env, jid, NULL);
+    uint64_t r = kimi_host_syscall(54, (uint64_t)(uintptr_t)id, strlen(id), background ? 1 : 0, 0, 0);
+    LOG("plugin run %s bg=%d result=%llu", id, (int)background, (unsigned long long)r);
+    (*env)->ReleaseStringUTFChars(env, jid, id);
+    return (jlong)r;
 }

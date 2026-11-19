@@ -11,9 +11,9 @@
 //! futex, epoll, dlopen, sockets, TLS) and are marked not-runnable in the repo.
 
 use crate::{
-    close, copy_file, create, mkdir, net_resolve, net_status, net_tcp_close, net_tcp_connect,
-    net_tcp_recv, net_tcp_send, open, print, print_bytes, print_u64, read_file, spawn, stat, wait,
-    write_file,
+    close, copy_file, create, listdir, mkdir, net_resolve, net_status, net_tcp_close,
+    net_tcp_connect, net_tcp_recv, net_tcp_send, open, print, print_bytes, print_u64, read_file,
+    spawn, stat, wait, write_file,
 };
 
 const DEFAULT_BASE: &str = "https://raw.githubusercontent.com/Kimi-syl/kimios/main/market";
@@ -599,7 +599,7 @@ pub fn resolve_host(host: &str) -> Option<u32> {
 // -- local import (.kpkg / .kfont / .ktheme) ---------------------------------
 
 /// Outcome of validating + installing a local package file. `kind` uses the
-/// Marketplace encoding: 0 theme, 1 font, 2 app.
+/// Marketplace encoding: 0 theme, 1 font, 2 app, 3 plugin.
 pub struct LocalImport {
     pub ok: bool,
     pub kind: u8,
@@ -725,11 +725,16 @@ fn count_hex6(data: &[u8]) -> usize {
     count
 }
 
-/// Validate a local `.kpkg` / `.kfont` / `.ktheme` file and install it:
+/// Validate a local `.kpkg` / `.kfont` / `.ktheme` / `.kplugin` and install it:
 /// fonts -> /disk/fonts/<name>.kfont, themes -> /disk/themes/<name>.theme,
-/// apps -> /disk/bin/<name>. A `.kpkg` is a repo-style manifest
-/// ({"name","kind","file"}) whose asset is a sibling path or an HTTP(S) URL.
+/// apps -> /disk/bin/<name>, plugins -> /disk/plugins/<id>. A `.kpkg` is a
+/// repo-style manifest ({"name","kind","file"}) whose asset is a sibling path
+/// or an HTTP(S) URL. A `.kplugin` is a directory holding plugin.json, or a
+/// single manifest file staged next to its entry asset.
 pub fn import_local(path: &str) -> LocalImport {
+    if is_plugin_dir(path) {
+        return import_plugin(path);
+    }
     let Some((_, size)) = stat(path) else {
         return LocalImport::fail("File not found");
     };
@@ -747,6 +752,10 @@ pub fn import_local(path: &str) -> LocalImport {
         return LocalImport::fail("Cannot read file");
     }
     let data = &head[..n];
+
+    if ends_ci(path, ".kplugin") {
+        return import_plugin_file(path, data);
+    }
 
     if &data[..4] == b"PK\x03\x04" {
         return LocalImport::fail("Zip archives not supported yet");
@@ -880,5 +889,214 @@ pub fn import_local(path: &str) -> LocalImport {
         return r;
     }
 
-    LocalImport::fail("Unknown format (.kpkg/.kfont/.ktheme)")
+    LocalImport::fail("Unknown format (.kpkg/.kfont/.ktheme/.kplugin)")
+}
+
+// -- plugin import (.kplugin) -----------------------------------------------
+
+/// True if `path` is a directory holding a `plugin.json` manifest.
+pub fn is_plugin_dir(path: &str) -> bool {
+    let mut pb = [0u8; 160];
+    let mut n = 0usize;
+    for piece in [path.as_bytes(), b"/plugin.json"] {
+        if n + piece.len() > pb.len() {
+            return false;
+        }
+        pb[n..n + piece.len()].copy_from_slice(piece);
+        n += piece.len();
+    }
+    let Ok(p) = core::str::from_utf8(&pb[..n]) else { return false };
+    stat(p).is_some()
+}
+
+/// Validate a `.kplugin` source directory's manifest and install it through
+/// the plugin manager. `kind` is 3 (plugin). The manifest must carry an `id`.
+pub fn import_plugin(src_dir: &str) -> LocalImport {
+    let mut r = LocalImport {
+        ok: false, kind: 3,
+        name: [0; 48], name_len: 0,
+        dest: [0; 96], dest_len: 0,
+        msg: [0; 64], msg_len: 0,
+    };
+    if !is_plugin_dir(src_dir) {
+        r.set_msg("No plugin.json in directory");
+        return r;
+    }
+    let mut pb = [0u8; 160];
+    let mut n = 0usize;
+    for piece in [src_dir.as_bytes(), b"/plugin.json"] {
+        if n + piece.len() > pb.len() {
+            r.set_msg("Path too long");
+            return r;
+        }
+        pb[n..n + piece.len()].copy_from_slice(piece);
+        n += piece.len();
+    }
+    let Ok(mpath) = core::str::from_utf8(&pb[..n]) else {
+        r.set_msg("Bad path");
+        return r;
+    };
+    let Some(h) = open(mpath) else {
+        r.set_msg("Cannot read plugin.json");
+        return r;
+    };
+    let mut buf = [0u8; 2048];
+    let got = read_file(h, 0, &mut buf);
+    close(h);
+    let data = &buf[..got];
+    let Some(id) = json_str(data, "id") else {
+        r.set_msg("Manifest missing \"id\"");
+        return r;
+    };
+    if id.is_empty() || id.contains(&b'/') || id.len() > 40 {
+        r.set_msg("Bad plugin id");
+        return r;
+    }
+    r.set_name(id);
+    if !r.set_dest("/disk/plugins/", id, "") {
+        return r;
+    }
+    if !crate::kplugin::install(src_dir) {
+        r.set_msg("Plugin install failed");
+        return r;
+    }
+    r.ok = true;
+    r.set_msg("Plugin installed");
+    r
+}
+
+/// Stage a single-file `.kplugin` manifest (plus its sibling entry asset) into
+/// a directory and install it. The manifest is JSON with an `id` and `entry`.
+fn import_plugin_file(path: &str, data: &[u8]) -> LocalImport {
+    let mut r = LocalImport {
+        ok: false, kind: 3,
+        name: [0; 48], name_len: 0,
+        dest: [0; 96], dest_len: 0,
+        msg: [0; 64], msg_len: 0,
+    };
+    if data.first() != Some(&b'{') {
+        r.set_msg("Plugin manifest must be JSON");
+        return r;
+    }
+    let Some(id) = json_str(data, "id") else {
+        r.set_msg("Manifest missing \"id\"");
+        return r;
+    };
+    if id.is_empty() || id.contains(&b'/') || id.len() > 40 {
+        r.set_msg("Bad plugin id");
+        return r;
+    }
+    let mut stage = [0u8; 96];
+    let mut sn = 0usize;
+    for piece in [b"/disk/import/.stage-", id] {
+        if sn + piece.len() > stage.len() {
+            r.set_msg("Plugin id too long");
+            return r;
+        }
+        stage[sn..sn + piece.len()].copy_from_slice(piece);
+        sn += piece.len();
+    }
+    let Ok(stage_dir) = core::str::from_utf8(&stage[..sn]) else {
+        r.set_msg("Bad plugin id");
+        return r;
+    };
+    let _ = mkdir("/disk/import");
+    if !mkdir(stage_dir) {
+        r.set_msg("Cannot stage plugin");
+        return r;
+    }
+    let mut mp = [0u8; 128];
+    let mn = {
+        let mut n = 0usize;
+        for piece in [stage_dir.as_bytes(), b"/plugin.json"] {
+            if n + piece.len() > mp.len() {
+                r.set_msg("Path too long");
+                return r;
+            }
+            mp[n..n + piece.len()].copy_from_slice(piece);
+            n += piece.len();
+        }
+        n
+    };
+    let Ok(manifest_dest) = core::str::from_utf8(&mp[..mn]) else {
+        r.set_msg("Bad path");
+        return r;
+    };
+    let Some(h) = create(manifest_dest) else {
+        r.set_msg("Cannot write manifest");
+        return r;
+    };
+    write_file(h, 0, data);
+    close(h);
+    if let Some(entry) = json_str(data, "entry") {
+        if !entry.is_empty() && !entry.contains(&b'/') && entry.len() <= 48 {
+            let mut src = [0u8; 160];
+            if let Some(sp) = join3(dirname(path), entry, "", &mut src) {
+                if stat(sp).is_some() {
+                    let mut dst = [0u8; 160];
+                    let mut dn = 0usize;
+                    let mut ok = true;
+                    for piece in [stage_dir.as_bytes(), b"/", entry] {
+                        if dn + piece.len() > dst.len() {
+                            ok = false;
+                            break;
+                        }
+                        dst[dn..dn + piece.len()].copy_from_slice(piece);
+                        dn += piece.len();
+                    }
+                    if ok {
+                        if let Ok(dp) = core::str::from_utf8(&dst[..dn]) {
+                            let _ = copy_file(sp, dp);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    import_plugin(stage_dir)
+}
+
+/// Scan `/disk/import` for installable plugin sources: directories containing
+/// `plugin.json`, or single `.kplugin` manifest files. Invokes `f` with each
+/// source path (directory paths keep no trailing slash). Returns the count.
+pub fn scan_plugin_imports(mut f: impl FnMut(&str)) -> usize {
+    let _ = mkdir("/disk/import");
+    let mut buffer = [0u8; 1024];
+    let Some(n) = listdir("/disk/import", &mut buffer) else { return 0 };
+    let mut count = 0usize;
+    for name in buffer[..n].split(|&b| b == 0) {
+        if name.is_empty() || name.first() == Some(&b'.') {
+            continue;
+        }
+        let is_dir = name.last() == Some(&b'/');
+        let base = if is_dir { &name[..name.len() - 1] } else { name };
+        if base.is_empty() || base.len() > 64 {
+            continue;
+        }
+        let mut pb = [0u8; 96];
+        let mut pn = 0usize;
+        let mut too_long = false;
+        for piece in [b"/disk/import/", base] {
+            if pn + piece.len() > pb.len() {
+                too_long = true;
+                break;
+            }
+            pb[pn..pn + piece.len()].copy_from_slice(piece);
+            pn += piece.len();
+        }
+        if too_long {
+            continue;
+        }
+        let Ok(path) = core::str::from_utf8(&pb[..pn]) else { continue };
+        let hit = if is_dir {
+            is_plugin_dir(path)
+        } else {
+            ends_ci(path, ".kplugin")
+        };
+        if hit {
+            f(path);
+            count += 1;
+        }
+    }
+    count
 }

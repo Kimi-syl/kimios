@@ -40,6 +40,11 @@ public final class KimiBridge {
     /** Test hook: open an app by AppKind discriminant (0=Music..14=Monitor). */
     public static native int nativeOpenApp(int kind);
 
+    /** Test hook (SYS_PLUGIN_API/RUN): id=null starts/queries the Plugin API
+     *  server and returns its port; otherwise runs plugin id (background=1
+     *  detaches). Returns the syscall result (ERROR = -1). */
+    public static native long nativePluginTest(String id, int background);
+
     // Host services for GUI-thread syscalls. Set by MainActivity on the Java
     // side so the static methods below never need a Context passed through C.
     private static volatile Context appContext;
@@ -453,6 +458,57 @@ public final class KimiBridge {
     private static volatile String diskRoot;
     /** Set from C nativeInit: absolute sandbox disk root (<filesDir>/disk). */
     public static void setDiskRoot(String root) { diskRoot = root; }
+    static String getDiskRoot() { return diskRoot; }
+
+    // ---- SYS_PLUGIN_API=53 / SYS_PLUGIN_RUN=54: Plugin API server + manifest
+    // parsing. Called from C on the GUI pthread via cached method IDs. ----
+
+    /** Called from C (SYS_PLUGIN_API a0=0): lazily start the localhost Plugin
+     *  API server (127.0.0.1, ephemeral port). Returns the port, -1 on error. */
+    public static long nativePluginApi() {
+        return KimiApiServer.start();
+    }
+
+    /** Called from C (SYS_PLUGIN_API a0=1): drain pending plugin notifications
+     *  as flat NUL-terminated UTF-8 strings (title\0body\0 pairs). */
+    public static byte[] nativePluginNotifications() {
+        return KimiApiServer.drainNotifications();
+    }
+
+    /** Called from C (SYS_PLUGIN_RUN): parse plugins/<id>/plugin.json into
+     *  String[]{runtime, entry, argsJoined} (args tokenized by spaces later in
+     *  C). Null when the manifest is missing/invalid. */
+    public static String[] nativePluginManifest(String id) {
+        String root = diskRoot;
+        if (root == null || id == null || id.isEmpty()) return null;
+        if (id.contains("..") || id.indexOf('/') >= 0 || id.indexOf('\\') >= 0) return null;
+        try {
+            java.io.File f = new java.io.File(root + "/plugins/" + id + "/plugin.json");
+            if (!f.isFile() || f.length() > 65536) return null;
+            java.io.FileInputStream in = new java.io.FileInputStream(f);
+            java.io.ByteArrayOutputStream bos = new java.io.ByteArrayOutputStream();
+            try {
+                byte[] buf = new byte[8192];
+                int n;
+                while ((n = in.read(buf)) > 0) bos.write(buf, 0, n);
+            } finally { in.close(); }
+            org.json.JSONObject j = new org.json.JSONObject(bos.toString("UTF-8"));
+            String entry = j.optString("entry", "");
+            if (entry.isEmpty()) return null;
+            StringBuilder sb = new StringBuilder();
+            org.json.JSONArray args = j.optJSONArray("args");
+            if (args != null) {
+                for (int i = 0; i < args.length(); i++) {
+                    if (i > 0) sb.append(' ');
+                    sb.append(args.optString(i, ""));
+                }
+            }
+            return new String[] {j.optString("runtime", "native"), entry, sb.toString()};
+        } catch (Exception e) {
+            android.util.Log.e("KimiOS", "pluginManifest failed: " + e);
+            return null;
+        }
+    }
 
     private static String firstLine(String path) {
         try (java.io.BufferedReader r = new java.io.BufferedReader(new java.io.FileReader(path))) {

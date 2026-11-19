@@ -31,6 +31,7 @@ fn appkind_from_u64(v: u64) -> Option<AppKind> {
         6 => AppKind::Photos, 7 => AppKind::Files, 8 => AppKind::Weather,
         9 => AppKind::Terminal, 10 => AppKind::Browser, 11 => AppKind::Apk,
         12 => AppKind::Dvm, 13 => AppKind::Market, 14 => AppKind::Monitor,
+        15 => AppKind::Plugins,
         _ => return None,
     })
 }
@@ -87,6 +88,7 @@ enum AppKind {
     Dvm,
     Market,
     Monitor,
+    Plugins,
 }
 
 impl AppKind {
@@ -111,6 +113,7 @@ impl AppKind {
             12 => AppKind::Dvm,
             13 => AppKind::Market,
             14 => AppKind::Monitor,
+            15 => AppKind::Plugins,
             _ => return None,
         })
     }
@@ -153,7 +156,7 @@ impl Folder {
 #[derive(Clone, Copy)]
 struct Layout {
     grid: [Slot; 9],
-    grid2: [Slot; 5],
+    grid2: [Slot; 6],
     dock: [Slot; 4],
     folders: [Folder; 4],
     folder_count: usize,
@@ -179,6 +182,7 @@ impl Layout {
                 Slot::App(AppKind::Dvm),
                 Slot::App(AppKind::Market),
                 Slot::App(AppKind::Monitor),
+                Slot::App(AppKind::Plugins),
             ],
             dock: [
                 Slot::App(AppKind::Terminal),
@@ -249,7 +253,7 @@ impl Layout {
     }
 
     fn first_empty(&self, page: usize) -> Option<usize> {
-        self.page(page).iter().position(|s| *s == Slot::Empty)
+        self.page(page.min(1)).iter().position(|s| *s == Slot::Empty)
     }
 }
 
@@ -453,7 +457,7 @@ fn load_layout() -> Layout {
             }
             i += 1;
         }
-        if !valid || i != slots.len() {
+        if !valid || i > slots.len() {
             valid = false;
             break;
         }
@@ -731,6 +735,7 @@ fn gui_run() -> ! {
     INSTR.store(k::instr_map().unwrap_or(0), Ordering::Relaxed);
     while k::input_poll().is_some() {}
     let mut ui = Ui::new(screen.width(), screen.height());
+    k::kplugin::start_services();
     let mut last_minute = u64::MAX;
     let mut last_second = u64::MAX;
     let mut dirty = true;
@@ -961,6 +966,96 @@ pub extern "C" fn kimi_test_import(path: u64) -> u64 {
     (r.ok as u64) | ((r.kind as u64) << 1)
 }
 
+/// Host-only test hook: list installed plugins as "id ptype enabled\n" lines
+/// into `out`; returns the count.
+#[no_mangle]
+#[cfg(not(target_os = "none"))]
+pub extern "C" fn kimi_test_plugin_list(out: u64) -> u64 {
+    let mut infos = [k::kplugin::PluginInfo {
+        id: [0; 48], id_len: 0, name: [0; 48], name_len: 0,
+        version: [0; 16], version_len: 0, ptype: 0, runtime: 0, enabled: false,
+    }; 32];
+    let n = k::kplugin::list(&mut infos);
+    let buf = unsafe { core::slice::from_raw_parts_mut(out as *mut u8, 4096) };
+    let mut used = 0usize;
+    for i in 0..n {
+        let p = &infos[i];
+        let mut line = [0u8; 64];
+        let mut ln = 0usize;
+        let id = p.id_str().as_bytes();
+        let take = id.len().min(48);
+        line[..take].copy_from_slice(&id[..take]);
+        ln += take;
+        line[ln] = b' '; ln += 1;
+        line[ln] = b'0' + p.ptype; ln += 1;
+        line[ln] = b' '; ln += 1;
+        line[ln] = if p.enabled { b'1' } else { b'0' }; ln += 1;
+        line[ln] = b'\n'; ln += 1;
+        let copy = ln.min(buf.len() - used);
+        buf[used..used + copy].copy_from_slice(&line[..copy]);
+        used += copy;
+    }
+    n as u64
+}
+
+/// Host-only test hook: run an app plugin by id. Returns exit_code + 1, or 0
+/// when the run is unavailable.
+#[no_mangle]
+#[cfg(not(target_os = "none"))]
+pub extern "C" fn kimi_test_plugin_run(id: u64) -> u64 {
+    unsafe fn cstr(p: *const u8) -> &'static str {
+        let mut n = 0;
+        while *p.add(n) != 0 { n += 1; }
+        core::str::from_utf8(core::slice::from_raw_parts(p, n)).unwrap_or("")
+    }
+    let id = unsafe { cstr(id as *const u8) };
+    match k::kplugin::run(id) {
+        Some(code) => code + 1,
+        None => 0,
+    }
+}
+
+/// Host-only test hook: enable/disable a plugin (1 = success).
+#[no_mangle]
+#[cfg(not(target_os = "none"))]
+pub extern "C" fn kimi_test_plugin_enable(id: u64, on: u64) -> u64 {
+    unsafe fn cstr(p: *const u8) -> &'static str {
+        let mut n = 0;
+        while *p.add(n) != 0 { n += 1; }
+        core::str::from_utf8(core::slice::from_raw_parts(p, n)).unwrap_or("")
+    }
+    let id = unsafe { cstr(id as *const u8) };
+    k::kplugin::set_enabled(id, on != 0) as u64
+}
+
+/// Host-only test hook: uninstall a plugin (1 = success).
+#[no_mangle]
+#[cfg(not(target_os = "none"))]
+pub extern "C" fn kimi_test_plugin_uninstall(id: u64) -> u64 {
+    unsafe fn cstr(p: *const u8) -> &'static str {
+        let mut n = 0;
+        while *p.add(n) != 0 { n += 1; }
+        core::str::from_utf8(core::slice::from_raw_parts(p, n)).unwrap_or("")
+    }
+    let id = unsafe { cstr(id as *const u8) };
+    k::kplugin::uninstall(id) as u64
+}
+
+/// Host-only test hook: Plugin API server port (0 = unavailable).
+#[no_mangle]
+#[cfg(not(target_os = "none"))]
+pub extern "C" fn kimi_test_plugin_api() -> u64 {
+    k::kplugin::api_port() as u64
+}
+
+/// Host-only test hook: start enabled service plugins; returns 1.
+#[no_mangle]
+#[cfg(not(target_os = "none"))]
+pub extern "C" fn kimi_test_plugin_services() -> u64 {
+    k::kplugin::start_services();
+    1
+}
+
 /// Host-only test hook: parse canned weather JSON (mode 1 HKO rhrread,
 /// 2 Open-Meteo current, 3 HKO fnd); results written to out[0..8].
 #[no_mangle]
@@ -1114,7 +1209,7 @@ fn handle(screen: &Screen, ui: &mut Ui, event: k::InputEvent, clock: [u64; 7]) -
                             if dx * dx + dy * dy < 24 * 24 {
                                 tapped(screen, ui, ui.touch, clock);
                             } else if ui.scene == Scene::Home && dx.abs() > 60 && dx.abs() > dy.abs() * 2 {
-                                let next = if dx < 0 { 1 } else { 0 };
+                                let next = if dx < 0 { (ui.home_page + 1).min(2) } else { ui.home_page.saturating_sub(1) };
                                 if ui.searching {
                                     ui.searching = false;
                                     ui.osk = false;
@@ -1124,6 +1219,11 @@ fn handle(screen: &Screen, ui: &mut Ui, event: k::InputEvent, clock: [u64; 7]) -
                                     render(screen, ui, clock);
                                 } else if ui.home_page != next && ui.drag.is_none() {
                                     ui.home_page = next;
+                                    if next == 2 {
+                                        apps::launcher_refresh(&mut ui.apps);
+                                        ui.edit_mode = false;
+                                        ui.folder_view = None;
+                                    }
                                     ui.paint_bg = true;
                                     render(screen, ui, clock);
                                 }
@@ -1492,12 +1592,26 @@ fn tapped(screen: &Screen, ui: &mut Ui, point: (i64, i64), clock: [u64; 7]) {
             if let Some(page) = home_page_hit(screen, point) {
                 if ui.home_page != page {
                     ui.home_page = page;
+                    if page == 2 {
+                        apps::launcher_refresh(&mut ui.apps);
+                        ui.edit_mode = false;
+                        ui.folder_view = None;
+                    }
                     ui.paint_bg = true;
                     render(screen, ui, clock);
                 }
             } else if music_hit(screen, point) {
                 apps::home_music_toggle(&mut ui.apps);
                 render(screen, ui, clock);
+            } else if ui.home_page == 2 {
+                if let Some(tile) = plugin_home_hit(screen, ui, point) {
+                    if tile == 0 {
+                        open_app(screen, ui, AppKind::Plugins, clock);
+                    } else {
+                        apps::launcher_run(&mut ui.apps, tile - 1);
+                        render(screen, ui, clock);
+                    }
+                }
             } else if let Some((_, slot)) = home_slot_hit(screen, ui, point) {
                 match slot {
                     Slot::App(app) => open_app(screen, ui, app, clock),
@@ -1860,6 +1974,9 @@ fn close_app(screen: &Screen, ui: &mut Ui, clock: [u64; 7]) {
     ui.osk = false;
     ui.shift = false;
     ui.drag = None;
+    if ui.home_page == 2 {
+        apps::launcher_refresh(&mut ui.apps);
+    }
     ui.paint_bg = true;
     render(screen, ui, clock);
 }
@@ -1907,6 +2024,9 @@ fn go_home(screen: &Screen, ui: &mut Ui, clock: [u64; 7]) {
         }
     }
     ui.scene = Scene::Home;
+    if ui.home_page == 2 {
+        apps::launcher_refresh(&mut ui.apps);
+    }
     ui.paint_bg = true;
     render(screen, ui, clock);
 }
@@ -2266,25 +2386,49 @@ fn draw_home(
     let drag_from = ui.drag.map(|d| d.from);
     let capturing = DRAG_BG_CAPTURE.load(Ordering::Relaxed) == 1;
     let drag_hover = if capturing { None } else { ui.drag.and_then(|d| d.hover) };
-    for (index, slot) in ui.layout.page(ui.home_page).iter().enumerate() {
-        let loc = if ui.home_page == 1 { Loc::Grid2(index) } else { Loc::Grid(index) };
-        if drag_from == Some(loc) {
-            continue;
+    if ui.home_page == 2 {
+        let count = apps::launcher_count(&ui.apps);
+        let pressed_tile = ui.press.and_then(|p| plugin_home_hit(screen, ui, p));
+        for index in 0..12usize {
+            if index > 0 && index - 1 >= count {
+                continue;
+            }
+            let (cx, cy) = grid_center(width, height, index);
+            let is_pressed = pressed_tile == Some(index);
+            draw_app_icon(screen, AppKind::Plugins, cx, cy + y_offset, icon, is_pressed);
+            let label = if index == 0 {
+                "Manage"
+            } else {
+                let name = apps::launcher_name(&ui.apps, index - 1);
+                &name[..name.len().min(10)]
+            };
+            screen.text_centered(cx, cy + icon / 2 + 12 + y_offset, label, 1, MUTED());
         }
-        let (cx, cy) = grid_center(width, height, index);
-        let cx = cx + jiggle;
-        draw_slot_icon(screen, ui, *slot, cx, cy + y_offset, icon, pressed == Some(*slot));
-        if drag_hover == Some(loc) {
-            screen.ring(cx, cy + y_offset, icon / 2 + 8, 3, RED());
+        if count == 0 {
+            let (_, cy) = grid_center(width, height, 5);
+            screen.text_centered(width / 2, cy + y_offset, "No plugin apps yet", 2, MUTED());
         }
-        let label = slot_label(ui, *slot);
-        screen.text_centered(cx, cy + icon / 2 + 12 + y_offset, label, 1, MUTED());
+    } else {
+        for (index, slot) in ui.layout.page(ui.home_page).iter().enumerate() {
+            let loc = if ui.home_page == 1 { Loc::Grid2(index) } else { Loc::Grid(index) };
+            if drag_from == Some(loc) {
+                continue;
+            }
+            let (cx, cy) = grid_center(width, height, index);
+            let cx = cx + jiggle;
+            draw_slot_icon(screen, ui, *slot, cx, cy + y_offset, icon, pressed == Some(*slot));
+            if drag_hover == Some(loc) {
+                screen.ring(cx, cy + y_offset, icon / 2 + 8, 3, RED());
+            }
+            let label = slot_label(ui, *slot);
+            screen.text_centered(cx, cy + icon / 2 + 12 + y_offset, label, 1, MUTED());
+        }
     }
 
-    // Page indicator (two pages).
+    // Page indicator (three pages).
     let dots_y = height - 152 + y_offset;
-    for page in 0..2usize {
-        let dx = width / 2 - 12 + page as i64 * 24;
+    for page in 0..3usize {
+        let dx = width / 2 - 24 + page as i64 * 24;
         if page == ui.home_page {
             screen.round_rect(dx - 10, dots_y - 3, 20, 6, 3, RED());
         } else {
@@ -2607,6 +2751,12 @@ fn draw_glyph(screen: &Screen, app: AppKind, cx: i64, cy: i64, size: i64, color:
                 screen.round_rect(bx, base - h, s / 7, *h, s / 20, color);
             }
             screen.fill(cx - s / 3, base + 2, s * 2 / 3, 2, color);
+        }
+        AppKind::Plugins => {
+            screen.round_rect(cx - s / 3, cy - s / 6, s * 2 / 3, s / 2, s / 12, color);
+            screen.circle(cx, cy - s / 6, s / 8, color);
+            screen.circle(cx + s / 3, cy + s / 12, s / 8, color);
+            screen.circle(cx - s / 3, cy + s / 12, s / 8, SURFACE_HI());
         }
     }
 }
@@ -3082,10 +3232,31 @@ fn home_page_hit(screen: &Screen, point: (i64, i64)) -> Option<usize> {
     if (point.1 - dots_y).abs() > 16 {
         return None;
     }
-    for page in 0..2usize {
-        let dx = width / 2 - 12 + page as i64 * 24;
+    for page in 0..3usize {
+        let dx = width / 2 - 24 + page as i64 * 24;
         if (point.0 - dx).abs() <= 14 {
             return Some(page);
+        }
+    }
+    None
+}
+
+fn plugin_home_hit(screen: &Screen, ui: &Ui, point: (i64, i64)) -> Option<usize> {
+    if ui.home_page != 2 {
+        return None;
+    }
+    let width = screen.width();
+    let height = screen.logical_height();
+    let (_, _, icon) = grid_metrics(height);
+    let reach = icon / 2 + 10;
+    let count = apps::launcher_count(&ui.apps);
+    for index in 0..12usize {
+        if index > 0 && index - 1 >= count {
+            continue;
+        }
+        let (cx, cy) = grid_center(width, height, index);
+        if (point.0 - cx).abs() <= reach && (point.1 - cy).abs() <= reach {
+            return Some(index);
         }
     }
     None
@@ -3098,6 +3269,9 @@ fn home_slot_hit(screen: &Screen, ui: &Ui, point: (i64, i64)) -> Option<(Loc, Sl
         if let Some(m) = folder_member_hit(screen, ui, f, point) {
             return Some((Loc::Folder(f, m), Slot::App(ui.layout.folders[f].members[m])));
         }
+    }
+    if ui.home_page == 2 {
+        return None;
     }
     let (_, _, icon) = grid_metrics(height);
     let reach = icon / 2 + 10;
@@ -3206,6 +3380,7 @@ impl AppKind {
             AppKind::Dvm => "DEX",
             AppKind::Market => "Market",
             AppKind::Monitor => "Monitor",
+            AppKind::Plugins => "Plugins",
         }
     }
 }

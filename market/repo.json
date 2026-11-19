@@ -119,6 +119,34 @@
       "kind": "app",
       "file": "bin/fib",
       "run": true
+    },
+    {
+      "name": "hello-python",
+      "desc": "Plugin (app/python): notify + write out.txt + /api/info via bundled SDK",
+      "kind": "plugin",
+      "file": "plugins/hello-python",
+      "run": false
+    },
+    {
+      "name": "sysinfo-app",
+      "desc": "Plugin (app/python): system report from /api/info + /api/fs/list",
+      "kind": "plugin",
+      "file": "plugins/sysinfo-app",
+      "run": false
+    },
+    {
+      "name": "notes-service",
+      "desc": "Plugin (service/python): 60s heartbeat file + throttled notifications",
+      "kind": "plugin",
+      "file": "plugins/notes-service",
+      "run": false
+    },
+    {
+      "name": "nord-ui",
+      "desc": "Plugin (ui/native): bundles nord.ktheme, applied via ui.theme",
+      "kind": "plugin",
+      "file": "plugins/nord-ui",
+      "run": false
     }
   ]
 }

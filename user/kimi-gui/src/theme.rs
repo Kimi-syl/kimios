@@ -204,12 +204,18 @@ pub fn ui_font() -> &'static Font {
 // ---- persistence (/disk/config.cfg: "theme=N font=M") ----------------------
 
 const CFG: &str = "/disk/config.cfg";
+const CUSTOM_CFG: &str = "/disk/theme_custom.cfg";
 
 pub fn save() {
     let mut buf = [0u8; 48];
     let mut n = 0usize;
     n = put(&mut buf, n, b"theme=");
-    n = put_dec(&mut buf, n, THEME.load(Ordering::Relaxed));
+    if is_custom() {
+        save_custom_palette();
+        n = put_dec(&mut buf, n, 99); // custom-theme sentinel
+    } else {
+        n = put_dec(&mut buf, n, THEME.load(Ordering::Relaxed));
+    }
     n = put(&mut buf, n, b"\nfont=");
     n = put_dec(&mut buf, n, FONT.load(Ordering::Relaxed));
     n = put(&mut buf, n, b"\n");
@@ -219,6 +225,37 @@ pub fn save() {
     }
 }
 
+/// Persist the active custom palette as 11 RRGGBB lines (reloaded via sentinel 99).
+fn save_custom_palette() {
+    let cols = [
+        P.black.load(Ordering::Relaxed), P.surface.load(Ordering::Relaxed),
+        P.surface_hi.load(Ordering::Relaxed), P.surface_max.load(Ordering::Relaxed),
+        P.outline.load(Ordering::Relaxed), P.text.load(Ordering::Relaxed),
+        P.muted.load(Ordering::Relaxed), P.accent.load(Ordering::Relaxed),
+        P.accent_dim.load(Ordering::Relaxed), P.green.load(Ordering::Relaxed),
+        P.panel.load(Ordering::Relaxed),
+    ];
+    let mut buf = [0u8; 8 * 11];
+    let mut n = 0usize;
+    for c in cols {
+        n = put_hex6(&mut buf, n, c);
+        if n < buf.len() { buf[n] = b'\n'; n += 1; }
+    }
+    if let Some(h) = k::create(CUSTOM_CFG) {
+        k::write_file(h, 0, &buf[..n]);
+        k::close(h);
+    }
+}
+
+fn put_hex6(buf: &mut [u8], n: usize, v: u32) -> usize {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut tmp = [0u8; 6];
+    for i in 0..6 {
+        tmp[5 - i] = HEX[((v >> (i * 4)) & 0xf) as usize];
+    }
+    put(buf, n, &tmp)
+}
+
 fn put(buf: &mut [u8], n: usize, s: &[u8]) -> usize {
     let take = s.len().min(buf.len() - n);
     buf[n..n + take].copy_from_slice(&s[..take]);
@@ -226,7 +263,7 @@ fn put(buf: &mut [u8], n: usize, s: &[u8]) -> usize {
 }
 
 fn put_dec(buf: &mut [u8], n: usize, mut v: usize) -> usize {
-    let mut tmp = [0u8; 8];
+    let mut tmp = [0u8; 20];
     let mut i = tmp.len();
     loop { i -= 1; tmp[i] = b'0' + (v % 10) as u8; v /= 10; if v == 0 { break; } }
     put(buf, n, &tmp[i..])
@@ -240,7 +277,13 @@ pub fn load() {
     let n = k::read_file(h, 0, &mut buf[..want]);
     k::close(h);
     let data = &buf[..n];
-    if let Some(t) = field(data, b"theme=") { apply_theme(t); }
+    if let Some(t) = field(data, b"theme=") {
+        if t == 99 {
+            load_theme_file(CUSTOM_CFG, "Custom");
+        } else {
+            apply_theme(t);
+        }
+    }
     if let Some(f) = field(data, b"font=") { apply_font(f); }
 }
 

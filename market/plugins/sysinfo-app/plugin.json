@@ -1,0 +1,11 @@
+{
+  "id": "sysinfo-app",
+  "name": "System Info",
+  "version": "1.0",
+  "type": "app",
+  "runtime": "python",
+  "entry": "main.py",
+  "args": [],
+  "permissions": ["fs"],
+  "description": "Example app plugin: prints a small system report from /api/info plus a /disk directory listing via /api/fs/list. Falls back to local info offline."
+}
