@@ -905,11 +905,19 @@ Java_com_kimios_libos_KimiBridge_nativeSysTest(JNIEnv *env, jclass cls) {
     }
     // copy test: create source, copy, stat dest
     const char *src = "/disk/systest.txt"; const char *dst = "/disk/systest_copy.txt";
-    uint64_t h = kimi_host_syscall(13, (uint64_t)(uintptr_t)src, 16, 0, 0, 0);
-    if (h != ERROR) { kimi_host_syscall(14, h, (uint64_t)(uintptr_t)"hello", 5, 0, 0); kimi_host_syscall(6, h, 0, 0, 0, 0); }
-    uint64_t cr = kimi_host_syscall(52, (uint64_t)(uintptr_t)src, 16, (uint64_t)(uintptr_t)dst, 21, 0);
+    uint64_t h = kimi_host_syscall(13, (uint64_t)(uintptr_t)src, strlen(src), 0, 0, 0);
+    if (h != ERROR) { kimi_host_syscall(14, h, 0, (uint64_t)(uintptr_t)"hello", 5, 0); kimi_host_syscall(6, h, 0, 0, 0, 0); }
+    uint64_t cr = kimi_host_syscall(52, (uint64_t)(uintptr_t)src, strlen(src), (uint64_t)(uintptr_t)dst, strlen(dst), 0);
     uint64_t st[3] = {0};
-    uint64_t sr = kimi_host_syscall(27, (uint64_t)(uintptr_t)dst, 21, (uint64_t)(uintptr_t)st, 0, 0);
+    uint64_t sr = kimi_host_syscall(27, (uint64_t)(uintptr_t)dst, strlen(dst), (uint64_t)(uintptr_t)st, 0, 0);
     LOG("COPY r=%llu stat_r=%llu dst_size=%llu", (unsigned long long)cr, (unsigned long long)sr, (unsigned long long)st[1]);
+    return 0;
+}
+
+extern uint64_t kimi_request_app(uint64_t);
+JNIEXPORT jint JNICALL
+Java_com_kimios_libos_KimiBridge_nativeOpenApp(JNIEnv *env, jclass cls, jint kind) {
+    (void)env; (void)cls;
+    kimi_request_app((uint64_t)kind);
     return 0;
 }

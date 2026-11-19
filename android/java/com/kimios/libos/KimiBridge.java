@@ -37,6 +37,9 @@ public final class KimiBridge {
     /** Test hook: exercise sysinfo/proclist/copy syscalls (logs real values). */
     public static native int nativeSysTest();
 
+    /** Test hook: open an app by AppKind discriminant (0=Music..14=Monitor). */
+    public static native int nativeOpenApp(int kind);
+
     // Host services for GUI-thread syscalls. Set by MainActivity on the Java
     // side so the static methods below never need a Context passed through C.
     private static volatile Context appContext;

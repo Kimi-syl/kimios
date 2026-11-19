@@ -22,6 +22,18 @@ use crate::theme::{BLACK, SURFACE, SURFACE_HI, SURFACE_MAX, OUTLINE, TEXT, MUTED
 /// User VA of the latency mailbox (0 = unavailable). Stages are written here so
 /// the Android frontend can read them out of shared guest RAM.
 static INSTR: AtomicU64 = AtomicU64::new(0);
+static REQUEST_APP: AtomicU64 = AtomicU64::new(0);
+
+fn appkind_from_u64(v: u64) -> Option<AppKind> {
+    Some(match v {
+        0 => AppKind::Music, 1 => AppKind::Clock, 2 => AppKind::Settings,
+        3 => AppKind::Calculator, 4 => AppKind::Notes, 5 => AppKind::Maps,
+        6 => AppKind::Photos, 7 => AppKind::Files, 8 => AppKind::Weather,
+        9 => AppKind::Terminal, 10 => AppKind::Browser, 11 => AppKind::Apk,
+        12 => AppKind::Dvm, 13 => AppKind::Market, 14 => AppKind::Monitor,
+        _ => return None,
+    })
+}
 
 fn istamp(idx: usize, val: u64) {
     let base = INSTR.load(Ordering::Relaxed);
@@ -730,6 +742,13 @@ fn gui_run() -> ! {
         let now = k::uptime_ms();
 
         ui.loop_count += 1;
+        let req = REQUEST_APP.swap(0, Ordering::Relaxed);
+        if req > 0 {
+            if let Some(kind) = appkind_from_u64(req - 1) {
+                open_app(&screen, &mut ui, kind, clock);
+                dirty = true;
+            }
+        }
         if now.saturating_sub(ui.fps_window_ms) >= 1000 {
             ui.fps_x10 = (ui.loop_count * 10).min(9990);
             ui.loop_count = 0;
@@ -856,6 +875,14 @@ pub extern "C" fn _start() -> ! {
 #[cfg(not(target_os = "none"))]
 pub extern "C" fn kimi_gui_start() -> ! {
     gui_run()
+}
+
+/// Host-only test hook: request the GUI open an app by AppKind discriminant.
+#[no_mangle]
+#[cfg(not(target_os = "none"))]
+pub extern "C" fn kimi_request_app(kind: u64) -> u64 {
+    REQUEST_APP.store(kind + 1, Ordering::Relaxed);
+    1
 }
 
 /// Host-only test hook: load a `.theme` and `.kfont` asset (NUL-terminated path
