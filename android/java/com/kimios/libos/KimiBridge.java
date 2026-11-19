@@ -34,6 +34,9 @@ public final class KimiBridge {
     /** Test hook: install a repo asset to a /disk path (1 = success). */
     public static native int nativeInstall(String name, String dest);
 
+    /** Test hook: exercise sysinfo/proclist/copy syscalls (logs real values). */
+    public static native int nativeSysTest();
+
     // Host services for GUI-thread syscalls. Set by MainActivity on the Java
     // side so the static methods below never need a Context passed through C.
     private static volatile Context appContext;

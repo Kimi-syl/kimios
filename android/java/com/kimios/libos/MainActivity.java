@@ -80,6 +80,12 @@ public class MainActivity extends Activity
 
     private void maybeRunGuest(android.content.Intent intent) {
         if (intent == null) return;
+        if (intent.getStringExtra("sys") != null) {
+            new Thread(new Runnable() {
+                @Override public void run() { KimiBridge.nativeSysTest(); }
+            }, "kimi-sys").start();
+            return;
+        }
         if (intent.getStringExtra("kpkg") != null) {
             new Thread(new Runnable() {
                 @Override public void run() {

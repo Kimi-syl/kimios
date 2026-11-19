@@ -886,3 +886,30 @@ Java_com_kimios_libos_KimiBridge_nativeInstall(JNIEnv *env, jclass cls, jstring 
     (*env)->ReleaseStringUTFChars(env, jdest, dest);
     return (jint)r;
 }
+JNIEXPORT jint JNICALL
+Java_com_kimios_libos_KimiBridge_nativeSysTest(JNIEnv *env, jclass cls) {
+    (void)env; (void)cls;
+    uint64_t si[10] = {0};
+    uint64_t r = kimi_host_syscall(49, (uint64_t)(uintptr_t)si, 0, 0, 0, 0);
+    LOG("SYSINFO r=%lld cpu_x10=%llu ram_tot_kb=%llu ram_used_kb=%llu stor_tot_kb=%llu stor_used_kb=%llu uptime=%llu procs=%llu batt=%llu",
+        (long long)r, (unsigned long long)si[0], (unsigned long long)si[1], (unsigned long long)si[2],
+        (unsigned long long)si[3], (unsigned long long)si[4], (unsigned long long)si[5],
+        (unsigned long long)si[6], (unsigned long long)si[7]);
+    static uint64_t pl[8 * 32];
+    uint64_t n = kimi_host_syscall(50, (uint64_t)(uintptr_t)pl, 32, 0, 0, 0);
+    LOG("PROCLIST n=%llu", (unsigned long long)n);
+    for (uint64_t i = 0; i < 3 && i < n; i++) {
+        uint64_t *rec = pl + i * 8; char nm[25]; memcpy(nm, &rec[5], 24); nm[24] = 0;
+        LOG("  proc pid=%llu ram_kb=%llu cpu_x10=%llu name=%s",
+            (unsigned long long)rec[0], (unsigned long long)rec[2], (unsigned long long)rec[3], nm);
+    }
+    // copy test: create source, copy, stat dest
+    const char *src = "/disk/systest.txt"; const char *dst = "/disk/systest_copy.txt";
+    uint64_t h = kimi_host_syscall(13, (uint64_t)(uintptr_t)src, 16, 0, 0, 0);
+    if (h != ERROR) { kimi_host_syscall(14, h, (uint64_t)(uintptr_t)"hello", 5, 0, 0); kimi_host_syscall(6, h, 0, 0, 0, 0); }
+    uint64_t cr = kimi_host_syscall(52, (uint64_t)(uintptr_t)src, 16, (uint64_t)(uintptr_t)dst, 21, 0);
+    uint64_t st[3] = {0};
+    uint64_t sr = kimi_host_syscall(27, (uint64_t)(uintptr_t)dst, 21, (uint64_t)(uintptr_t)st, 0, 0);
+    LOG("COPY r=%llu stat_r=%llu dst_size=%llu", (unsigned long long)cr, (unsigned long long)sr, (unsigned long long)st[1]);
+    return 0;
+}
