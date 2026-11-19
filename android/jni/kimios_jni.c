@@ -1139,3 +1139,14 @@ Java_com_kimios_libos_KimiBridge_nativePluginTest(JNIEnv *env, jclass cls, jstri
     (*env)->ReleaseStringUTFChars(env, jid, id);
     return (jlong)r;
 }
+
+extern uint64_t kimi_test_import_alpine(uint64_t);
+JNIEXPORT jint JNICALL
+Java_com_kimios_libos_KimiBridge_nativeImportAlpine(JNIEnv *env, jclass cls, jstring jpkg) {
+    (void)cls;
+    const char *pkg = (*env)->GetStringUTFChars(env, jpkg, NULL);
+    uint64_t r = kimi_test_import_alpine((uint64_t)(uintptr_t)pkg);
+    LOG("import-alpine %s result=%llu", pkg, (unsigned long long)r);
+    (*env)->ReleaseStringUTFChars(env, jpkg, pkg);
+    return (jint)r;
+}

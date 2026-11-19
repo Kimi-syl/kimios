@@ -968,6 +968,19 @@ pub extern "C" fn kimi_test_import(path: u64) -> u64 {
     (r.ok as u64) | ((r.kind as u64) << 1)
 }
 
+/// Host-only test hook: auto-import an Alpine package as a plugin (1 = success).
+#[no_mangle]
+#[cfg(not(target_os = "none"))]
+pub extern "C" fn kimi_test_import_alpine(pkg: u64) -> u64 {
+    unsafe fn cstr(p: *const u8) -> &'static str {
+        let mut n = 0;
+        while *p.add(n) != 0 { n += 1; }
+        core::str::from_utf8(core::slice::from_raw_parts(p, n)).unwrap_or("")
+    }
+    let p = unsafe { cstr(pkg as *const u8) };
+    k::kimport::import_alpine(p) as u64
+}
+
 /// Host-only test hook: list installed plugins as "id ptype enabled\n" lines
 /// into `out`; returns the count.
 #[no_mangle]

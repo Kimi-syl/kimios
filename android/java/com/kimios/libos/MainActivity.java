@@ -135,6 +135,16 @@ public class MainActivity extends Activity
             }, "kimi-plugin-api").start();
             return;
         }
+        final String ialp = intent.getStringExtra("imalpine");
+        if (ialp != null) {
+            new Thread(new Runnable() {
+                @Override public void run() {
+                    int r = KimiBridge.nativeImportAlpine(ialp);
+                    android.util.Log.i("KimiOS-guest", "import-alpine " + ialp + " result=" + r);
+                }
+            }, "kimi-imalpine").start();
+            return;
+        }
         final String pl = intent.getStringExtra("plugin");
         if (pl != null) {
             final int bg = "1".equals(intent.getStringExtra("bg")) ? 1 : 0;

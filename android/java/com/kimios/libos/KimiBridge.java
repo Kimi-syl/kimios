@@ -34,6 +34,9 @@ public final class KimiBridge {
     /** Test hook: install a repo asset to a /disk path (1 = success). */
     public static native int nativeInstall(String name, String dest);
 
+    /** Test hook: auto-import an Alpine package as a plugin (1 = success). */
+    public static native int nativeImportAlpine(String pkg);
+
     /** Test hook: exercise sysinfo/proclist/copy syscalls (logs real values). */
     public static native int nativeSysTest();
 
