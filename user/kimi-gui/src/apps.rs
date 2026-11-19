@@ -2683,6 +2683,80 @@ pub fn tap(screen: &Screen, apps: &mut Apps, app: AppKind, point: (i64, i64), os
     }
 }
 
+/// Touch drag-scroll: accumulates app-space finger movement (positive dy =
+/// finger down) and steps the app's scroll one drawn row at a time. Finger up
+/// scrolls to later items. Returns true when the scroll position changed.
+pub fn drag_scroll(apps: &mut Apps, app: AppKind, dy_app: i64, accum: &mut i64) -> bool {
+    let tab = apps.market.tab;
+    let market_count = apps.market.kind_count(tab as u8);
+    let (scroll, count, visible, row_h) = match app {
+        AppKind::Files => (&mut apps.files.scroll, apps.files.count, 17usize, 30i64),
+        AppKind::Monitor => (&mut apps.monitor.scroll, apps.monitor.proc_count, 10, 28),
+        AppKind::Plugins => (&mut apps.plugins.scroll, apps.plugins.count, PLUGIN_ROWS, PLG_ROW_H),
+        AppKind::Market => (&mut apps.market.scroll[tab], market_count, 6, 96),
+        AppKind::Music => (&mut apps.music.scroll, apps.music.count, 4, 52),
+        AppKind::Notes => (&mut apps.notes.scroll, apps.notes.count, 10, 56),
+        AppKind::Browser => (&mut apps.browser.scroll, apps.browser.line_count, 34, 14),
+        _ => return false,
+    };
+    let max = count.saturating_sub(visible);
+    if *scroll > max {
+        *scroll = max;
+    }
+    let before = *scroll;
+    *accum = accum.saturating_add(-dy_app);
+    while *accum >= row_h {
+        *scroll += 1;
+        *accum -= row_h;
+    }
+    while *accum <= -row_h {
+        *scroll = scroll.saturating_sub(1);
+        *accum += row_h;
+    }
+    if *scroll > max {
+        *scroll = max;
+    }
+    *scroll != before
+}
+
+/// Whether an app-space point is inside the app's draggable list region (not
+/// chrome, buttons, overlays, OSK or WebView content).
+pub fn scroll_drag_hit(apps: &Apps, app: AppKind, point: (i64, i64), osk: bool) -> bool {
+    if point.0 < 20 || point.0 >= 460 {
+        return false;
+    }
+    match app {
+        AppKind::Files => {
+            let files = &apps.files;
+            files.preview.is_none()
+                && files.editor.is_none()
+                && files.action.is_none()
+                && files.props.is_none()
+                && !files.run_show
+                && files.prompt == 0
+                && point.1 >= 196 && point.1 < 706
+        }
+        AppKind::Monitor => apps.monitor.selected.is_none() && point.1 >= 476 && point.1 < 756,
+        AppKind::Plugins => {
+            apps.plugins.view == 0
+                && point.1 >= PLG_LIST_Y
+                && point.1 < PLG_LIST_Y + PLUGIN_ROWS as i64 * PLG_ROW_H
+        }
+        AppKind::Market => point.1 >= 196 && point.1 < 760,
+        AppKind::Music => point.1 >= 548 && point.1 < 756,
+        AppKind::Notes => apps.notes.editing.is_none() && point.1 >= 160 && point.1 < 720,
+        AppKind::Browser => {
+            let browser = &apps.browser;
+            !browser.web_ok
+                && !browser.editing
+                && !browser.touch_active
+                && point.1 >= 196
+                && point.1 < if osk { 410 } else { 700 }
+        }
+        _ => false,
+    }
+}
+
 fn music_tap(apps: &mut Apps, point: (i64, i64)) {
     let music = &mut apps.music;
     if point.1 >= 104 && point.1 <= 144 {
@@ -5389,6 +5463,136 @@ fn draw_market(screen: &Screen, m: &Market) {
         ln += take;
     }
     screen.text_centered(width / 2, 768, slice_str(&line[..ln]), 1, MUTED());
+}
+
+#[cfg(not(target_os = "none"))]
+pub fn test_scroll(apps: &Apps, app: AppKind) -> u64 {
+    match app {
+        AppKind::Files => apps.files.scroll as u64,
+        AppKind::Monitor => apps.monitor.scroll as u64,
+        AppKind::Plugins => apps.plugins.scroll as u64,
+        AppKind::Market => apps.market.scroll[apps.market.tab] as u64,
+        AppKind::Music => apps.music.scroll as u64,
+        AppKind::Notes => apps.notes.scroll as u64,
+        AppKind::Browser => apps.browser.scroll as u64,
+        _ => 0,
+    }
+}
+
+#[cfg(not(target_os = "none"))]
+pub fn test_state(apps: &Apps, app: AppKind) -> u64 {
+    match app {
+        AppKind::Notes => apps.notes.editing.map_or(0, |i| i as u64 + 1),
+        AppKind::Files => apps.files.preview.map_or(0, |i| i as u64 + 1),
+        AppKind::Monitor => apps.monitor.selected.unwrap_or(0),
+        AppKind::Plugins => apps.plugins.selected.map_or(0, |i| i as u64 + 1),
+        AppKind::Market => crate::theme::active_theme() as u64 + 1,
+        AppKind::Music => apps.music.track as u64 + 1,
+        AppKind::Browser => apps.browser.touch_active as u64,
+        _ => 0,
+    }
+}
+
+#[cfg(not(target_os = "none"))]
+fn seed_label(prefix: &[u8], i: usize, buf: &mut [u8; 32]) -> usize {
+    let mut n = 0;
+    push_str(buf, &mut n, prefix);
+    let mut num = [0u8; 20];
+    push_str(buf, &mut n, unsigned(i as u64, &mut num).as_bytes());
+    n
+}
+
+/// Host-only: seed an app with enough synthetic rows to exercise scrolling.
+#[cfg(not(target_os = "none"))]
+pub fn test_seed(apps: &mut Apps, app: AppKind) {
+    let mut buf = [0u8; 32];
+    match app {
+        AppKind::Files => {
+            let files = &mut apps.files;
+            files.count = 40;
+            for i in 0..40 {
+                let n = seed_label(b"file", i, &mut buf);
+                files.names[i][..n].copy_from_slice(&buf[..n]);
+                files.name_len[i] = n as u8;
+                files.is_dir[i] = false;
+                files.sizes[i] = i as u64;
+            }
+        }
+        AppKind::Notes => {
+            let notes = &mut apps.notes;
+            notes.count = 16;
+            for i in 0..16 {
+                let n = seed_label(b"note", i, &mut buf);
+                notes.titles[i][..n].copy_from_slice(&buf[..n]);
+                notes.title_len[i] = n as u8;
+            }
+        }
+        AppKind::Music => {
+            let music = &mut apps.music;
+            music.count = 16;
+            for i in 0..16 {
+                let n = seed_label(b"track", i, &mut buf);
+                music.names[i][..n].copy_from_slice(&buf[..n]);
+                music.name_len[i] = n as u8;
+            }
+        }
+        AppKind::Monitor => {
+            let m = &mut apps.monitor;
+            m.proc_count = 40;
+            m.last_refresh = u64::MAX;
+            for i in 0..40 {
+                let n = seed_label(b"proc", i, &mut buf);
+                let mut name = [0u8; 24];
+                name[..n].copy_from_slice(&buf[..n]);
+                m.procs[i] = Proc {
+                    pid: i as u64 + 1,
+                    ppid: 1,
+                    ram_kb: 1024,
+                    cpu_x10: 0,
+                    state: 1,
+                    name,
+                    name_len: n,
+                };
+            }
+        }
+        AppKind::Plugins => {
+            let plugins = &mut apps.plugins;
+            plugins.count = 24;
+            for i in 0..24 {
+                let n = seed_label(b"plugin", i, &mut buf);
+                let mut info = EMPTY_PLUGIN;
+                info.name[..n].copy_from_slice(&buf[..n]);
+                info.name_len = n;
+                plugins.items[i] = info;
+            }
+        }
+        AppKind::Market => {
+            let m = &mut apps.market;
+            m.count = 12;
+            for i in 0..12 {
+                let n = seed_label(b"theme", i, &mut buf);
+                let mut item = EMPTY_ITEM;
+                item.name[..n].copy_from_slice(&buf[..n]);
+                item.name_len = n;
+                item.kind = 0;
+                item.source = 0;
+                item.index = i;
+                item.installed = true;
+                m.items[i] = item;
+            }
+        }
+        AppKind::Browser => {
+            let browser = &mut apps.browser;
+            browser.line_count = 90;
+            browser.editing = false;
+            for i in 0..90 {
+                let n = seed_label(b"line", i, &mut buf);
+                browser.lines[i][..n].copy_from_slice(&buf[..n]);
+                browser.line_len[i] = n as u8;
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Host-only test hook: parse a canned weather JSON body (mode 1 = HKO

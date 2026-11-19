@@ -646,6 +646,7 @@ struct Ui {
     recents: [AppKind; 8],
     recent_count: usize,
     recents_scroll: usize,
+    scroll_accum: i64,
     fps_x10: u64,
     loop_count: u64,
     fps_window_ms: u64,
@@ -680,6 +681,7 @@ impl Ui {
             recents: [AppKind::Music; 8],
             recent_count: 0,
             recents_scroll: 0,
+            scroll_accum: 0,
             fps_x10: 0,
             loop_count: 0,
             fps_window_ms: 0,
@@ -1081,6 +1083,42 @@ pub extern "C" fn kimi_test_blit(
     ) as u64
 }
 
+/// Host-only test hook: drive the real handle() with packed input events
+/// (kind<<48 | code<<32 | value) against a seeded app list. Returns the app's
+/// scroll position; out[0..4] = [scene, state, osk, scroll_accum].
+#[no_mangle]
+#[cfg(not(target_os = "none"))]
+pub extern "C" fn kimi_test_scroll(app: u64, events: u64, n: u64, out: u64) -> u64 {
+    static mut TEST_FB: [u32; 1080 * 1920] = [0; 1080 * 1920];
+    let Some(kind) = AppKind::from_index(app as usize) else { return u64::MAX };
+    let screen = Screen::new(core::ptr::addr_of_mut!(TEST_FB) as u64, 1080, 1920, 1080 * 4);
+    let mut ui = Ui::new(screen.width(), screen.height());
+    ui.scene = Scene::App(kind);
+    apps::test_seed(&mut ui.apps, kind);
+    let clock = [0, 2026, 1, 1, 0, 0, 0];
+    let packed = unsafe { core::slice::from_raw_parts(events as *const u64, n as usize) };
+    for &raw in packed {
+        let event = k::InputEvent {
+            kind: (raw >> 48) as u16,
+            code: ((raw >> 32) & 0xffff) as u16,
+            value: raw as u32,
+        };
+        handle(&screen, &mut ui, event, clock);
+    }
+    let scene = match ui.scene {
+        Scene::Lock => 0,
+        Scene::Home => 1,
+        Scene::App(_) => 2,
+        Scene::Recents => 3,
+    };
+    let out = unsafe { core::slice::from_raw_parts_mut(out as *mut u64, 4) };
+    out[0] = scene;
+    out[1] = apps::test_state(&ui.apps, kind);
+    out[2] = ui.osk as u64;
+    out[3] = ui.scroll_accum as u64;
+    apps::test_scroll(&ui.apps, kind)
+}
+
 fn handle(screen: &Screen, ui: &mut Ui, event: k::InputEvent, clock: [u64; 7]) -> bool {
     let (width, height) = (screen.width(), screen.height());
 
@@ -1094,12 +1132,38 @@ fn handle(screen: &Screen, ui: &mut Ui, event: k::InputEvent, clock: [u64; 7]) -
             false
         }
         (k::EV_ABS, k::ABS_Y) => {
-            ui.touch.1 = scale(event.value, height);
+            let new_y = scale(event.value, height);
+            let dy = new_y - ui.touch.1;
+            let mut scrolled = false;
+            if let Scene::App(app) = ui.scene {
+                if ui.press.is_some()
+                    && ui.gesture.mode == GMode::None
+                    && !ui.shade
+                    && dy.abs() >= 2
+                {
+                    let dx = ui.touch.0 - ui.gesture.start_x;
+                    let dy_total = new_y - ui.gesture.start_y;
+                    if dy_total.abs() >= dx.abs() && dx * dx + dy_total * dy_total >= 24 * 24 {
+                        let point = app_point(screen, (ui.touch.0, new_y));
+                        let osk_now = ui.osk && apps::text_focused(&ui.apps, app);
+                        if !(osk_now && point.1 >= keyboard::TOP)
+                            && apps::scroll_drag_hit(&ui.apps, app, point, osk_now)
+                        {
+                            let dy_app = dy * 800 / screen.height();
+                            if apps::drag_scroll(&mut ui.apps, app, dy_app, &mut ui.scroll_accum) {
+                                ui.gesture.long_tried = true;
+                                scrolled = true;
+                            }
+                        }
+                    }
+                }
+            }
+            ui.touch.1 = new_y;
             if drag_move(screen, ui, clock) {
                 return true;
             }
             browser_drag_move(screen, ui);
-            false
+            scrolled
         }
         (k::EV_KEY, k::KEY_ESC) if event.value != 0 => {
             k::exit(0);
@@ -1235,6 +1299,7 @@ fn handle(screen: &Screen, ui: &mut Ui, event: k::InputEvent, clock: [u64; 7]) -
             } else {
                 istamp(k::IBOX_HANDLER, k::cntpct());
                 ui.press = Some(ui.touch);
+                ui.scroll_accum = 0;
                 ui.gesture = Gesture {
                     start_x: ui.touch.0,
                     start_y: ui.touch.1,
@@ -1924,6 +1989,7 @@ fn open_app(screen: &Screen, ui: &mut Ui, app: AppKind, clock: [u64; 7]) {
         apps::browser_pause(&mut ui.apps);
     }
     apps::open(&mut ui.apps, app);
+    ui.scroll_accum = 0;
     ui.push_recent(app);
     ui.folder_view = None;
     ui.edit_mode = false;
