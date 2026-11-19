@@ -696,6 +696,7 @@ pub const SYS_RUN_PATH: u64 = 51;
 pub const SYS_COPY: u64 = 52;
 pub const SYS_PLUGIN_API: u64 = 53;
 pub const SYS_PLUGIN_RUN: u64 = 54;
+pub const SYS_PLUGIN_RUN_OUT: u64 = 55;
 
 /// `[cpu_pct_x10, ram_total_kb, ram_used_kb, storage_total_kb, storage_used_kb,
 /// uptime_s, proc_count, battery_pct, battery_charging, reserved]`.
@@ -750,6 +751,29 @@ pub fn plugin_run(id: &str) -> Option<u64> {
 /// Run a plugin in the background (fork without waiting) — for services.
 pub fn plugin_run_bg(id: &str) -> bool {
     syscall3(SYS_PLUGIN_RUN, id.as_ptr() as u64, id.len() as u64, 1) == 0
+}
+
+/// Run a plugin in the foreground and capture its stdout into `out`. Returns
+/// `(exit_code, captured_len)`; None on failure or bare metal. This works for
+/// every runtime (native / python / node), so console tools can show their
+/// output in the UI.
+pub fn plugin_run_out(id: &str, out: &mut [u8]) -> Option<(u64, usize)> {
+    #[repr(C)]
+    struct Req {
+        id_ptr: u64, id_len: u64,
+        out_ptr: u64, out_cap: u64,
+        out_len: u64, code: u64,
+    }
+    let mut req = Req {
+        id_ptr: id.as_ptr() as u64,
+        id_len: id.len() as u64,
+        out_ptr: out.as_mut_ptr() as u64,
+        out_cap: out.len() as u64,
+        out_len: 0,
+        code: 0,
+    };
+    let r = syscall3(SYS_PLUGIN_RUN_OUT, &mut req as *mut _ as u64, 0, 0);
+    if r == ERROR { None } else { Some((req.code, req.out_len as usize)) }
 }
 
 /// File metadata: `(kind, size)` where kind 0 is RamFS and 1 is a disk file.

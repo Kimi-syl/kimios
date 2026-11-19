@@ -145,6 +145,32 @@ public class MainActivity extends Activity
             }, "kimi-imalpine").start();
             return;
         }
+        final String mstore = intent.getStringExtra("mstore");
+        if (mstore != null) {
+            final String mq = intent.getStringExtra("q");
+            new Thread(new Runnable() {
+                @Override public void run() {
+                    int f = 0;
+                    try { f = Integer.parseInt(mstore); } catch (Exception e) {}
+                    long n = KimiBridge.nativeStoreCount(f, mq == null ? "" : mq);
+                    android.util.Log.i("KimiOS-guest", "mstore filter=" + f + " count=" + n);
+                }
+            }, "kimi-mstore").start();
+            return;
+        }
+        final String mrun = intent.getStringExtra("mrun");
+        if (mrun != null) {
+            final String mn = intent.getStringExtra("name");
+            new Thread(new Runnable() {
+                @Override public void run() {
+                    int s = 0;
+                    try { s = Integer.parseInt(mrun); } catch (Exception e) {}
+                    long r = KimiBridge.nativeStoreRun(mn == null ? "" : mn, s);
+                    android.util.Log.i("KimiOS-guest", "mstore run name=" + mn + " src=" + s + " result=" + r);
+                }
+            }, "kimi-mrun").start();
+            return;
+        }
         final String pl = intent.getStringExtra("plugin");
         if (pl != null) {
             final int bg = "1".equals(intent.getStringExtra("bg")) ? 1 : 0;

@@ -37,6 +37,14 @@ public final class KimiBridge {
     /** Test hook: auto-import an Alpine package as a plugin (1 = success). */
     public static native int nativeImportAlpine(String pkg);
 
+    /** Test hook: build the Marketplace store with a source filter + query;
+     *  returns the row count (logs the first rows). */
+    public static native long nativeStoreCount(int filter, String query);
+
+    /** Test hook: run a store row by (name, src); returns captured length+1
+     *  (0 = not found) and logs the captured output. */
+    public static native long nativeStoreRun(String name, int src);
+
     /** Test hook: exercise sysinfo/proclist/copy syscalls (logs real values). */
     public static native int nativeSysTest();
 

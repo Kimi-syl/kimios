@@ -797,6 +797,20 @@ impl Plugins {
                         return;
                     }
                 }
+                // python / node / npm plugins: capture stdout via the manifest
+                // runner (the sysroot linux_run path above only fits Alpine
+                // binaries). This is what makes console tools show results.
+                if let Some((code, n)) = k::plugin_run_out(info.id_str(), &mut self.run_out) {
+                    self.run_len = n;
+                    self.run_show = true;
+                    let mut line = [0u8; 64];
+                    let mut used = 0;
+                    let mut num = [0u8; 20];
+                    push_str(&mut line, &mut used, b"Exited with code ");
+                    push_str(&mut line, &mut used, unsigned(code, &mut num).as_bytes());
+                    self.set_status(slice_str(&line[..used]));
+                    return;
+                }
                 match kplugin::run(info.id_str()) {
                     Some(code) => {
                         let mut line = [0u8; 64];
@@ -5124,6 +5138,80 @@ impl MarketItem {
     fn desc_str(&self) -> &str { slice_str(&self.desc[..self.desc_len]) }
 }
 
+// One row in the unified "Store" (installed plugins + Alpine catalog + npm
+// catalog), tagged by source so the dropdown can filter it.
+#[derive(Clone, Copy)]
+struct StoreRow {
+    name: [u8; 40], name_len: usize,
+    desc: [u8; 72], desc_len: usize,
+    version: [u8; 16], version_len: usize,
+    src: u8, // 1 installed plugin, 2 alpine, 3 npm
+    idx: usize,
+    installed: bool,
+}
+impl StoreRow {
+    fn name_str(&self) -> &str { slice_str(&self.name[..self.name_len]) }
+    fn desc_str(&self) -> &str { slice_str(&self.desc[..self.desc_len]) }
+    fn version_str(&self) -> &str { slice_str(&self.version[..self.version_len]) }
+}
+const EMPTY_STORE: StoreRow = StoreRow {
+    name: [0; 40], name_len: 0, desc: [0; 72], desc_len: 0,
+    version: [0; 16], version_len: 0, src: 0, idx: 0, installed: false,
+};
+
+// Curated npm CLI catalog. The full registry is browsable via the
+// "Install npm: <name>" row (type any package name in the search box).
+const NPM_CATALOG: [(&str, &str); 48] = [
+    ("typescript", "TypeScript compiler (tsc)"),
+    ("ts-node", "Run TypeScript directly"),
+    ("tsx", "Run TS/ESM with zero config"),
+    ("eslint", "Pluggable JS/TS linter"),
+    ("prettier", "Opinionated code formatter"),
+    ("nodemon", "Auto-restart node on change"),
+    ("pm2", "Production process manager"),
+    ("http-server", "Zero-config static file server"),
+    ("serve", "Static file serving CLI"),
+    ("webpack", "Module bundler"),
+    ("esbuild", "Extremely fast JS bundler"),
+    ("rollup", "ES module bundler"),
+    ("vite", "Next-gen frontend tooling"),
+    ("parcel", "Zero-config bundler"),
+    ("create-react-app", "Scaffold React apps"),
+    ("@angular/cli", "Angular command line"),
+    ("vue", "Vue CLI helper"),
+    ("gatsby-cli", "Gatsby site tooling"),
+    ("next", "Next.js framework CLI"),
+    ("netlify-cli", "Netlify deploy/test CLI"),
+    ("vercel", "Vercel deploy CLI"),
+    ("firebase-tools", "Firebase command line"),
+    ("wrangler", "Cloudflare Workers CLI"),
+    ("aws-cdk", "AWS CDK toolkit"),
+    ("yarn", "Fast package manager"),
+    ("pnpm", "Efficient package manager"),
+    ("npm-check-updates", "Upgrade package.json deps"),
+    ("degit", "Straight-copy repo scaffolder"),
+    ("zx", "Shell scripting in JS"),
+    ("cowsay", "Configurable speaking cow"),
+    ("figlet", "ASCII art banners"),
+    ("qrcode", "Generate QR codes in terminal"),
+    ("tldr", "Simplified man pages client"),
+    ("csvtojson", "CSV to JSON converter"),
+    ("json2csv", "JSON to CSV converter"),
+    ("marked", "Markdown to HTML"),
+    ("markdown-pdf", "Markdown to PDF"),
+    ("js-yaml", "YAML parser CLI"),
+    ("yq", "YAML/JSON processor"),
+    ("cli-progress", "Terminal progress bars"),
+    ("commander", "Node CLI framework"),
+    ("yargs", "Node arg parser"),
+    ("chalk", "Terminal string styling"),
+    ("debug", "Tiny debug logger"),
+    ("dotenv-cli", "Load .env into commands"),
+    ("npx", "Run npm package binaries"),
+    ("localtunnel", "Expose localhost publicly"),
+    ("npm", "The npm package manager"),
+];
+
 pub struct Market {
     tab: usize,
     scroll: [usize; 4],
@@ -5143,6 +5231,15 @@ pub struct Market {
     search: [u8; 24],
     search_len: usize,
     searching: bool,
+    src: u8,      // store source filter: 0 all, 1 installed, 2 alpine, 3 npm
+    dd_open: bool,
+    run_show: bool,
+    run_out: [u8; 4096],
+    run_len: usize,
+    run_title: [u8; 44],
+    run_title_len: usize,
+    store: [StoreRow; 320],
+    store_count: usize,
 }
 
 const EMPTY_ITEM: MarketItem = MarketItem {
@@ -5194,8 +5291,17 @@ impl Market {
             search: [0; 24],
             search_len: 0,
             searching: false,
+            src: 0,
+            dd_open: false,
+            run_show: false,
+            run_out: [0; 4096],
+            run_len: 0,
+            run_title: [0; 44],
+            run_title_len: 0,
+            store: [EMPTY_STORE; 320],
+            store_count: 0,
         };
-        m.set_status("Themes, fonts, plugins & Alpine tools");
+        m.set_status("Themes, fonts & the plugin store (Alpine / npm)");
         m
     }
 
@@ -5250,7 +5356,10 @@ impl Market {
         }
         self.scan_imports();
         self.repo_ok = k::kpkg::repo_cached();
-        for t in 0..4 {
+        if self.tab == 2 {
+            self.rebuild_store();
+        }
+        for t in 0..3 {
             let n = self.tab_count(t);
             if self.scroll[t] + 6 > n { self.scroll[t] = n.saturating_sub(6); }
         }
@@ -5261,27 +5370,13 @@ impl Market {
         self.cat_count = k::alpine::list_command_packages(buf);
         self.cat_loaded = true;
         self.cat_pending = None;
-        self.scroll[3] = 0;
+        self.scroll[2] = 0;
     }
 
     fn cat_matches(&self, i: usize) -> bool {
         let p = cat_row(i);
         let fb = &self.search[..self.search_len];
         contains_ci(&p.name[..p.name_len], fb) || contains_ci(&p.desc[..p.desc_len], fb)
-    }
-
-    fn cat_filtered_count(&self) -> usize {
-        (0..self.cat_count).filter(|&i| self.cat_matches(i)).count()
-    }
-
-    fn cat_filtered_pos(&self, pos: usize) -> Option<usize> {
-        let mut j = 0usize;
-        for i in 0..self.cat_count {
-            if !self.cat_matches(i) { continue; }
-            if j == pos { return Some(i); }
-            j += 1;
-        }
-        None
     }
 
     fn cat_installed(&self, name: &str) -> bool {
@@ -5294,7 +5389,266 @@ impl Market {
     }
 
     fn tab_count(&self, tab: usize) -> usize {
-        if tab == 3 { self.cat_filtered_count() } else { self.kind_count(TAB_KIND[tab]) }
+        if tab == 2 { self.store_count } else { self.kind_count(TAB_KIND[tab]) }
+    }
+
+    // ---- unified Store (installed plugins + Alpine + npm) -----------------
+
+    fn plugin_id_exists(&self, id: &str) -> bool {
+        self.plugins[..self.plugin_count].iter().any(|p| p.id_str() == id)
+    }
+
+    fn npm_installed(&self, pkg: &str) -> bool {
+        let mut id = [0u8; 48];
+        let mut n = 0usize;
+        push_str(&mut id, &mut n, b"npm.");
+        push_str(&mut id, &mut n, pkg.as_bytes());
+        self.plugin_id_exists(slice_str(&id[..n]))
+    }
+
+    fn push_store(&mut self, row: StoreRow) {
+        if self.store_count < self.store.len() {
+            self.store[self.store_count] = row;
+            self.store_count += 1;
+        }
+    }
+
+    fn rebuild_store(&mut self) {
+        self.store_count = 0;
+        let qn = self.search_len.min(self.search.len());
+        let mut qbuf = [0u8; 24];
+        qbuf[..qn].copy_from_slice(&self.search[..qn]);
+        let q = &qbuf[..qn];
+        let want_inst = self.src == 0 || self.src == 1;
+        let want_alp = self.src == 0 || self.src == 2;
+        let want_npm = self.src == 0 || self.src == 3;
+        if want_alp && !self.cat_loaded {
+            self.load_catalog();
+        }
+        if want_inst {
+            for i in 0..self.plugin_count {
+                let p = self.plugins[i];
+                if !contains_ci(p.name_str().as_bytes(), q) && !contains_ci(p.id_str().as_bytes(), q) {
+                    continue;
+                }
+                let mut desc = [0u8; 72];
+                let mut dn = 0usize;
+                push_str(&mut desc, &mut dn, b"plugin v");
+                push_str(&mut desc, &mut dn, p.version_str().as_bytes());
+                push_str(&mut desc, &mut dn, b" ");
+                push_str(&mut desc, &mut dn, p.type_str().as_bytes());
+                push_str(&mut desc, &mut dn, if p.enabled { b" - enabled" } else { b" - disabled" });
+                let mut row = EMPTY_STORE;
+                row.src = 1;
+                row.idx = i;
+                row.installed = true;
+                row.name_len = p.name_str().len().min(40);
+                row.name[..row.name_len].copy_from_slice(&p.name_str().as_bytes()[..row.name_len]);
+                row.desc_len = dn.min(72);
+                row.desc[..row.desc_len].copy_from_slice(&desc[..row.desc_len]);
+                self.push_store(row);
+            }
+        }
+        if want_alp {
+            for i in 0..self.cat_count {
+                if !self.cat_matches(i) {
+                    continue;
+                }
+                let p = cat_row(i);
+                let mut row = EMPTY_STORE;
+                row.src = 2;
+                row.idx = i;
+                row.name_len = p.name_len.min(40);
+                row.name[..row.name_len].copy_from_slice(&p.name[..row.name_len]);
+                row.desc_len = p.desc_len.min(72);
+                row.desc[..row.desc_len].copy_from_slice(&p.desc[..row.desc_len]);
+                row.version_len = p.version_len.min(16);
+                row.version[..row.version_len].copy_from_slice(&p.version[..p.version_len]);
+                row.installed = self.cat_installed(slice_str(&p.name[..p.name_len]));
+                self.push_store(row);
+            }
+        }
+        if want_npm {
+            let mut matched = false;
+            for (name, desc) in NPM_CATALOG.iter() {
+                if !contains_ci(name.as_bytes(), q) && !contains_ci(desc.as_bytes(), q) {
+                    continue;
+                }
+                matched = true;
+                let mut row = EMPTY_STORE;
+                row.src = 3;
+                row.name_len = name.len().min(40);
+                row.name[..row.name_len].copy_from_slice(&name.as_bytes()[..row.name_len]);
+                row.desc_len = desc.len().min(72);
+                row.desc[..row.desc_len].copy_from_slice(&desc.as_bytes()[..row.desc_len]);
+                row.installed = self.npm_installed(name);
+                self.push_store(row);
+            }
+            // Allow installing any npm package by typing its name.
+            if self.search_len >= 2 && !matched {
+                let qs = slice_str(q);
+                if !qs.contains('/') && !qs.contains(' ') && !qs.contains('\t') {
+                    let mut row = EMPTY_STORE;
+                    row.src = 3;
+                    row.idx = usize::MAX;
+                    row.name_len = qs.len().min(40);
+                    row.name[..row.name_len].copy_from_slice(&qs.as_bytes()[..row.name_len]);
+                    let d = b"Install this npm package by name";
+                    row.desc_len = d.len();
+                    row.desc[..d.len()].copy_from_slice(d);
+                    self.push_store(row);
+                }
+            }
+        }
+        if self.scroll[2] + 6 > self.store_count {
+            self.scroll[2] = self.store_count.saturating_sub(6);
+        }
+        self.cat_pending = None;
+    }
+
+    fn append_out(&mut self, bytes: &[u8]) {
+        let room = self.run_out.len() - self.run_len;
+        let take = bytes.len().min(room);
+        self.run_out[self.run_len..self.run_len + take].copy_from_slice(&bytes[..take]);
+        self.run_len += take;
+    }
+
+    fn append_out_str(&mut self, s: &str) {
+        self.append_out(s.as_bytes());
+    }
+
+    fn append_exit(&mut self, code: u64) {
+        let mut line = [0u8; 40];
+        let mut n = 0usize;
+        push_str(&mut line, &mut n, b"\n[exit ");
+        let mut num = [0u8; 20];
+        push_str(&mut line, &mut n, unsigned(code, &mut num).as_bytes());
+        push_str(&mut line, &mut n, b"]\n");
+        self.append_out(&line[..n]);
+    }
+
+    fn begin_panel(&mut self, title: &str) {
+        self.run_show = true;
+        self.run_len = 0;
+        self.run_title_len = title.len().min(44);
+        self.run_title[..self.run_title_len].copy_from_slice(&title.as_bytes()[..self.run_title_len]);
+    }
+
+    fn run_plugin_panel(&mut self, id: &str) {
+        self.append_out_str("> run ");
+        self.append_out_str(id);
+        self.append_out_str("\n");
+        let mut out = [0u8; 3072];
+        if let Some((code, n)) = k::plugin_run_out(id, &mut out) {
+            self.append_out(&out[..n]);
+            if n > 0 && out[n - 1] != b'\n' {
+                self.append_out_str("\n");
+            }
+            self.append_exit(code);
+        } else {
+            match kplugin::run(id) {
+                Some(code) => self.append_exit(code),
+                None => self.append_out_str("(run unavailable on this host)\n"),
+            }
+        }
+        self.set_status("Done");
+    }
+
+    fn show_progress(screen: &Screen, text: &str) {
+        screen.reset_dirty();
+        screen.fill(0, 93, screen.width(), screen.height() - 93, BLACK());
+        screen.text_centered(screen.width() / 2, 340, text, 2, RED());
+        if let Some(d) = screen.dirty_rect() {
+            k::fb_present(d[0] as u64, d[1] as u64, d[2] as u64, d[3] as u64);
+        }
+    }
+
+    fn store_activate(&mut self, screen: &Screen, row: StoreRow) {
+        self.dd_open = false;
+        match row.src {
+            1 => {
+                let mut idb = [0u8; 48];
+                let src = self.plugins[row.idx].id_str();
+                let n = src.len().min(48);
+                idb[..n].copy_from_slice(&src.as_bytes()[..n]);
+                let id = slice_str(&idb[..n]);
+                self.begin_panel("Plugin output");
+                self.run_plugin_panel(id);
+            }
+            2 => {
+                let name = row.name_str();
+                let mut id = [0u8; 48];
+                let mut n = 0usize;
+                push_str(&mut id, &mut n, b"alp.");
+                push_str(&mut id, &mut n, name.as_bytes());
+                let id = slice_str(&id[..n]);
+                if row.installed {
+                    self.begin_panel("Alpine tool");
+                    self.run_plugin_panel(id);
+                } else {
+                    self.begin_panel("Alpine install");
+                    self.append_out_str("> install alpine package: ");
+                    self.append_out_str(name);
+                    self.append_out_str("\n");
+                    Self::show_progress(screen, "Installing from Alpine...");
+                    let ok = k::kimport::import_alpine(name);
+                    if ok {
+                        self.append_out_str("imported -> plugin ");
+                        self.append_out_str(id);
+                        self.append_out_str("\n");
+                        self.run_plugin_panel(id);
+                    } else {
+                        self.append_out_str("import failed (apkg index / network)\n");
+                    }
+                }
+            }
+            3 => {
+                let pkg = row.name_str();
+                let mut id = [0u8; 48];
+                let mut n = 0usize;
+                push_str(&mut id, &mut n, b"npm.");
+                push_str(&mut id, &mut n, pkg.as_bytes());
+                let id = slice_str(&id[..n]);
+                if row.installed {
+                    self.begin_panel("npm tool");
+                    self.run_plugin_panel(id);
+                } else {
+                    self.begin_panel("npm install");
+                    self.append_out_str("> npm install ");
+                    self.append_out_str(pkg);
+                    self.append_out_str("\n");
+                    Self::show_progress(screen, "npm install (downloading)...");
+                    let mut arg = [0u8; 220];
+                    let mut an = 0usize;
+                    push_str(&mut arg, &mut an, b"install --no-audit --no-fund --prefix /disk/import/npm-");
+                    push_str(&mut arg, &mut an, pkg.as_bytes());
+                    push_str(&mut arg, &mut an, b" ");
+                    push_str(&mut arg, &mut an, pkg.as_bytes());
+                    let mut tmp = [0u8; 2048];
+                    match k::linux_run("npm", slice_str(&arg[..an]), &mut tmp) {
+                        Some((code, tn)) => {
+                            self.append_out(&tmp[..tn]);
+                            self.append_exit(code);
+                        }
+                        None => {
+                            self.append_out_str("(npm unavailable - sysroot missing?)\n");
+                            return;
+                        }
+                    }
+                    if k::kimport::import_npm(pkg) {
+                        self.append_out_str("wrapped as plugin ");
+                        self.append_out_str(id);
+                        self.append_out_str("\n");
+                        self.run_plugin_panel(id);
+                    } else {
+                        self.append_out_str("wrap failed (no bin in package.json?)\n");
+                    }
+                }
+            }
+            _ => {}
+        }
+        // Reflect any newly-installed plugin in the store list / paging.
+        self.refresh();
     }
 
     fn scan_imports(&mut self) {
@@ -5439,25 +5793,6 @@ impl Market {
         }
         self.refresh();
     }
-
-    fn install_catalog(&mut self, screen: &Screen, idx: usize) {
-        let p = cat_row(idx);
-        let name = slice_str(&p.name[..p.name_len]);
-        self.cat_pending = None;
-        self.set_status("Installing...");
-        screen.reset_dirty();
-        screen.text(24, 162, "Installing...", 1, RED());
-        if let Some(d) = screen.dirty_rect() {
-            k::fb_present(d[0] as u64, d[1] as u64, d[2] as u64, d[3] as u64);
-        }
-        let ok = k::kimport::import_alpine(name);
-        if ok {
-            self.set_status("Installed & enabled - see Plugins");
-        } else {
-            self.set_status("Import failed (apkg update? network?)");
-        }
-        self.refresh();
-    }
 }
 
 impl Market {
@@ -5529,34 +5864,49 @@ fn item_active(it: &MarketItem) -> bool {
 
 fn market_tap(screen: &Screen, apps: &mut Apps, point: (i64, i64)) {
     let m = &mut apps.market;
+    // Output panel: only "Back" dismisses it.
+    if m.run_show {
+        if point.1 >= 104 && point.1 <= 144 && point.0 >= 20 && point.0 <= 120 {
+            m.run_show = false;
+        }
+        return;
+    }
+    // Source-filter dropdown overlay.
+    if m.dd_open {
+        if point.0 >= 300 && point.1 >= 150 {
+            let idx = (point.1 - 150) / 40;
+            if idx < 4 {
+                m.src = idx as u8;
+                m.scroll[2] = 0;
+                m.dd_open = false;
+                m.rebuild_store();
+                return;
+            }
+        }
+        m.dd_open = false;
+        return;
+    }
     if point.1 >= 100 && point.1 <= 142 {
-        let tab = ((point.0 - 20) / 112).clamp(0, 3) as usize;
+        let tab = ((point.0 - 20) / 112).clamp(0, 2) as usize;
         if tab != m.tab {
             m.tab = tab;
             m.searching = false;
+            m.dd_open = false;
             m.cat_pending = None;
-            if tab == 3 && !m.cat_loaded {
-                m.load_catalog();
-                if m.cat_count == 0 {
-                    m.set_status("No index - run apkg update in Terminal");
-                }
+            if tab == 2 {
+                m.rebuild_store();
             }
         }
         return;
     }
     if point.1 >= 150 && point.1 <= 186 {
-        if m.tab == 3 {
-            if point.0 >= 20 && point.0 < 320 {
+        if m.tab == 2 {
+            if point.0 >= 20 && point.0 < 300 {
                 m.searching = true;
                 return;
             }
-            if point.0 >= 330 {
-                m.load_catalog();
-                if m.cat_count == 0 {
-                    m.set_status("No index - run apkg update in Terminal");
-                } else {
-                    m.set_status("Catalog reloaded (256-entry window)");
-                }
+            if point.0 >= 300 {
+                m.dd_open = true;
                 return;
             }
             return;
@@ -5569,7 +5919,7 @@ fn market_tap(screen: &Screen, apps: &mut Apps, point: (i64, i64)) {
             if k::kpkg::update_quiet("") {
                 m.set_status("Repo updated");
             } else {
-                m.set_status("Fetch failed — built-ins still available");
+                m.set_status("Fetch failed - built-ins still available");
             }
             m.refresh();
             return;
@@ -5587,19 +5937,11 @@ fn market_tap(screen: &Screen, apps: &mut Apps, point: (i64, i64)) {
     if point.1 >= 196 && point.0 >= 20 && point.0 < 460 {
         let row = ((point.1 - 196) / 96) as usize;
         if row >= 6 { return; }
-        if m.tab == 3 {
-            let Some(idx) = m.cat_filtered_pos(m.scroll[3] + row) else { return };
-            let p = cat_row(idx);
-            let name = slice_str(&p.name[..p.name_len]);
-            if m.cat_installed(name) {
-                m.set_status("Already installed - manage in Plugins");
-                return;
-            }
-            if m.cat_pending == Some(idx) {
-                m.install_catalog(screen, idx);
-            } else {
-                m.cat_pending = Some(idx);
-                m.set_status("Tap again to install");
+        if m.tab == 2 {
+            let pos = m.scroll[2] + row;
+            if pos < m.store_count {
+                let r = m.store[pos];
+                m.store_activate(screen, r);
             }
             return;
         }
@@ -5611,14 +5953,14 @@ fn market_tap(screen: &Screen, apps: &mut Apps, point: (i64, i64)) {
 
 fn market_key(apps: &mut Apps, code: u16, shift: bool) -> bool {
     let m = &mut apps.market;
-    if m.tab != 3 || !m.searching {
+    if m.tab != 2 || !m.searching {
         return false;
     }
     match key_event(code, shift) {
         Some((0, true)) => {
             m.search_len = m.search_len.saturating_sub(1);
-            m.scroll[3] = 0;
-            m.cat_pending = None;
+            m.scroll[2] = 0;
+            m.rebuild_store();
             true
         }
         Some((b'\n', _)) => {
@@ -5630,8 +5972,8 @@ fn market_key(apps: &mut Apps, code: u16, shift: bool) -> bool {
                 m.search[m.search_len] = byte;
                 m.search_len += 1;
             }
-            m.scroll[3] = 0;
-            m.cat_pending = None;
+            m.scroll[2] = 0;
+            m.rebuild_store();
             true
         }
         None => false,
@@ -5642,59 +5984,96 @@ fn draw_market(screen: &Screen, m: &Market, osk: bool) {
     let width = screen.width();
     screen.fill(0, 93, width, screen.height() - 93, BLACK());
 
-    let tabs = ["Themes", "Fonts", "Plugins", "Alpine"];
-    for t in 0..4 {
+    // Output panel (process + results) for store actions.
+    if m.run_show {
+        button(screen, 20, 104, 100, 40, "Back", SURFACE_HI(), TEXT());
+        screen.text(140, 116, slice_str(&m.run_title[..m.run_title_len]), 1, MUTED());
+        let mut y = 156i64;
+        let data = &m.run_out[..m.run_len];
+        for line in data.split(|&b| b == b'\n') {
+            let mut start = 0usize;
+            while start < line.len() {
+                if y > 740 { break; }
+                let end = (start + 50).min(line.len());
+                let mut clean = [0u8; 50];
+                let mut cn = 0usize;
+                for &b in &line[start..end] {
+                    clean[cn] = if (32..=126).contains(&b) { b } else { b'.' };
+                    cn += 1;
+                }
+                if cn > 0 {
+                    screen.text(24, y, slice_str(&clean[..cn]), 1, TEXT());
+                }
+                y += 20;
+                start = end;
+            }
+            if y > 740 { break; }
+        }
+        if m.run_len == 0 {
+            screen.text_centered(width / 2, 380, "Working...", 2, MUTED());
+        }
+        return;
+    }
+
+    let tabs = ["Themes", "Fonts", "Store"];
+    for t in 0..3 {
         let x = 20 + t as i64 * 112;
-        let w = if t == 3 { 104 } else { 108 };
+        let w = 108;
         let active = m.tab == t;
         screen.round_rect(x, 100, w, 42, 21, if active { RED_DIM() } else { SURFACE() });
         screen.text_centered(x + w / 2, 110, tabs[t], 2, if active { TEXT() } else { MUTED() });
     }
 
-    let status_shown = m.status_len.min(32);
-    screen.text(24, 162, slice_str(&m.status[..status_shown]), 1, MUTED());
-    if m.tab == 3 {
-        screen.round_rect(20, 150, 300, 36, 18, if m.searching { SURFACE_HI() } else { SURFACE() });
+    if m.tab == 2 {
+        screen.round_rect(20, 150, 276, 36, 18, if m.searching { SURFACE_HI() } else { SURFACE() });
         let label = if m.search_len > 0 {
             slice_str(&m.search[..m.search_len])
         } else {
-            "Search tools..."
+            "Search packages..."
         };
-        let shown = label.len().min(34);
+        let shown = label.len().min(30);
         screen.text(36, 162, &label[..shown], 1, if m.search_len > 0 { TEXT() } else { MUTED() });
-        button(screen, 330, 150, 126, 36, "Reload", SURFACE_HI(), TEXT());
+        let src_label = match m.src { 1 => "Installed", 2 => "Alpine", 3 => "npm", _ => "All" };
+        let mut pill = [0u8; 16];
+        let mut pn = 0usize;
+        push_str(&mut pill, &mut pn, src_label.as_bytes());
+        push_str(&mut pill, &mut pn, b" v");
+        button(screen, 320, 150, 136, 36, slice_str(&pill[..pn]),
+            if m.dd_open { RED_DIM() } else { SURFACE_HI() }, TEXT());
     } else {
+        let status_shown = m.status_len.min(32);
+        screen.text(24, 162, slice_str(&m.status[..status_shown]), 1, MUTED());
         button(screen, 200, 150, 120, 36, "Import", RED_DIM(), TEXT());
         button(screen, 330, 150, 126, 36, "Refresh", SURFACE_HI(), TEXT());
     }
 
     let max_y = if osk { 452 } else { 760 };
     let mut row = 0i64;
-    if m.tab == 3 {
+    if m.tab == 2 {
         let mut skipped = 0usize;
-        for i in 0..m.cat_count {
-            if !m.cat_matches(i) { continue; }
-            if skipped < m.scroll[3] { skipped += 1; continue; }
+        for pos in 0..m.store_count {
+            if skipped < m.scroll[2] { skipped += 1; continue; }
             let y = 196 + row * 96;
             if y + 88 > max_y { break; }
-            let p = cat_row(i);
+            let r = m.store[pos];
             screen.round_rect(20, y, width - 40, 88, 20, SURFACE());
-            let name = slice_str(&p.name[..p.name_len]);
+            let name = r.name_str();
             let nlen = name.len().min(22);
             screen.text(40, y + 14, &name[..nlen], 2, TEXT());
-            let desc = slice_str(&p.desc[..p.desc_len]);
+            let desc = r.desc_str();
             let dlen = desc.len().min(44);
             screen.text(40, y + 46, &desc[..dlen], 1, MUTED());
-            let mut tag = [0u8; 40];
-            let mut tn = 0;
-            push_str(&mut tag, &mut tn, b"ALPINE  v");
-            push_str(&mut tag, &mut tn, &p.version[..p.version_len]);
-            screen.text(40, y + 66, slice_str(&tag[..tn]), 1, OUTLINE());
-            let installed = m.cat_installed(name);
-            let (label, bg, fg) = if m.cat_pending == Some(i) {
-                ("SURE?", RED(), TEXT())
-            } else if installed {
-                ("Installed", SURFACE_HI(), MUTED())
+            let tag = match r.src { 1 => "INSTALLED", 2 => "ALPINE", 3 => "NPM", _ => "" };
+            let mut tg = [0u8; 40];
+            let mut tn = 0usize;
+            push_str(&mut tg, &mut tn, tag.as_bytes());
+            if r.src == 2 && r.version_len > 0 {
+                push_str(&mut tg, &mut tn, b"  v");
+                push_str(&mut tg, &mut tn, r.version_str().as_bytes());
+            }
+            screen.text(40, y + 66, slice_str(&tg[..tn]), 1, OUTLINE());
+            let (label, bg, fg) = if r.installed {
+                ("Open", RED(), TEXT())
             } else {
                 ("Install", SURFACE_HI(), TEXT())
             };
@@ -5703,11 +6082,16 @@ fn draw_market(screen: &Screen, m: &Market, osk: bool) {
             if row >= 6 { break; }
         }
         if row == 0 {
-            if m.cat_count == 0 {
-                screen.text_centered(width / 2, 300, "No Alpine catalog", 2, MUTED());
-                screen.text_centered(width / 2, 336, "Run 'apkg update' in Terminal, then Reload", 1, MUTED());
-            } else {
-                screen.text_centered(width / 2, 300, "No matches", 2, MUTED());
+            screen.text_centered(width / 2, 300, "No packages here", 2, MUTED());
+            screen.text_centered(width / 2, 336, "Try another source filter or search", 1, MUTED());
+        }
+        if m.dd_open {
+            let opts = ["All sources", "Installed", "Alpine", "npm"];
+            for i in 0..4 {
+                let y = 150 + i as i64 * 40;
+                screen.round_rect(300, y, 160, 38, 12,
+                    if m.src == i as u8 { RED_DIM() } else { SURFACE_MAX() });
+                screen.text(312, y + 11, opts[i], 1, TEXT());
             }
         }
     } else {
@@ -5824,6 +6208,68 @@ pub fn test_plugin_output(id: &str) -> u64 {
     apps.plugins.selected = Some(i);
     apps.plugins.primary_action(&screen);
     if apps.plugins.run_show { apps.plugins.run_len as u64 + 1 } else { 0 }
+}
+
+fn test_store_prepare(filter: u8, query: &str) -> Apps {
+    let mut apps = Apps::new();
+    apps.market.refresh();
+    apps.market.tab = 2;
+    apps.market.src = filter;
+    let n = query.len().min(apps.market.search.len());
+    apps.market.search[..n].copy_from_slice(&query.as_bytes()[..n]);
+    apps.market.search_len = n;
+    apps.market.rebuild_store();
+    apps
+}
+
+#[cfg(not(target_os = "none"))]
+pub fn test_store_count(filter: u8, query: &str) -> u64 {
+    test_store_prepare(filter, query).market.store_count as u64
+}
+
+#[cfg(not(target_os = "none"))]
+pub fn test_store_names(filter: u8, query: &str, out: &mut [u8]) -> usize {
+    let apps = test_store_prepare(filter, query);
+    let mut n = 0usize;
+    for i in 0..apps.market.store_count.min(8) {
+        let r = apps.market.store[i];
+        let name = r.name_str().as_bytes();
+        let take = name.len().min(out.len().saturating_sub(n));
+        out[n..n + take].copy_from_slice(&name[..take]);
+        n += take;
+        if i + 1 < apps.market.store_count && n < out.len() {
+            out[n] = b'|';
+            n += 1;
+        }
+    }
+    n
+}
+
+/// Run a store row by (name, src) and copy the captured output into `out`.
+/// Returns run_len + 1 when the output view opened, 0 on failure.
+#[cfg(not(target_os = "none"))]
+pub fn test_store_run(name: &str, src: u8, out: &mut [u8]) -> u64 {
+    static mut TEST_FB: [u32; 1080 * 1920] = [0; 1080 * 1920];
+    let screen = Screen::new(core::ptr::addr_of_mut!(TEST_FB) as u64, 1080, 1920, 1080 * 4);
+    let mut apps = Apps::new();
+    apps.market.refresh();
+    apps.market.tab = 2;
+    apps.market.src = 0;
+    apps.market.search_len = 0;
+    apps.market.rebuild_store();
+    let mut found = None;
+    for i in 0..apps.market.store_count {
+        let r = apps.market.store[i];
+        if r.src == src && r.name_str() == name {
+            found = Some(r);
+            break;
+        }
+    }
+    let Some(r) = found else { return 0 };
+    apps.market.store_activate(&screen, r);
+    let n = apps.market.run_len.min(out.len());
+    out[..n].copy_from_slice(&apps.market.run_out[..n]);
+    apps.market.run_len as u64 + 1
 }
 
 #[cfg(not(target_os = "none"))]

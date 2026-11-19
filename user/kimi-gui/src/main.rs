@@ -981,8 +981,48 @@ pub extern "C" fn kimi_test_import_alpine(pkg: u64) -> u64 {
     k::kimport::import_alpine(p) as u64
 }
 
-/// Host-only test hook: list installed plugins as "id ptype enabled\n" lines
-/// into `out`; returns the count.
+/// Host-only test hook: build the Marketplace store with a source filter
+/// (0 all, 1 installed, 2 alpine, 3 npm) + search query; returns the row count.
+#[no_mangle]
+#[cfg(not(target_os = "none"))]
+pub extern "C" fn kimi_test_store_count(filter: u64, query: u64) -> u64 {
+    unsafe fn cstr(p: *const u8) -> &'static str {
+        let mut n = 0;
+        while *p.add(n) != 0 { n += 1; }
+        core::str::from_utf8(core::slice::from_raw_parts(p, n)).unwrap_or("")
+    }
+    let q = unsafe { cstr(query as *const u8) };
+    apps::test_store_count(filter as u8, q)
+}
+
+/// Host-only test hook: write "name|name|..." of the first store rows to `out`.
+#[no_mangle]
+#[cfg(not(target_os = "none"))]
+pub extern "C" fn kimi_test_store_names(filter: u64, query: u64, out: u64, cap: u64) -> u64 {
+    unsafe fn cstr(p: *const u8) -> &'static str {
+        let mut n = 0;
+        while *p.add(n) != 0 { n += 1; }
+        core::str::from_utf8(core::slice::from_raw_parts(p, n)).unwrap_or("")
+    }
+    let q = unsafe { cstr(query as *const u8) };
+    let buf = unsafe { core::slice::from_raw_parts_mut(out as *mut u8, cap as usize) };
+    apps::test_store_names(filter as u8, q, buf) as u64
+}
+
+/// Host-only test hook: run a store row by (name, src); copies captured output
+/// into `out`, returns run_len + 1 (0 = row not found).
+#[no_mangle]
+#[cfg(not(target_os = "none"))]
+pub extern "C" fn kimi_test_store_run(name: u64, src: u64, out: u64, cap: u64) -> u64 {
+    unsafe fn cstr(p: *const u8) -> &'static str {
+        let mut n = 0;
+        while *p.add(n) != 0 { n += 1; }
+        core::str::from_utf8(core::slice::from_raw_parts(p, n)).unwrap_or("")
+    }
+    let nm = unsafe { cstr(name as *const u8) };
+    let buf = unsafe { core::slice::from_raw_parts_mut(out as *mut u8, cap as usize) };
+    apps::test_store_run(nm, src as u8, buf)
+}
 #[no_mangle]
 #[cfg(not(target_os = "none"))]
 pub extern "C" fn kimi_test_plugin_list(out: u64) -> u64 {

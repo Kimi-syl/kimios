@@ -670,7 +670,7 @@ static void *plugin_bg_drain(void *arg) {
 // entry, args...] (args tokenized by spaces). env = guest_env_build plus
 // KIMI_API_PORT/KIMI_PLUGIN_ID/KIMI_PLUGIN_DIR. background=1 forks without
 // waiting (returns 0); foreground captures output and returns the exit code.
-static uint64_t fs_plugin_run(const char *id, int background) {
+static uint64_t fs_plugin_run(const char *id, int background, char *outbuf, size_t outcap, size_t *olen_out) {
     if (!*id || !safe_rel(id) || strchr(id, '/') || strchr(id, '\\')) return ERROR;
     char mpath[512];
     snprintf(mpath, sizeof mpath, "%s/plugins/%s/plugin.json", diskRoot, id);
@@ -739,10 +739,13 @@ static uint64_t fs_plugin_run(const char *id, int background) {
         LOG("plugin %s background pid=%d", id, (int)pid);
         return 0;
     }
-    static char out[8192];
+    static char sbuf[8192];
+    char *out = outbuf ? outbuf : sbuf;
+    size_t cap = outbuf ? outcap : sizeof sbuf;
     size_t olen = 0; int code = 0;
-    if (kimi_guest_capture(load_exe, sysroot, argv, envp, out, sizeof out, &olen, &code) < 0) return ERROR;
-    LOG("plugin %s code=%d out=%s", id, code, out);
+    if (kimi_guest_capture(load_exe, sysroot, argv, envp, out, cap, &olen, &code) < 0) return ERROR;
+    LOG("plugin %s code=%d out=%.400s", id, code, out);
+    if (olen_out) *olen_out = olen;
     return (uint64_t)code;
 }
 
@@ -938,7 +941,17 @@ uint64_t kimi_host_syscall(uint64_t n, uint64_t a0, uint64_t a1, uint64_t a2, ui
     case 54: { // SYS_PLUGIN_RUN: a0=id ptr, a1=len, a2=background (0 wait, 1 detach)
         char id[128];
         str_arg(a0, a1, id, sizeof id);
-        return fs_plugin_run(id, a2 != 0);
+        return fs_plugin_run(id, a2 != 0, NULL, 0, NULL);
+    }
+    case 55: { // SYS_PLUGIN_RUN_OUT: a0=req{id_ptr,id_len,out_ptr,out_cap,out_len,code}
+        struct plugin_run_req { uint64_t id_ptr, id_len, out_ptr, out_cap, out_len, code; } *rq = (void *)a0;
+        char id[128];
+        str_arg(rq->id_ptr, rq->id_len, id, sizeof id);
+        size_t olen = 0;
+        uint64_t code = fs_plugin_run(id, 0, (char *)rq->out_ptr, (size_t)rq->out_cap, &olen);
+        if (code == ERROR) return ERROR;
+        rq->out_len = olen; rq->code = code;
+        return code;
     }
     case 23: { if (a1 < 1) return ERROR; uint64_t *o = (uint64_t *)a0; o[0] = 1; o[1] = 0; o[2] = 2; o[3] = 0; return 1; }
     case 12: return 2048;
@@ -1149,4 +1162,36 @@ Java_com_kimios_libos_KimiBridge_nativeImportAlpine(JNIEnv *env, jclass cls, jst
     LOG("import-alpine %s result=%llu", pkg, (unsigned long long)r);
     (*env)->ReleaseStringUTFChars(env, jpkg, pkg);
     return (jint)r;
+}
+
+extern uint64_t kimi_test_store_count(uint64_t, uint64_t);
+extern uint64_t kimi_test_store_names(uint64_t, uint64_t, uint64_t, uint64_t);
+extern uint64_t kimi_test_store_run(uint64_t, uint64_t, uint64_t, uint64_t);
+JNIEXPORT jlong JNICALL
+Java_com_kimios_libos_KimiBridge_nativeStoreCount(JNIEnv *env, jclass cls, jint filter, jstring jq) {
+    (void)cls;
+    const char *q = jq ? (*env)->GetStringUTFChars(env, jq, NULL) : "";
+    uint64_t n = kimi_test_store_count((uint64_t)filter, (uint64_t)(uintptr_t)q);
+    char names[512];
+    uint64_t len = kimi_test_store_names((uint64_t)filter, (uint64_t)(uintptr_t)q,
+                                         (uint64_t)(uintptr_t)names, sizeof names - 1);
+    names[len] = 0;
+    LOG("mstore filter=%d q='%s' count=%llu names=[%s]", (int)filter, q,
+        (unsigned long long)n, names);
+    if (jq) (*env)->ReleaseStringUTFChars(env, jq, q);
+    return (jlong)n;
+}
+
+JNIEXPORT jlong JNICALL
+Java_com_kimios_libos_KimiBridge_nativeStoreRun(JNIEnv *env, jclass cls, jstring jname, jint src) {
+    (void)cls;
+    const char *nm = (*env)->GetStringUTFChars(env, jname, NULL);
+    static char out[2048];
+    uint64_t r = kimi_test_store_run((uint64_t)(uintptr_t)nm, (uint64_t)src,
+                                     (uint64_t)(uintptr_t)out, sizeof out - 1);
+    out[r ? (r - 1) : 0] = 0;
+    LOG("mstore run src=%d name='%s' result=%llu out=[%.*s]", (int)src, nm,
+        (unsigned long long)r, (int)(r ? r - 1 : 0), out);
+    (*env)->ReleaseStringUTFChars(env, jname, nm);
+    return (jlong)r;
 }
