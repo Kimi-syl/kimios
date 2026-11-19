@@ -142,6 +142,7 @@ pub fn exec(input: &[u8]) {
         k::print("  uname          show system identification\n");
         k::print("  uptime         show seconds since boot\n");
         k::print("  kpkg <sub>     package manager (update/list/install/run)\n");
+        k::print("  kplugin <sub>  plugins (list/run/enable/disable/uninstall/import-alpine/import-py/catalog)\n");
         k::print("  dvm <file.dex> run a DEX file on the mini-Dalvik VM\n");
         k::print("  apk <file.apk> inspect an APK\n");
         k::print("  gfxbench       run the display-path benchmark\n");
@@ -525,6 +526,111 @@ pub fn exec(input: &[u8]) {
                 k::print("e.g. apkg install musl / python3 / nodejs\n");
             }
         }
+    } else if command == &b"kplugin"[..] {
+        let (sub, rest) = split_word(argument);
+        let rest = trim(rest);
+        match sub {
+            b"list" => {
+                const EMPTY: k::kplugin::PluginInfo = k::kplugin::PluginInfo {
+                    id: [0; 48], id_len: 0, name: [0; 48], name_len: 0,
+                    version: [0; 16], version_len: 0, ptype: 0, runtime: 0, enabled: false,
+                };
+                let mut infos = [EMPTY; 32];
+                let n = k::kplugin::list(&mut infos);
+                if n == 0 {
+                    k::print("kplugin: none installed\n");
+                }
+                for i in 0..n {
+                    let p = &infos[i];
+                    k::print("  ");
+                    k::print(p.id_str());
+                    k::print("  ");
+                    k::print(p.name_str());
+                    k::print("  ");
+                    k::print(p.type_str());
+                    k::print(if p.enabled { "  on\n" } else { "  off\n" });
+                }
+            }
+            b"run" => match core::str::from_utf8(rest) {
+                Ok(id) if !id.is_empty() => match k::kplugin::run(id) {
+                    Some(code) => {
+                        k::print("kplugin: exit ");
+                        k::print_u64(code);
+                        k::print("\n");
+                    }
+                    None => k::print("kplugin: run failed (not installed?)\n"),
+                },
+                _ => k::print("usage: kplugin run <id>\n"),
+            },
+            b"enable" | b"disable" => {
+                let on = sub == b"enable";
+                match core::str::from_utf8(rest) {
+                    Ok(id) if !id.is_empty() => {
+                        if k::kplugin::set_enabled(id, on) {
+                            k::print(if on { "kplugin: enabled\n" } else { "kplugin: disabled\n" });
+                        } else {
+                            k::print("kplugin: toggle failed\n");
+                        }
+                    }
+                    _ => k::print("usage: kplugin enable|disable <id>\n"),
+                }
+            }
+            b"uninstall" => match core::str::from_utf8(rest) {
+                Ok(id) if !id.is_empty() => {
+                    if k::kplugin::uninstall(id) {
+                        k::print("kplugin: uninstalled\n");
+                    } else {
+                        k::print("kplugin: uninstall failed\n");
+                    }
+                }
+                _ => k::print("usage: kplugin uninstall <id>\n"),
+            },
+            b"import-alpine" => match core::str::from_utf8(rest) {
+                Ok(pkg) if !pkg.is_empty() => {
+                    k::print("kplugin: importing Alpine package ");
+                    k::print(pkg);
+                    k::print(" (download + wrap)...\n");
+                    if k::kimport::import_alpine(pkg) {
+                        k::print("kplugin: imported & enabled (id alp.");
+                        k::print(pkg);
+                        k::print(")\n");
+                    } else {
+                        k::print("kplugin: import failed (apkg update first? network?)\n");
+                    }
+                }
+                _ => k::print("usage: kplugin import-alpine <pkg>\n"),
+            },
+            b"import-py" => {
+                let (url_word, rest2) = split_word(rest);
+                let (id_word, name_rest) = split_word(rest2);
+                let url = core::str::from_utf8(url_word).unwrap_or("");
+                let id = core::str::from_utf8(id_word).unwrap_or("");
+                let name = core::str::from_utf8(trim(name_rest)).unwrap_or("");
+                if url.is_empty() || id.is_empty() {
+                    k::print("usage: kplugin import-py <url> <id> <name>\n");
+                } else if k::kimport::import_python_url(url, id, name) {
+                    k::print("kplugin: python plugin imported & enabled\n");
+                } else {
+                    k::print("kplugin: python import failed (fetch/manifest)\n");
+                }
+            }
+            b"catalog" => {
+                let (filter_word, page_word) = split_word(rest);
+                let filter = core::str::from_utf8(filter_word).unwrap_or("");
+                let page = parse_u64(page_word).unwrap_or(0) as usize;
+                catalog_cmd(filter, page);
+            }
+            _ => {
+                k::print("kplugin — native guest plugins\n");
+                k::print("  kplugin list                    installed plugins\n");
+                k::print("  kplugin run <id>                run an app plugin\n");
+                k::print("  kplugin enable|disable <id>     toggle enable state\n");
+                k::print("  kplugin uninstall <id>          remove a plugin\n");
+                k::print("  kplugin import-alpine <pkg>     install Alpine pkg + wrap as plugin\n");
+                k::print("  kplugin import-py <url> <id> <name>  wrap a raw .py URL\n");
+                k::print("  kplugin catalog [filter] [page] browse installable Alpine tools\n");
+            }
+        }
     } else if command == &b"net"[..] {
         let timeout = parse_u64(argument).unwrap_or(5000);
         k::net_status(timeout);
@@ -774,6 +880,66 @@ fn disk_bin_app(command: &[u8], argument: &[u8]) -> bool {
             true
         }
     }
+}
+
+fn contains_ci(hay: &[u8], needle: &[u8]) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+    if needle.len() > hay.len() {
+        return false;
+    }
+    hay.windows(needle.len()).any(|w| {
+        w.iter().zip(needle).all(|(a, b)| a.to_ascii_lowercase() == b.to_ascii_lowercase())
+    })
+}
+
+/// Browse the Alpine command catalog (first 256 index entries, no downloads),
+/// filtered by a case-insensitive substring of name/description, 20 per page.
+fn catalog_cmd(filter: &str, page: usize) {
+    const CAP: usize = 256;
+    const PER_PAGE: usize = 20;
+    const EMPTY: k::alpine::CmdPkg = k::alpine::CmdPkg {
+        name: [0; 32], name_len: 0, desc: [0; 64], desc_len: 0, version: [0; 16], version_len: 0,
+    };
+    static mut BUF: [k::alpine::CmdPkg; CAP] = [EMPTY; CAP];
+    let buf = unsafe { &mut *core::ptr::addr_of_mut!(BUF) };
+    let n = k::alpine::list_command_packages(buf);
+    if n == 0 {
+        k::print("kplugin: catalog empty — run `apkg update` first\n");
+        return;
+    }
+    let fb = filter.as_bytes();
+    let mut matched = 0usize;
+    let mut shown = 0usize;
+    let start = page * PER_PAGE;
+    for i in 0..n {
+        let p = &buf[i];
+        if !contains_ci(&p.name[..p.name_len], fb) && !contains_ci(&p.desc[..p.desc_len], fb) {
+            continue;
+        }
+        if matched >= start && shown < PER_PAGE {
+            k::print("  ");
+            k::print_bytes(&p.name[..p.name_len]);
+            k::print("  ");
+            k::print_bytes(&p.version[..p.version_len]);
+            k::print("  ");
+            k::print_bytes(&p.desc[..p.desc_len]);
+            k::print("\n");
+            shown += 1;
+        }
+        matched += 1;
+    }
+    let pages = (matched + PER_PAGE - 1) / PER_PAGE;
+    k::print("kplugin: ");
+    k::print_u64(matched as u64);
+    k::print(" matches, page ");
+    k::print_u64((page + 1) as u64);
+    k::print("/");
+    k::print_u64(pages.max(1) as u64);
+    k::print(" (buffer holds first ");
+    k::print_u64(n as u64);
+    k::print(" catalog entries; install with `kplugin import-alpine <name>`)\n");
 }
 
 /// Run an Alpine sysroot binary natively (Android libOS) and print its output.

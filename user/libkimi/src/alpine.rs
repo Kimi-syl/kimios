@@ -1372,6 +1372,156 @@ pub fn info(name: &str) {
     });
 }
 
+// ---------------------------------------------------------------------------
+// Command catalog (Marketplace browsing of installable CLI tools)
+// ---------------------------------------------------------------------------
+
+/// A package that ships executables (its `p:` provides line carries `cmd:`
+/// tokens). Fixed-buffer record for listing without downloading anything.
+#[derive(Clone, Copy)]
+pub struct CmdPkg {
+    pub name: [u8; 32],
+    pub name_len: usize,
+    pub desc: [u8; 64],
+    pub desc_len: usize,
+    pub version: [u8; 16],
+    pub version_len: usize,
+}
+
+impl CmdPkg {
+    pub fn name_str(&self) -> &str { core::str::from_utf8(&self.name[..self.name_len]).unwrap_or("") }
+    pub fn desc_str(&self) -> &str { core::str::from_utf8(&self.desc[..self.desc_len]).unwrap_or("") }
+    pub fn version_str(&self) -> &str { core::str::from_utf8(&self.version[..self.version_len]).unwrap_or("") }
+}
+
+/// True when the stanza's `p:` provides line has at least one `cmd:` token.
+fn stanza_has_cmd(stanza: &[u8]) -> bool {
+    let Some(prov) = field(stanza, b"p:") else { return false };
+    prov.split(|&b| b == b' ').any(|t| t.starts_with(b"cmd:"))
+}
+
+/// Write the stanza's provided command names (`cmd:<name>=<ver>` -> `<name>`)
+/// into `dst` as a space-separated list. Returns bytes written.
+fn stanza_commands(stanza: &[u8], dst: &mut [u8]) -> usize {
+    let Some(prov) = field(stanza, b"p:") else { return 0 };
+    let mut n = 0usize;
+    for t in prov.split(|&b| b == b' ') {
+        let Some(rest) = t.strip_prefix(b"cmd:") else { continue };
+        let name = rest.split(|&b| b == b'=').next().unwrap_or(rest);
+        if name.is_empty() { continue; }
+        if n > 0 && n < dst.len() { dst[n] = b' '; n += 1; }
+        let take = name.len().min(dst.len() - n);
+        dst[n..n + take].copy_from_slice(&name[..take]);
+        n += take;
+        if n == dst.len() { break; }
+    }
+    n
+}
+
+/// List packages that provide commands (installable CLI tools) from the cached
+/// APKINDEX, without downloading them. Fills at most `out.len()` records and
+/// returns the count. Requires `update()` to have run.
+pub fn list_command_packages(out: &mut [CmdPkg]) -> usize {
+    let mut count = 0usize;
+    with_index_stanzas(|s| {
+        if count >= out.len() { return false; }
+        if !stanza_has_cmd(s) { return true; }
+        let Some(name) = field(s, b"P:") else { return true };
+        let mut e = CmdPkg { name: [0; 32], name_len: 0, desc: [0; 64], desc_len: 0, version: [0; 16], version_len: 0 };
+        e.name_len = name.len().min(32);
+        e.name[..e.name_len].copy_from_slice(&name[..e.name_len]);
+        if let Some(t) = field(s, b"T:") {
+            e.desc_len = t.len().min(64);
+            e.desc[..e.desc_len].copy_from_slice(&t[..e.desc_len]);
+        }
+        if let Some(v) = field(s, b"V:") {
+            e.version_len = v.len().min(16);
+            e.version[..e.version_len].copy_from_slice(&v[..e.version_len]);
+        }
+        out[count] = e;
+        count += 1;
+        true
+    });
+    count
+}
+
+/// Single-package metadata from the cached APKINDEX: `T:` description, `V:`
+/// version (truncated to 16 bytes), provided command names (`p:` `cmd:` tokens,
+/// space-separated) and `L:` license. Fixed buffers, no allocation.
+#[derive(Clone, Copy)]
+pub struct PkgMeta {
+    pub desc: [u8; 96],
+    pub desc_len: usize,
+    pub version: [u8; 16],
+    pub version_len: usize,
+    pub commands: [u8; 256],
+    pub commands_len: usize,
+    pub license: [u8; 24],
+    pub license_len: usize,
+}
+
+impl PkgMeta {
+    pub fn desc_str(&self) -> &str { core::str::from_utf8(&self.desc[..self.desc_len]).unwrap_or("") }
+    pub fn version_str(&self) -> &str { core::str::from_utf8(&self.version[..self.version_len]).unwrap_or("") }
+    pub fn commands_str(&self) -> &str { core::str::from_utf8(&self.commands[..self.commands_len]).unwrap_or("") }
+    pub fn license_str(&self) -> &str { core::str::from_utf8(&self.license[..self.license_len]).unwrap_or("") }
+}
+
+fn meta_from_stanza(s: &[u8]) -> PkgMeta {
+    let mut m = PkgMeta {
+        desc: [0; 96], desc_len: 0, version: [0; 16], version_len: 0,
+        commands: [0; 256], commands_len: 0, license: [0; 24], license_len: 0,
+    };
+    if let Some(t) = field(s, b"T:") {
+        m.desc_len = t.len().min(m.desc.len());
+        m.desc[..m.desc_len].copy_from_slice(&t[..m.desc_len]);
+    }
+    if let Some(v) = field(s, b"V:") {
+        m.version_len = v.len().min(m.version.len());
+        m.version[..m.version_len].copy_from_slice(&v[..m.version_len]);
+    }
+    if let Some(l) = field(s, b"L:") {
+        m.license_len = l.len().min(m.license.len());
+        m.license[..m.license_len].copy_from_slice(&l[..m.license_len]);
+    }
+    m.commands_len = stanza_commands(s, &mut m.commands);
+    m
+}
+
+/// Look up a package's description, version and provided commands. Matches the
+/// exact `P:` name first; falls back to a stanza providing `cmd:<pkg>` so
+/// command aliases resolve (e.g. "node" -> the nodejs stanza).
+pub fn package_info(pkg: &str) -> Option<PkgMeta> {
+    let nb = pkg.as_bytes();
+    let mut found = None;
+    with_index_stanzas(|s| {
+        if field(s, b"P:") == Some(nb) {
+            found = Some(meta_from_stanza(s));
+            return false;
+        }
+        true
+    });
+    if found.is_some() { return found; }
+    let mut tok = [0u8; 64];
+    let tn = (4 + nb.len()).min(tok.len());
+    tok[..4].copy_from_slice(b"cmd:");
+    tok[4..tn].copy_from_slice(&nb[..tn - 4]);
+    let tok = &tok[..tn];
+    with_index_stanzas(|s| {
+        if let Some(prov) = field(s, b"p:") {
+            for t in prov.split(|&b| b == b' ') {
+                let base = t.split(|&b| b == b'=').next().unwrap_or(t);
+                if base == tok {
+                    found = Some(meta_from_stanza(s));
+                    return false;
+                }
+            }
+        }
+        true
+    });
+    found
+}
+
 /// Debug: stream-extract a gzip tar file to dest, returning the file count.
 pub fn debug_extract(src: &str, dest: &str) -> u64 {
     let Some(h) = k::open(src) else { return 0 };

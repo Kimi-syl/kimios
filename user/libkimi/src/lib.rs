@@ -9,6 +9,7 @@
 pub mod apk;
 pub mod alpine;
 pub mod dvm;
+pub mod kimport;
 pub mod kpkg;
 pub mod kplugin;
 pub mod shell;

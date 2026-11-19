@@ -677,12 +677,21 @@ static uint64_t fs_plugin_run(const char *id, int background) {
     if (!file_exists(mpath)) return ERROR;
     char runtime[32], entry[256], args[2048];
     if (plugin_manifest(id, runtime, sizeof runtime, entry, sizeof entry, args, sizeof args) != 0) return ERROR;
-    if (!entry[0] || entry[0] == '/' || !safe_rel(entry)) return ERROR;
+    if (!entry[0]) return ERROR;
+    char sysroot[512]; snprintf(sysroot, sizeof sysroot, "%s/alpine/root", diskRoot);
     char pdir[512], exe[600];
     snprintf(pdir, sizeof pdir, "%s/plugins/%s", diskRoot, id);
-    snprintf(exe, sizeof exe, "%s/%s", pdir, entry);
+    if (strncmp(entry, "sysroot:", 8) == 0) {
+        // Converter-generated Alpine plugin: run the ELF in-place in the
+        // sysroot so FHS data paths (/usr/share, ...) resolve. No pdir join.
+        const char *rel = entry + 8;
+        if (!*rel || strstr(rel, "..")) return ERROR;
+        snprintf(exe, sizeof exe, "%s/%s", sysroot, rel);
+    } else {
+        if (entry[0] == '/' || !safe_rel(entry)) return ERROR;
+        snprintf(exe, sizeof exe, "%s/%s", pdir, entry);
+    }
     if (!file_exists(exe)) return ERROR;
-    char sysroot[512]; snprintf(sysroot, sizeof sysroot, "%s/alpine/root", diskRoot);
     int is_py = strcmp(runtime, "python") == 0;
     int is_node = strcmp(runtime, "node") == 0;
     char interp[600];

@@ -1017,6 +1017,20 @@ pub extern "C" fn kimi_test_plugin_run(id: u64) -> u64 {
     }
 }
 
+/// Host-only test hook: Plugin Manager run with console-output capture.
+/// Returns run_len + 1 (output view), 0 (exit-code path), MAX (unknown id).
+#[no_mangle]
+#[cfg(not(target_os = "none"))]
+pub extern "C" fn kimi_test_plugin_out(id: u64) -> u64 {
+    unsafe fn cstr(p: *const u8) -> &'static str {
+        let mut n = 0;
+        while *p.add(n) != 0 { n += 1; }
+        core::str::from_utf8(core::slice::from_raw_parts(p, n)).unwrap_or("")
+    }
+    let id = unsafe { cstr(id as *const u8) };
+    apps::test_plugin_output(id)
+}
+
 /// Host-only test hook: enable/disable a plugin (1 = success).
 #[no_mangle]
 #[cfg(not(target_os = "none"))]
@@ -1996,7 +2010,7 @@ fn open_app(screen: &Screen, ui: &mut Ui, app: AppKind, clock: [u64; 7]) {
     ui.drag = None;
     ui.osk = match app {
         AppKind::Terminal => true,
-        AppKind::Notes | AppKind::Browser | AppKind::Files => apps::text_focused(&ui.apps, app),
+        AppKind::Notes | AppKind::Browser | AppKind::Files | AppKind::Market => apps::text_focused(&ui.apps, app),
         _ => false,
     };
     ui.shift = false;
