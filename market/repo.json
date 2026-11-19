@@ -3,16 +3,16 @@
   "packages": [
     {
       "name": "nord",
-      "desc": "Nord \u2014 arctic blue palette",
+      "desc": "Nord \u2014 arctic blue palette (MIT)",
       "kind": "theme",
-      "file": "themes/nord.theme",
+      "file": "themes/nord.ktheme",
       "run": false
     },
     {
       "name": "dracula",
-      "desc": "Dracula \u2014 purple dark",
+      "desc": "Dracula \u2014 purple dark (MIT)",
       "kind": "theme",
-      "file": "themes/dracula.theme",
+      "file": "themes/dracula.ktheme",
       "run": false
     },
     {
@@ -27,6 +27,62 @@
       "desc": "Sakura \u2014 soft pink",
       "kind": "theme",
       "file": "themes/sakura.theme",
+      "run": false
+    },
+    {
+      "name": "catppuccin-mocha",
+      "desc": "Catppuccin Mocha \u2014 pastel dark (MIT)",
+      "kind": "theme",
+      "file": "themes/catppuccin-mocha.ktheme",
+      "run": false
+    },
+    {
+      "name": "catppuccin-latte",
+      "desc": "Catppuccin Latte \u2014 pastel light (MIT)",
+      "kind": "theme",
+      "file": "themes/catppuccin-latte.ktheme",
+      "run": false
+    },
+    {
+      "name": "gruvbox-dark",
+      "desc": "Gruvbox Dark \u2014 retro groove, medium contrast (MIT)",
+      "kind": "theme",
+      "file": "themes/gruvbox-dark.ktheme",
+      "run": false
+    },
+    {
+      "name": "gruvbox-dark-hard",
+      "desc": "Gruvbox Dark Hard \u2014 retro groove, hard contrast (MIT)",
+      "kind": "theme",
+      "file": "themes/gruvbox-dark-hard.ktheme",
+      "run": false
+    },
+    {
+      "name": "gruvbox-dark-soft",
+      "desc": "Gruvbox Dark Soft \u2014 retro groove, soft contrast (MIT)",
+      "kind": "theme",
+      "file": "themes/gruvbox-dark-soft.ktheme",
+      "run": false
+    },
+    {
+      "name": "tokyo-night",
+      "desc": "Tokyo Night \u2014 dark blue neon (MIT)",
+      "kind": "theme",
+      "file": "themes/tokyo-night.ktheme",
+      "run": false
+    },
+    {
+      "name": "tokyo-storm",
+      "desc": "Tokyo Night Storm \u2014 stormy blue (MIT)",
+      "kind": "theme",
+      "file": "themes/tokyo-storm.ktheme",
+      "run": false
+    },
+    {
+      "name": "one-dark",
+      "desc": "One Dark \u2014 Atom classic (MIT)",
+      "kind": "theme",
+      "file": "themes/one-dark.ktheme",
       "run": false
     },
     {

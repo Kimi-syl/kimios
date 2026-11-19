@@ -41,10 +41,47 @@ Install destinations: themes → `/disk/themes/<name>.theme`, fonts →
 
 ## Asset formats
 
-### `.theme`
+### `.theme` / `.ktheme`
 11 hex colours (`RRGGBB`), one per line, in palette order:
 `black, surface, surface_hi, surface_max, outline, text, muted, accent,
-accent_dim, green, panel`. Parsed by `theme::load_theme_file`.
+accent_dim, green, panel`. Parsed by `theme::load_theme_file` (same format
+for both extensions; the parser reads only the first 256 bytes and accepts
+nothing but the 11 hex lines — no comments).
+
+## Theme packs (open-source schemes)
+
+Redistributable packs of popular MIT-licensed color schemes, mapped onto the
+11 UI slots. Full palette values, slot mappings, sources and the required
+MIT copyright/permission notices: **[THEMES.md](THEMES.md)**.
+
+| Pack | Scheme | License |
+|------|--------|---------|
+| `nord.ktheme` | [Nord](https://github.com/nordtheme/nord) — Sven Greb | MIT |
+| `dracula.ktheme` | [Dracula](https://github.com/dracula/dracula-theme) — Zeno Rocha / Dracula Theme | MIT |
+| `catppuccin-mocha.ktheme` | [Catppuccin](https://github.com/catppuccin/catppuccin) Mocha (dark) | MIT |
+| `catppuccin-latte.ktheme` | Catppuccin Latte (light) | MIT |
+| `gruvbox-dark.ktheme` | [Gruvbox](https://github.com/morhetz/gruvbox) dark, medium — Pavel Pertsev | MIT/X11 |
+| `gruvbox-dark-hard.ktheme` | Gruvbox dark, hard contrast | MIT/X11 |
+| `gruvbox-dark-soft.ktheme` | Gruvbox dark, soft contrast | MIT/X11 |
+| `tokyo-night.ktheme` | [Tokyo Night](https://github.com/tokyo-night/tokyo-night-vscode-theme) — Enkia | MIT |
+| `tokyo-storm.ktheme` | Tokyo Night Storm | MIT |
+| `one-dark.ktheme` | Atom One Dark via [One Dark Pro](https://github.com/Binaryify/OneDark-Pro) | MIT |
+
+`nord` / `dracula` keep their existing package names; the original
+`nord.theme` / `dracula.theme` files remain for compatibility. `cyberpunk`
+and `sakura` are original KimiOS palettes.
+
+### Make your own theme
+
+`tools/make_ktheme.py` converts a palette (JSON with the 11 slot keys) to a
+`.ktheme`, documents the slot mapping, and can validate any theme file
+exactly the way `theme.rs` parses it:
+
+```bash
+python3 tools/make_ktheme.py my-palette.json -o market/themes/my-theme.ktheme
+python3 tools/make_ktheme.py --check market/themes/*.ktheme
+python3 tools/make_ktheme.py --pack nord        # regenerate a bundled pack
+```
 
 ### `.kfont`
 Compact bitmap font (little-endian), two versions:

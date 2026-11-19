@@ -11,8 +11,9 @@
 //! futex, epoll, dlopen, sockets, TLS) and are marked not-runnable in the repo.
 
 use crate::{
-    close, create, mkdir, net_resolve, net_status, net_tcp_close, net_tcp_connect, net_tcp_recv,
-    net_tcp_send, open, print, print_bytes, print_u64, read_file, spawn, stat, wait, write_file,
+    close, copy_file, create, mkdir, net_resolve, net_status, net_tcp_close, net_tcp_connect,
+    net_tcp_recv, net_tcp_send, open, print, print_bytes, print_u64, read_file, spawn, stat, wait,
+    write_file,
 };
 
 const DEFAULT_BASE: &str = "https://raw.githubusercontent.com/Kimi-syl/kimios/main/market";
@@ -593,4 +594,291 @@ pub fn parse_url_pub<'a>(url: &'a str, host_out: &'a mut [u8]) -> Option<(&'a st
 /// Resolve a host to the big-endian IPv4 u32 the TCP API uses (literal or DNS).
 pub fn resolve_host(host: &str) -> Option<u32> {
     parse_ipv4(host).or_else(|| net_resolve(host))
+}
+
+// -- local import (.kpkg / .kfont / .ktheme) ---------------------------------
+
+/// Outcome of validating + installing a local package file. `kind` uses the
+/// Marketplace encoding: 0 theme, 1 font, 2 app.
+pub struct LocalImport {
+    pub ok: bool,
+    pub kind: u8,
+    pub name: [u8; 48],
+    pub name_len: usize,
+    pub dest: [u8; 96],
+    pub dest_len: usize,
+    pub msg: [u8; 64],
+    pub msg_len: usize,
+}
+
+impl LocalImport {
+    pub fn name_str(&self) -> &str {
+        core::str::from_utf8(&self.name[..self.name_len]).unwrap_or("")
+    }
+    pub fn dest_str(&self) -> &str {
+        core::str::from_utf8(&self.dest[..self.dest_len]).unwrap_or("")
+    }
+    pub fn msg_str(&self) -> &str {
+        core::str::from_utf8(&self.msg[..self.msg_len]).unwrap_or("")
+    }
+
+    fn fail(msg: &str) -> Self {
+        let mut r = Self {
+            ok: false, kind: 255,
+            name: [0; 48], name_len: 0,
+            dest: [0; 96], dest_len: 0,
+            msg: [0; 64], msg_len: 0,
+        };
+        r.set_msg(msg);
+        r
+    }
+
+    fn set_msg(&mut self, msg: &str) {
+        let b = msg.as_bytes();
+        self.msg_len = b.len().min(64);
+        self.msg[..self.msg_len].copy_from_slice(&b[..self.msg_len]);
+    }
+
+    fn set_name(&mut self, name: &[u8]) {
+        self.name_len = name.len().min(48);
+        self.name[..self.name_len].copy_from_slice(&name[..self.name_len]);
+    }
+
+    fn set_dest(&mut self, dir: &str, name: &[u8], ext: &str) -> bool {
+        let mut n = 0usize;
+        for piece in [dir.as_bytes(), name, ext.as_bytes()] {
+            if n + piece.len() > self.dest.len() {
+                self.set_msg("Name too long");
+                return false;
+            }
+            self.dest[n..n + piece.len()].copy_from_slice(piece);
+            n += piece.len();
+        }
+        self.dest_len = n;
+        true
+    }
+}
+
+fn ends_ci(path: &str, suffix: &str) -> bool {
+    let p = path.as_bytes();
+    let s = suffix.as_bytes();
+    p.len() >= s.len()
+        && p[p.len() - s.len()..]
+            .iter()
+            .zip(s)
+            .all(|(a, b)| a.to_ascii_lowercase() == *b)
+}
+
+/// Basename of `path` with the final extension stripped.
+fn stem(path: &str) -> &[u8] {
+    let p = path.as_bytes();
+    let base = match p.iter().rposition(|&b| b == b'/') {
+        Some(i) => &p[i + 1..],
+        None => p,
+    };
+    match base.iter().rposition(|&b| b == b'.') {
+        Some(i) if i > 0 => &base[..i],
+        _ => base,
+    }
+}
+
+fn dirname(path: &str) -> &str {
+    let p = path.as_bytes();
+    match p.iter().rposition(|&b| b == b'/') {
+        Some(i) if i > 0 => core::str::from_utf8(&p[..i]).unwrap_or("/disk"),
+        _ => "/disk",
+    }
+}
+
+fn join3<'a>(a: &str, b: &[u8], c: &str, buf: &'a mut [u8; 160]) -> Option<&'a str> {
+    let mut n = 0usize;
+    for piece in [a.as_bytes(), b, c.as_bytes()] {
+        if n + piece.len() > buf.len() {
+            return None;
+        }
+        buf[n..n + piece.len()].copy_from_slice(piece);
+        n += piece.len();
+    }
+    core::str::from_utf8(&buf[..n]).ok()
+}
+
+/// Count 6-digit hex colour tokens (a `.ktheme` needs 11 palette entries).
+fn count_hex6(data: &[u8]) -> usize {
+    let mut count = 0usize;
+    let mut run = 0usize;
+    let mut prev_hex = false;
+    for &b in data {
+        let hex = matches!(b, b'0'..=b'9' | b'a'..=b'f' | b'A'..=b'F');
+        if hex {
+            run += 1;
+        } else {
+            if prev_hex && run == 6 {
+                count += 1;
+            }
+            run = 0;
+        }
+        prev_hex = hex;
+    }
+    if prev_hex && run == 6 {
+        count += 1;
+    }
+    count
+}
+
+/// Validate a local `.kpkg` / `.kfont` / `.ktheme` file and install it:
+/// fonts -> /disk/fonts/<name>.kfont, themes -> /disk/themes/<name>.theme,
+/// apps -> /disk/bin/<name>. A `.kpkg` is a repo-style manifest
+/// ({"name","kind","file"}) whose asset is a sibling path or an HTTP(S) URL.
+pub fn import_local(path: &str) -> LocalImport {
+    let Some((_, size)) = stat(path) else {
+        return LocalImport::fail("File not found");
+    };
+    if size < 8 {
+        return LocalImport::fail("File too small");
+    }
+    let Some(h) = open(path) else {
+        return LocalImport::fail("Cannot open file");
+    };
+    let mut head = [0u8; 1024];
+    let want = (size as usize).min(head.len());
+    let n = read_file(h, 0, &mut head[..want]);
+    close(h);
+    if n < 8 {
+        return LocalImport::fail("Cannot read file");
+    }
+    let data = &head[..n];
+
+    if &data[..4] == b"PK\x03\x04" {
+        return LocalImport::fail("Zip archives not supported yet");
+    }
+
+    let font_magic = &data[..8] == b"KFONT001" || &data[..8] == b"KFONT002";
+    let mut r = LocalImport {
+        ok: false, kind: 2,
+        name: [0; 48], name_len: 0,
+        dest: [0; 96], dest_len: 0,
+        msg: [0; 64], msg_len: 0,
+    };
+
+    if font_magic || ends_ci(path, ".kfont") {
+        if !font_magic {
+            return LocalImport::fail("Bad magic: expected KFONT001/002");
+        }
+        if size < 32 {
+            return LocalImport::fail("Truncated kfont header");
+        }
+        let em = u16::from_le_bytes([data[8], data[9]]);
+        if em == 0 {
+            return LocalImport::fail("Invalid kfont (em=0)");
+        }
+        r.kind = 1;
+        let nm = stem(path);
+        r.set_name(nm);
+        if !r.set_dest("/disk/fonts/", nm, ".kfont") {
+            return r;
+        }
+        let _ = mkdir("/disk/fonts");
+        if !copy_file(path, r.dest_str()) {
+            r.set_msg("Copy to /disk/fonts failed");
+            return r;
+        }
+        r.ok = true;
+        r.set_msg("Font installed");
+        return r;
+    }
+
+    if ends_ci(path, ".ktheme") {
+        if count_hex6(data) < 11 {
+            return LocalImport::fail("Invalid theme: need 11 RRGGBB colours");
+        }
+        r.kind = 0;
+        let nm = stem(path);
+        r.set_name(nm);
+        if !r.set_dest("/disk/themes/", nm, ".theme") {
+            return r;
+        }
+        let _ = mkdir("/disk/themes");
+        if !copy_file(path, r.dest_str()) {
+            r.set_msg("Copy to /disk/themes failed");
+            return r;
+        }
+        r.ok = true;
+        r.set_msg("Theme installed");
+        return r;
+    }
+
+    if ends_ci(path, ".kpkg") || data[0] == b'{' {
+        let Some(name) = json_str(data, "name") else {
+            return LocalImport::fail("Manifest missing \"name\"");
+        };
+        if name.is_empty() || name.contains(&b'/') || name.len() > 40 {
+            return LocalImport::fail("Bad package name");
+        }
+        let kind = match json_str(data, "kind") {
+            Some(k) if k == b"theme" => 0u8,
+            Some(k) if k == b"font" => 1u8,
+            _ => 2u8,
+        };
+        let asset = json_str(data, "file").or_else(|| json_str(data, "url"));
+        let Some(asset) = asset else {
+            return LocalImport::fail("Manifest missing \"file\"");
+        };
+        r.kind = kind;
+        r.set_name(name);
+        let (dir, ext) = match kind {
+            0 => ("/disk/themes/", ".theme"),
+            1 => ("/disk/fonts/", ".kfont"),
+            _ => ("/disk/bin/", ""),
+        };
+        if !r.set_dest(dir, name, ext) {
+            return r;
+        }
+        let _ = mkdir(dir);
+        let asset_str = core::str::from_utf8(asset).unwrap_or("");
+        let installed = if asset_str.starts_with("http://") || asset_str.starts_with("https://") {
+            fetch_to(asset_str, r.dest_str())
+        } else {
+            let mut src = [0u8; 160];
+            let mut src_len = 0usize;
+            if !asset_str.starts_with("/disk") {
+                if let Some(p) = join3(dirname(path), asset, "", &mut src) {
+                    if stat(p).is_some() {
+                        src_len = p.len();
+                    }
+                }
+                if src_len == 0 {
+                    if let Some(p) = join3("/disk/import/", asset, "", &mut src) {
+                        src_len = p.len();
+                    }
+                }
+            }
+            let candidate = if asset_str.starts_with("/disk") {
+                Some(asset_str)
+            } else if src_len > 0 {
+                core::str::from_utf8(&src[..src_len]).ok()
+            } else {
+                None
+            };
+            match candidate {
+                Some(p) if stat(p).is_some() => copy_file(p, r.dest_str()),
+                _ => {
+                    r.set_msg("Asset file not found next to manifest");
+                    return r;
+                }
+            }
+        };
+        if !installed {
+            r.set_msg("Asset fetch/copy failed");
+            return r;
+        }
+        r.ok = true;
+        r.set_msg(match kind {
+            0 => "Theme installed",
+            1 => "Font installed",
+            _ => "App installed to /disk/bin",
+        });
+        return r;
+    }
+
+    LocalImport::fail("Unknown format (.kpkg/.kfont/.ktheme)")
 }

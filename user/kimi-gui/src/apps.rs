@@ -65,6 +65,153 @@ pub struct Files {
     binary: bool,
     status: [u8; 48],
     status_len: usize,
+    action: Option<usize>,
+    confirm_delete: bool,
+    prompt: u8,
+    prompt_buf: [u8; 48],
+    prompt_len: usize,
+    editor: Option<usize>,
+    edit: [u8; 2048],
+    edit_len: usize,
+    clip_path: [u8; 128],
+    clip_len: usize,
+    clip_name: [u8; 48],
+    clip_name_len: usize,
+    clip_cut: bool,
+    props: Option<usize>,
+    run_show: bool,
+    run_msg: [u8; 64],
+    run_len: usize,
+}
+
+#[derive(Clone, Copy)]
+pub struct Proc {
+    pid: u64,
+    ppid: u64,
+    ram_kb: u64,
+    cpu_x10: u64,
+    state: u64,
+    name: [u8; 24],
+    name_len: usize,
+}
+
+const EMPTY_PROC: Proc = Proc {
+    pid: 0, ppid: 0, ram_kb: 0, cpu_x10: 0, state: 0,
+    name: [0; 24], name_len: 0,
+};
+
+pub struct Monitor {
+    info: [u64; 10],
+    has_info: bool,
+    procs: [Proc; 40],
+    proc_count: usize,
+    scroll: usize,
+    selected: Option<u64>,
+    kill_msg: [u8; 48],
+    kill_len: usize,
+    fps_x10: u64,
+    cpu_hist: [u16; 48],
+    hist_len: usize,
+    active: [[u8; 16]; 8],
+    active_len: [u8; 8],
+    active_count: usize,
+    last_refresh: u64,
+}
+
+impl Monitor {
+    fn new() -> Self {
+        Self {
+            info: [0; 10],
+            has_info: false,
+            procs: [EMPTY_PROC; 40],
+            proc_count: 0,
+            scroll: 0,
+            selected: None,
+            kill_msg: [0; 48],
+            kill_len: 0,
+            fps_x10: 0,
+            cpu_hist: [0; 48],
+            hist_len: 0,
+            active: [[0; 16]; 8],
+            active_len: [0; 8],
+            active_count: 0,
+            last_refresh: 0,
+        }
+    }
+
+    fn refresh(&mut self) {
+        self.last_refresh = k::uptime_ms();
+        if let Some(info) = k::sysinfo() {
+            self.info = info;
+            self.has_info = true;
+            let cpu = (info[0] / 10).min(100) as u16;
+            if self.hist_len < self.cpu_hist.len() {
+                self.cpu_hist[self.hist_len] = cpu;
+                self.hist_len += 1;
+            } else {
+                for i in 1..self.cpu_hist.len() {
+                    self.cpu_hist[i - 1] = self.cpu_hist[i];
+                }
+                self.cpu_hist[self.cpu_hist.len() - 1] = cpu;
+            }
+        }
+        let mut raw = [0u64; 320];
+        let n = k::proclist(&mut raw);
+        self.proc_count = 0;
+        for rec in raw[..n * 8].chunks_exact(8) {
+            if self.proc_count >= self.procs.len() {
+                break;
+            }
+            let mut name = [0u8; 24];
+            for j in 0..3 {
+                name[j * 8..j * 8 + 8].copy_from_slice(&rec[5 + j].to_le_bytes());
+            }
+            let name_len = name.iter().position(|&b| b == 0).unwrap_or(24);
+            self.procs[self.proc_count] = Proc {
+                pid: rec[0],
+                ppid: rec[1],
+                ram_kb: rec[2],
+                cpu_x10: rec[3],
+                state: rec[4],
+                name,
+                name_len,
+            };
+            self.proc_count += 1;
+        }
+        if self.scroll + 10 > self.proc_count {
+            self.scroll = self.proc_count.saturating_sub(10);
+        }
+    }
+
+    fn find(&self, pid: u64) -> Option<&Proc> {
+        self.procs[..self.proc_count].iter().find(|p| p.pid == pid)
+    }
+
+    fn kill_selected(&mut self) {
+        let Some(pid) = self.selected else { return };
+        let msg = if k::kill(pid) { "Process terminated" } else { "Kill failed (host may restrict it)" };
+        let b = msg.as_bytes();
+        self.kill_len = b.len().min(48);
+        self.kill_msg[..self.kill_len].copy_from_slice(&b[..self.kill_len]);
+        self.refresh();
+    }
+}
+
+pub fn monitor_sync(apps: &mut Apps, recents: &[AppKind], fps_x10: u64) {
+    let m = &mut apps.monitor;
+    m.fps_x10 = fps_x10;
+    m.active_count = 0;
+    for &app in recents {
+        if m.active_count >= 8 {
+            break;
+        }
+        let label = app.label().as_bytes();
+        let len = label.len().min(16);
+        let i = m.active_count;
+        m.active[i][..len].copy_from_slice(&label[..len]);
+        m.active_len[i] = len as u8;
+        m.active_count += 1;
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -368,6 +515,17 @@ pub fn browser_resume(apps: &mut Apps) {
     }
 }
 
+pub fn browser_can_back(apps: &Apps) -> bool {
+    apps.browser.web_ok && apps.browser.can_back
+}
+
+pub fn browser_web_back(apps: &mut Apps) {
+    if apps.browser.web_ok && apps.browser.can_back {
+        k::web_back();
+        apps.browser.set_status("Back");
+    }
+}
+
 /// Per-frame WebView pull while the Browser window is visible. Blits a new
 /// stable frame into the content rect and presents it. Returns true on blit.
 pub fn browser_frame(apps: &mut Apps, osk: bool) -> bool {
@@ -504,6 +662,7 @@ pub struct Apps {
     pub apk: ApkApp,
     pub dvm: DvmApp,
     pub market: Market,
+    pub monitor: Monitor,
 }
 
 fn slice_str(bytes: &[u8]) -> &str {
@@ -1085,6 +1244,10 @@ impl Files {
     fn refresh(&mut self) {
         self.count = 0;
         self.preview = None;
+        self.action = None;
+        self.props = None;
+        self.run_show = false;
+        self.confirm_delete = false;
         self.scroll = 0;
         self.status_len = 0;
         let mut buffer = [0u8; 4096];
@@ -1188,6 +1351,232 @@ impl Files {
                 }
             }
         }
+    }
+
+    fn path_of(&self, index: usize) -> &str {
+        slice_str(&self.paths[index][..self.path_len[index] as usize])
+    }
+
+    fn is_executable(&self, index: usize) -> bool {
+        if index >= self.count || self.is_dir[index] {
+            return false;
+        }
+        let path = self.path_of(index);
+        if path.starts_with("/disk/bin/") {
+            return true;
+        }
+        let mut magic = [0u8; 4];
+        if let Some(h) = k::open(path) {
+            let n = k::read_file(h, 0, &mut magic);
+            k::close(h);
+            return n == 4 && &magic == b"\x7fELF";
+        }
+        false
+    }
+
+    fn close_overlays(&mut self) {
+        self.action = None;
+        self.props = None;
+        self.run_show = false;
+        self.confirm_delete = false;
+        self.prompt = 0;
+        self.prompt_len = 0;
+    }
+
+    fn start_prompt(&mut self, kind: u8, index: Option<usize>) {
+        self.prompt = kind;
+        self.prompt_len = 0;
+        if kind == 1 {
+            if let Some(i) = index {
+                let name = &self.names[i][..self.name_len[i] as usize];
+                let len = name.len().min(48);
+                self.prompt_buf[..len].copy_from_slice(name);
+                self.prompt_len = len;
+            }
+        }
+    }
+
+    fn prompt_push(&mut self, byte: u8) {
+        if self.prompt_len < self.prompt_buf.len() {
+            self.prompt_buf[self.prompt_len] = byte;
+            self.prompt_len += 1;
+        }
+    }
+
+    fn prompt_confirm(&mut self) {
+        if self.prompt_len == 0 {
+            self.set_status("Enter a name first");
+            return;
+        }
+        let mut target = [0u8; 176];
+        let mut used = 0;
+        push_str(&mut target, &mut used, &self.dir[..self.dir_len]);
+        push_str(&mut target, &mut used, b"/");
+        push_str(&mut target, &mut used, &self.prompt_buf[..self.prompt_len]);
+        let target_str = slice_str(&target[..used]);
+        let kind = self.prompt;
+        let ok = match kind {
+            1 => {
+                let Some(i) = self.action else {
+                    self.prompt = 0;
+                    return;
+                };
+                k::rename(self.path_of(i), target_str)
+            }
+            2 => match k::create(target_str) {
+                Some(h) => {
+                    k::close(h);
+                    true
+                }
+                None => false,
+            },
+            3 => k::mkdir(target_str),
+            _ => false,
+        };
+        self.set_status(if ok {
+            match kind { 1 => "Renamed", 2 => "File created", _ => "Folder created" }
+        } else {
+            "Operation failed (name in use?)"
+        });
+        self.prompt = 0;
+        self.prompt_len = 0;
+        self.action = None;
+        self.refresh();
+    }
+
+    fn open_editor(&mut self, index: usize) {
+        if index >= self.count || self.is_dir[index] {
+            return;
+        }
+        self.edit_len = 0;
+        if let Some(h) = k::open(self.path_of(index)) {
+            self.edit_len = k::read_file(h, 0, &mut self.edit);
+            k::close(h);
+        }
+        self.editor = Some(index);
+        self.preview = None;
+        self.action = None;
+        self.status_len = 0;
+    }
+
+    fn editor_save(&mut self) {
+        let Some(index) = self.editor else { return };
+        if index >= self.count {
+            self.editor = None;
+            return;
+        }
+        let written = match k::create(self.path_of(index)) {
+            Some(h) => {
+                let w = k::write_file(h, 0, &self.edit[..self.edit_len]);
+                k::close(h);
+                Some(w)
+            }
+            None => None,
+        };
+        self.set_status(match written {
+            Some(w) if w == self.edit_len => "Saved",
+            Some(_) => "Short write",
+            None => "Save failed",
+        });
+    }
+
+    fn clipboard_set(&mut self, index: usize, cut: bool) {
+        if index >= self.count || self.names[index][..self.name_len[index] as usize] == b".."[..] {
+            return;
+        }
+        let pl = self.path_len[index] as usize;
+        self.clip_path[..pl].copy_from_slice(&self.paths[index][..pl]);
+        self.clip_len = pl;
+        let nl = self.name_len[index] as usize;
+        self.clip_name[..nl].copy_from_slice(&self.names[index][..nl]);
+        self.clip_name_len = nl;
+        self.clip_cut = cut;
+        self.action = None;
+        self.set_status(if cut { "Move: navigate, then Paste" } else { "Copied: navigate, then Paste" });
+    }
+
+    fn paste(&mut self) {
+        if self.clip_len == 0 {
+            return;
+        }
+        let mut dst = [0u8; 176];
+        let mut used = 0;
+        push_str(&mut dst, &mut used, &self.dir[..self.dir_len]);
+        push_str(&mut dst, &mut used, b"/");
+        push_str(&mut dst, &mut used, &self.clip_name[..self.clip_name_len]);
+        let dst_str = slice_str(&dst[..used]);
+        if k::stat(dst_str).is_some() {
+            self.set_status("Destination already exists");
+            return;
+        }
+        let src = slice_str(&self.clip_path[..self.clip_len]);
+        let ok = if self.clip_cut {
+            k::rename(src, dst_str)
+        } else {
+            k::copy_file(src, dst_str)
+        };
+        self.set_status(if ok {
+            if self.clip_cut { "Moved" } else { "Pasted" }
+        } else {
+            "Paste failed"
+        });
+        if ok {
+            self.clip_len = 0;
+            self.clip_name_len = 0;
+        }
+        self.refresh();
+    }
+
+    fn delete_entry(&mut self, index: usize) {
+        if index >= self.count {
+            return;
+        }
+        let ok = if self.is_dir[index] {
+            k::rmdir(self.path_of(index))
+        } else {
+            k::unlink(self.path_of(index))
+        };
+        self.set_status(if ok { "Deleted" } else { "Delete failed (dir not empty?)" });
+        self.action = None;
+        self.confirm_delete = false;
+        self.refresh();
+    }
+
+    fn run_entry(&mut self, index: usize) {
+        if index >= self.count {
+            return;
+        }
+        let code = k::run_path(self.path_of(index), "");
+        self.run_len = 0;
+        match code {
+            Some(code) => {
+                push_str(&mut self.run_msg, &mut self.run_len, b"Exited with code ");
+                let mut num = [0u8; 20];
+                push_str(&mut self.run_msg, &mut self.run_len, unsigned(code, &mut num).as_bytes());
+                push_str(&mut self.run_msg, &mut self.run_len, b" (output on console)");
+            }
+            None => {
+                push_str(&mut self.run_msg, &mut self.run_len, b"Run unavailable on this host");
+            }
+        }
+        self.run_show = true;
+        self.action = None;
+        self.preview = None;
+    }
+
+    fn export_entry(&mut self, index: usize) {
+        if index >= self.count || self.is_dir[index] {
+            self.set_status("Only files can be exported");
+            return;
+        }
+        let _ = k::mkdir("/disk/export");
+        let mut dst = [0u8; 160];
+        let mut used = 0;
+        push_str(&mut dst, &mut used, b"/disk/export/");
+        push_str(&mut dst, &mut used, &self.names[index][..self.name_len[index] as usize]);
+        let ok = k::copy_file(self.path_of(index), slice_str(&dst[..used]));
+        self.set_status(if ok { "Exported to /disk/export (SAF share TODO)" } else { "Export failed" });
+        self.action = None;
     }
 }
 
@@ -1600,6 +1989,23 @@ impl Apps {
                 binary: false,
                 status: [0u8; 48],
                 status_len: 0,
+                action: None,
+                confirm_delete: false,
+                prompt: 0,
+                prompt_buf: [0u8; 48],
+                prompt_len: 0,
+                editor: None,
+                edit: [0u8; 2048],
+                edit_len: 0,
+                clip_path: [0u8; 128],
+                clip_len: 0,
+                clip_name: [0u8; 48],
+                clip_name_len: 0,
+                clip_cut: false,
+                props: None,
+                run_show: false,
+                run_msg: [0u8; 64],
+                run_len: 0,
             },
             weather: Weather::new(),
             terminal,
@@ -1623,6 +2029,7 @@ impl Apps {
                 err_len: 0,
             },
             market: Market::new(),
+            monitor: Monitor::new(),
         }
     }
 }
@@ -1638,7 +2045,16 @@ pub fn open(apps: &mut Apps, app: AppKind) {
         AppKind::Apk => apps.apk.refresh(),
         AppKind::Dvm => apps.dvm.refresh(),
         AppKind::Market => apps.market.refresh(),
+        AppKind::Monitor => apps.monitor.refresh(),
         _ => {}
+    }
+}
+
+/// Long-press hook (shell detects the hold). Returns true when consumed.
+pub fn long_press(apps: &mut Apps, app: AppKind, point: (i64, i64)) -> bool {
+    match app {
+        AppKind::Files => files_long_press(apps, point),
+        _ => false,
     }
 }
 
@@ -1686,10 +2102,29 @@ pub fn nav_back(apps: &mut Apps, app: AppKind) -> bool {
             }
         }
         AppKind::Files => {
-            if apps.files.preview.take().is_some() {
+            let files = &mut apps.files;
+            if files.prompt != 0 {
+                files.prompt = 0;
+                files.prompt_len = 0;
+                files.action = None;
                 true
-            } else if apps.files.dir_len > 5 {
-                apps.files.go_up();
+            } else if files.editor.is_some() {
+                files.editor_save();
+                files.editor = None;
+                files.refresh();
+                true
+            } else if files.run_show {
+                files.run_show = false;
+                true
+            } else if files.props.take().is_some() {
+                true
+            } else if files.action.take().is_some() {
+                files.confirm_delete = false;
+                true
+            } else if files.preview.take().is_some() {
+                true
+            } else if files.dir_len > 5 {
+                files.go_up();
                 true
             } else {
                 false
@@ -1698,6 +2133,7 @@ pub fn nav_back(apps: &mut Apps, app: AppKind) -> bool {
         AppKind::Photos => apps.photos.selected.take().is_some(),
         AppKind::Apk => apps.apk.selected.take().is_some(),
         AppKind::Dvm => apps.dvm.selected.take().is_some(),
+        AppKind::Monitor => apps.monitor.selected.take().is_some(),
         _ => false,
     }
 }
@@ -1755,6 +2191,7 @@ pub fn text_focused(apps: &Apps, app: AppKind) -> bool {
         AppKind::Notes => apps.notes.editing.is_some(),
         AppKind::Terminal => true,
         AppKind::Browser => apps.browser.editing,
+        AppKind::Files => apps.files.editor.is_some() || apps.files.prompt != 0,
         _ => false,
     }
 }
@@ -1768,6 +2205,10 @@ pub fn field_hit(apps: &Apps, app: AppKind, point: (i64, i64), _osk: bool) -> bo
         }
         AppKind::Terminal => point.1 > 96 && point.1 < 770,
         AppKind::Browser => point.0 >= 20 && point.0 < 390 && point.1 >= 104 && point.1 <= 148,
+        AppKind::Files => {
+            (apps.files.editor.is_some() && point.1 >= 160 && point.1 <= 614)
+                || (apps.files.prompt != 0 && point.1 >= 300 && point.1 <= 480)
+        }
         _ => false,
     }
 }
@@ -1780,6 +2221,7 @@ pub fn key_char(code: u16, shift: bool) -> Option<(u8, bool)> {
 
 pub fn key(apps: &mut Apps, app: AppKind, code: u16, shift: bool) -> bool {
     match app {
+        AppKind::Files => files_key(apps, code, shift),
         AppKind::Notes => {
             if apps.notes.editing.is_none() {
                 return false;
@@ -1980,6 +2422,7 @@ pub fn tap(_screen: &Screen, apps: &mut Apps, app: AppKind, point: (i64, i64), o
         AppKind::Apk => apk_tap(apps, point),
         AppKind::Dvm => dvm_tap(apps, point),
         AppKind::Market => market_tap(apps, point),
+        AppKind::Monitor => monitor_tap(apps, point),
         _ => {}
     }
 }
@@ -2105,25 +2548,155 @@ fn photos_tap(apps: &mut Apps, point: (i64, i64)) {
     }
 }
 
+fn files_row_at(point: (i64, i64)) -> Option<usize> {
+    if point.1 >= 196 && point.1 < 706 && point.0 >= 20 && point.0 < 460 {
+        let row = ((point.1 - 196) / 30) as usize;
+        if row < 17 {
+            return Some(row);
+        }
+    }
+    None
+}
+
 fn files_tap(apps: &mut Apps, point: (i64, i64)) {
     let files = &mut apps.files;
-    if files.preview.is_some() {
+    if files.prompt != 0 {
+        if point.1 >= 420 && point.1 <= 464 {
+            if point.0 >= 240 && point.0 <= 336 {
+                files.prompt_confirm();
+            } else if point.0 >= 348 && point.0 <= 444 {
+                files.prompt = 0;
+                files.prompt_len = 0;
+                files.action = None;
+            }
+        }
+        return;
+    }
+    if files.editor.is_some() {
+        if point.1 >= 104 && point.1 <= 148 {
+            if point.0 >= 236 && point.0 <= 340 {
+                files.editor_save();
+            } else if point.0 >= 348 && point.0 <= 456 {
+                files.editor_save();
+                files.editor = None;
+                files.refresh();
+            }
+        }
+        return;
+    }
+    if files.run_show {
+        files.run_show = false;
+        return;
+    }
+    if files.props.is_some() {
+        files.props = None;
+        return;
+    }
+    if let Some(index) = files.action {
+        if point.1 >= 216 && point.1 <= 560 && point.0 >= 56 && point.0 <= 424 {
+            let col = if point.0 < 240 { 0 } else { 1 };
+            let row = ((point.1 - 216) / 70) as usize;
+            if row < 4 {
+                match row * 2 + col {
+                    0 => {
+                        if files.is_dir[index] {
+                            files.action = None;
+                            files.enter(index);
+                        } else {
+                            files.open_preview(index);
+                            if files.binary {
+                                files.set_status("Binary file - cannot edit");
+                                files.preview = None;
+                                files.action = None;
+                            } else {
+                                files.open_editor(index);
+                            }
+                        }
+                    }
+                    1 => files.start_prompt(1, Some(index)),
+                    2 => files.clipboard_set(index, false),
+                    3 => files.clipboard_set(index, true),
+                    4 => {
+                        if files.confirm_delete {
+                            files.delete_entry(index);
+                        } else {
+                            files.confirm_delete = true;
+                        }
+                    }
+                    5 => {
+                        files.props = Some(index);
+                        files.action = None;
+                    }
+                    6 => {
+                        if files.is_executable(index) {
+                            files.run_entry(index);
+                        } else {
+                            files.set_status("Not an executable (ELF or /disk/bin)");
+                        }
+                    }
+                    _ => files.export_entry(index),
+                }
+                return;
+            }
+        }
+        if point.1 >= 576 && point.1 <= 620 {
+            files.close_overlays();
+            return;
+        }
+        files.close_overlays();
+        return;
+    }
+    if let Some(index) = files.preview {
+        if point.1 >= 676 && point.1 <= 716 {
+            if point.0 >= 20 && point.0 <= 120 {
+                if !files.binary {
+                    files.open_editor(index);
+                }
+            } else if point.0 >= 130 && point.0 <= 230 {
+                if files.is_executable(index) {
+                    files.run_entry(index);
+                } else {
+                    files.set_status("Not an executable");
+                }
+            } else if point.0 >= 240 && point.0 <= 340 {
+                files.export_entry(index);
+                files.preview = None;
+            } else if point.0 >= 350 && point.0 <= 456 {
+                files.props = Some(index);
+                files.preview = None;
+            }
+            return;
+        }
         files.preview = None;
         return;
     }
     if point.1 >= 150 && point.1 <= 186 {
-        if point.0 >= 20 && point.0 <= 110 {
+        if point.0 >= 20 && point.0 <= 90 {
             files.go_root();
-        } else if point.0 >= 120 && point.0 <= 280 {
-            let dir = slice_str(&files.dir[..files.dir_len]);
-            if k::import_file(dir) {
-                files.set_status("Import started - refresh after");
+        } else if point.0 >= 98 && point.0 <= 174 {
+            files.start_prompt(2, None);
+        } else if point.0 >= 182 && point.0 <= 258 {
+            files.start_prompt(3, None);
+        } else if point.0 >= 266 && point.0 <= 354 {
+            if files.clip_len > 0 {
+                files.paste();
             } else {
-                files.set_status("Import unavailable");
+                let dir = slice_str(&files.dir[..files.dir_len]);
+                if k::import_file(dir) {
+                    files.set_status("Import started - refresh after");
+                } else {
+                    files.set_status("Import unavailable");
+                }
             }
-        } else if point.0 >= 290 && point.0 <= 456 {
+        } else if point.0 >= 362 && point.0 <= 456 {
             files.refresh();
         }
+        return;
+    }
+    if point.1 >= 708 && point.1 <= 726 && files.clip_len > 0 {
+        files.clip_len = 0;
+        files.clip_name_len = 0;
+        files.set_status("Clipboard cleared");
         return;
     }
     if point.1 >= 728 && point.1 <= 764 {
@@ -2136,15 +2709,72 @@ fn files_tap(apps: &mut Apps, point: (i64, i64)) {
         }
         return;
     }
-    if point.1 >= 196 && point.1 < 706 && point.0 >= 20 && point.0 < 460 {
-        let row = ((point.1 - 196) / 30) as usize;
-        if row < 17 {
-            let index = files.scroll + row;
-            if index < files.count {
-                files.enter(index);
-            }
+    if let Some(row) = files_row_at(point) {
+        let index = files.scroll + row;
+        if index < files.count {
+            files.enter(index);
         }
     }
+}
+
+fn files_long_press(apps: &mut Apps, point: (i64, i64)) -> bool {
+    let files = &mut apps.files;
+    if files.preview.is_some()
+        || files.editor.is_some()
+        || files.prompt != 0
+        || files.action.is_some()
+        || files.props.is_some()
+        || files.run_show
+    {
+        return false;
+    }
+    if let Some(row) = files_row_at(point) {
+        let index = files.scroll + row;
+        if index < files.count && files.names[index][..files.name_len[index] as usize] != b".."[..] {
+            files.action = Some(index);
+            files.confirm_delete = false;
+            return true;
+        }
+    }
+    false
+}
+
+fn files_key(apps: &mut Apps, code: u16, shift: bool) -> bool {
+    let files = &mut apps.files;
+    if files.prompt != 0 {
+        return match key_event(code, shift) {
+            Some((0, true)) => {
+                files.prompt_len = files.prompt_len.saturating_sub(1);
+                true
+            }
+            Some((b'\n', _)) => {
+                files.prompt_confirm();
+                true
+            }
+            Some((byte, _)) => {
+                files.prompt_push(byte);
+                true
+            }
+            None => false,
+        };
+    }
+    if files.editor.is_some() {
+        return match key_event(code, shift) {
+            Some((0, true)) => {
+                files.edit_len = files.edit_len.saturating_sub(1);
+                true
+            }
+            Some((byte, _)) => {
+                if files.edit_len < files.edit.len() {
+                    files.edit[files.edit_len] = byte;
+                    files.edit_len += 1;
+                }
+                true
+            }
+            None => false,
+        };
+    }
+    false
 }
 
 fn weather_tap(apps: &mut Apps, point: (i64, i64)) {
@@ -2163,13 +2793,14 @@ pub fn draw(screen: &Screen, apps: &mut Apps, app: AppKind, clock: [u64; 7], osk
         AppKind::Notes => draw_notes(screen, &apps.notes, osk),
         AppKind::Maps => draw_maps(screen, &apps.maps),
         AppKind::Photos => draw_photos(screen, &apps.photos),
-        AppKind::Files => draw_files(screen, &apps.files),
+        AppKind::Files => draw_files(screen, &apps.files, osk),
         AppKind::Weather => draw_weather(screen, &apps.weather, clock),
         AppKind::Terminal => draw_terminal(screen, &apps.terminal, osk),
         AppKind::Browser => draw_browser(screen, &mut apps.browser, osk),
         AppKind::Apk => draw_apk(screen, &apps.apk),
         AppKind::Dvm => draw_dvm(screen, &apps.dvm),
         AppKind::Market => draw_market(screen, &apps.market),
+        AppKind::Monitor => draw_monitor(screen, &mut apps.monitor),
         _ => {}
     }
 }
@@ -2448,9 +3079,149 @@ fn draw_photo(screen: &Screen, index: usize, x: i64, y: i64, width: i64, height:
     }
 }
 
-fn draw_files(screen: &Screen, files: &Files) {
+fn draw_files_editor(screen: &Screen, files: &Files, osk: bool) {
+    let width = screen.width();
+    let index = files.editor.unwrap_or(0);
+    let title = slice_str(&files.names[index][..files.name_len[index] as usize]);
+    let shown = title.len().min(24);
+    screen.text(24, 110, &title[..shown], 2, TEXT());
+    button(screen, 236, 104, 104, 44, "SAVE", RED(), TEXT());
+    button(screen, 348, 104, 108, 44, "CLOSE", SURFACE_HI(), TEXT());
+    let panel_height = if osk { 260 } else { 454 };
+    let text_limit = if osk { 386 } else { 580 };
+    screen.round_rect(20, 160, width - 40, panel_height, 26, SURFACE());
+    let mut x = 40i64;
+    let mut y = 180i64;
+    let mut line_length = 0;
+    for &byte in &files.edit[..files.edit_len] {
+        if byte == b'\n' {
+            x = 40;
+            y += 15;
+            line_length = 0;
+            continue;
+        }
+        if line_length == 50 {
+            x = 40;
+            y += 15;
+            line_length = 0;
+        }
+        if y > text_limit {
+            break;
+        }
+        screen.text(x, y, slice_str(&[byte]), 1, TEXT());
+        x += 8;
+        line_length += 1;
+    }
+    let status_y = if osk { 430 } else { 626 };
+    if files.status_len > 0 {
+        screen.text(24, status_y, slice_str(&files.status[..files.status_len]), 1, GREEN());
+    } else {
+        screen.text(24, status_y, "SAVE writes back to this file", 1, MUTED());
+    }
+    if !osk {
+        let mut buf = [0u8; 20];
+        let size = unsigned(files.edit_len as u64, &mut buf);
+        let mut line = [0u8; 48];
+        let mut used = 0;
+        push_str(&mut line, &mut used, size.as_bytes());
+        push_str(&mut line, &mut used, b" bytes (2048 max) - back saves & closes");
+        screen.text(24, 654, slice_str(&line[..used]), 1, MUTED());
+    }
+}
+
+fn draw_files_prompt(screen: &Screen, files: &Files) {
+    let width = screen.width();
+    screen.fill_blend(0, 93, width, screen.height() - 93, BLACK(), 160);
+    screen.round_rect(40, 300, width - 80, 180, 26, SURFACE_HI());
+    let label = match files.prompt { 1 => "RENAME", 2 => "NEW FILE", _ => "NEW FOLDER" };
+    screen.text(60, 316, label, 2, TEXT());
+    screen.round_rect(60, 352, width - 120, 44, 12, SURFACE());
+    let shown = files.prompt_len.min(40);
+    if shown == 0 {
+        screen.text(72, 366, "name", 1, MUTED());
+    } else {
+        screen.text(72, 366, slice_str(&files.prompt_buf[..shown]), 2, TEXT());
+    }
+    button(screen, 240, 420, 96, 44, "OK", RED(), TEXT());
+    button(screen, 348, 420, 96, 44, "Cancel", SURFACE_MAX(), MUTED());
+}
+
+fn draw_files_action(screen: &Screen, files: &Files, index: usize) {
+    let width = screen.width();
+    screen.fill_blend(0, 93, width, screen.height() - 93, BLACK(), 160);
+    screen.round_rect(40, 196, width - 80, 448, 26, SURFACE_HI());
+    let name = slice_str(&files.names[index][..files.name_len[index] as usize]);
+    let shown = name.len().min(30);
+    screen.text(56, 204, &name[..shown], 1, MUTED());
+    let labels = [
+        if files.is_dir[index] { "Open" } else { "Edit" },
+        "Rename",
+        "Copy",
+        "Move",
+        if files.confirm_delete { "SURE?" } else { "Delete" },
+        "Properties",
+        "Run",
+        "Export",
+    ];
+    for (i, label) in labels.iter().enumerate() {
+        let col = (i % 2) as i64;
+        let row = (i / 2) as i64;
+        let x = 56 + col * 188;
+        let y = 216 + row * 70;
+        let danger = i == 4;
+        let bg = if danger { if files.confirm_delete { RED() } else { RED_DIM() } } else { SURFACE_MAX() };
+        button(screen, x, y, 180, 56, label, bg, TEXT());
+    }
+    button(screen, 150, 576, 180, 44, "Cancel", SURFACE(), MUTED());
+}
+
+fn draw_files_props(screen: &Screen, files: &Files, index: usize) {
+    let width = screen.width();
+    screen.fill_blend(0, 93, width, screen.height() - 93, BLACK(), 160);
+    screen.round_rect(40, 220, width - 80, 340, 26, SURFACE_HI());
+    screen.text(60, 236, "PROPERTIES", 2, TEXT());
+    let name = slice_str(&files.names[index][..files.name_len[index] as usize]);
+    screen.text(60, 280, "Name", 1, MUTED());
+    let shown = name.len().min(34);
+    screen.text(140, 280, &name[..shown], 1, TEXT());
+    screen.text(60, 310, "Path", 1, MUTED());
+    let path = slice_str(&files.paths[index][..files.path_len[index] as usize]);
+    let plen = path.len();
+    screen.text(140, 310, &path[..plen.min(34)], 1, TEXT());
+    if plen > 34 {
+        screen.text(140, 328, &path[34..plen.min(68)], 1, TEXT());
+    }
+    screen.text(60, 358, "Kind", 1, MUTED());
+    let kind = if files.is_dir[index] {
+        "Directory"
+    } else if files.is_executable(index) {
+        "Executable"
+    } else {
+        "File"
+    };
+    screen.text(140, 358, kind, 1, TEXT());
+    screen.text(60, 388, "Size", 1, MUTED());
+    let mut buf = [0u8; 20];
+    let size = unsigned(files.sizes[index], &mut buf);
+    let mut line = [0u8; 32];
+    let mut used = 0;
+    push_str(&mut line, &mut used, size.as_bytes());
+    push_str(&mut line, &mut used, b" bytes");
+    screen.text(140, 388, slice_str(&line[..used]), 1, TEXT());
+    if let Some((kind_id, _)) = k::stat(path) {
+        screen.text(60, 418, "Storage", 1, MUTED());
+        screen.text(140, 418, if kind_id == 1 { "Disk (KimiFS)" } else { "RamFS" }, 1, TEXT());
+    }
+    screen.text(60, 520, "Tap anywhere to close", 1, MUTED());
+}
+
+fn draw_files(screen: &Screen, files: &Files, osk: bool) {
     let width = screen.width();
     screen.fill(0, 93, width, screen.height() - 93, BLACK());
+    if files.editor.is_some() {
+        draw_files_editor(screen, files, osk);
+        return;
+    }
     if let Some(index) = files.preview {
         screen.round_rect(20, 104, width - 40, 560, 26, SURFACE());
         let title = slice_str(&files.names[index][..files.name_len[index] as usize]);
@@ -2478,16 +3249,32 @@ fn draw_files(screen: &Screen, files: &Files) {
                 column += 1;
             }
         }
-        screen.text(40, 642, "Tap to close", 1, MUTED());
+        screen.text(40, 642, "Tap body to close - long-press list for actions", 1, MUTED());
+        button(screen, 20, 676, 100, 40, "EDIT", if files.binary { SURFACE() } else { SURFACE_HI() }, if files.binary { MUTED() } else { TEXT() });
+        button(screen, 130, 676, 100, 40, "RUN", SURFACE_HI(), TEXT());
+        button(screen, 240, 676, 100, 40, "EXPORT", SURFACE_HI(), TEXT());
+        button(screen, 350, 676, 106, 40, "PROPS", SURFACE_HI(), TEXT());
+        if files.status_len > 0 {
+            screen.text(24, 730, slice_str(&files.status[..files.status_len]), 1, RED());
+        }
+        if let Some(index) = files.action {
+            draw_files_action(screen, files, index);
+        }
         return;
     }
     screen.round_rect(20, 100, width - 40, 42, 21, SURFACE());
     let dir = slice_str(&files.dir[..files.dir_len]);
     let start = files.dir_len.saturating_sub(50);
     screen.text(36, 112, &dir[start..], 1, TEXT());
-    button(screen, 20, 150, 90, 36, "Root", SURFACE_HI(), TEXT());
-    button(screen, 120, 150, 160, 36, "Import", SURFACE_HI(), TEXT());
-    button(screen, 290, 150, 166, 36, "Refresh", SURFACE_HI(), MUTED());
+    button(screen, 20, 150, 70, 36, "Root", SURFACE_HI(), TEXT());
+    button(screen, 98, 150, 76, 36, "+File", SURFACE_HI(), TEXT());
+    button(screen, 182, 150, 76, 36, "+Dir", SURFACE_HI(), TEXT());
+    if files.clip_len > 0 {
+        button(screen, 266, 150, 88, 36, "Paste", RED(), TEXT());
+    } else {
+        button(screen, 266, 150, 88, 36, "Import", SURFACE_HI(), TEXT());
+    }
+    button(screen, 362, 150, 94, 36, "Refresh", SURFACE_HI(), MUTED());
     for row in 0..17usize {
         let index = files.scroll + row;
         if index >= files.count {
@@ -2518,8 +3305,32 @@ fn draw_files(screen: &Screen, files: &Files) {
     push_str(&mut line, &mut used, unsigned(files.count as u64, &mut buf).as_bytes());
     push_str(&mut line, &mut used, b" items");
     screen.text_centered(width / 2, 738, slice_str(&line[..used]), 1, MUTED());
-    if files.status_len > 0 {
+    if files.clip_len > 0 {
+        let mut chip = [0u8; 64];
+        let mut cn = 0;
+        push_str(&mut chip, &mut cn, if files.clip_cut { b"MOVE: " } else { b"COPY: " });
+        let nl = files.clip_name_len.min(36);
+        push_str(&mut chip, &mut cn, &files.clip_name[..nl]);
+        push_str(&mut chip, &mut cn, b" (tap to clear)");
+        screen.text(24, 710, slice_str(&chip[..cn]), 1, RED());
+    } else if files.status_len > 0 {
         screen.text(24, 712, slice_str(&files.status[..files.status_len]), 1, RED());
+    } else {
+        screen.text(24, 712, "Long-press an entry for actions", 1, MUTED());
+    }
+    if files.run_show {
+        screen.fill_blend(0, 93, width, screen.height() - 93, BLACK(), 160);
+        screen.round_rect(40, 300, width - 80, 160, 26, SURFACE_HI());
+        screen.text(60, 316, "EXECUTE", 2, TEXT());
+        screen.text(60, 360, slice_str(&files.run_msg[..files.run_len]), 1, TEXT());
+        screen.text(60, 420, "Tap to close", 1, MUTED());
+    } else if let Some(index) = files.props {
+        draw_files_props(screen, files, index);
+    } else if let Some(index) = files.action {
+        draw_files_action(screen, files, index);
+    }
+    if files.prompt != 0 {
+        draw_files_prompt(screen, files);
     }
 }
 
@@ -3394,6 +4205,229 @@ fn num_buf(value: u32) -> [u8; 12] {
     buf
 }
 
+// ---- System monitor --------------------------------------------------------
+
+fn monitor_tap(apps: &mut Apps, point: (i64, i64)) {
+    let m = &mut apps.monitor;
+    if m.selected.is_some() {
+        if point.1 >= 560 && point.1 <= 612 && point.0 >= 120 && point.0 <= 360 {
+            m.kill_selected();
+        } else {
+            m.selected = None;
+            m.kill_len = 0;
+        }
+        return;
+    }
+    if point.1 >= 440 && point.1 <= 472 {
+        if point.0 >= 360 && point.0 <= 404 {
+            m.scroll = m.scroll.saturating_sub(5);
+            return;
+        }
+        if point.0 >= 412 && point.0 <= 456 {
+            if m.scroll + 10 < m.proc_count {
+                m.scroll += 5;
+            }
+            return;
+        }
+    }
+    if point.1 >= 476 && point.1 < 756 && point.0 >= 20 && point.0 < 460 {
+        let row = ((point.1 - 476) / 28) as usize;
+        if row < 10 {
+            let index = m.scroll + row;
+            if index < m.proc_count {
+                m.selected = Some(m.procs[index].pid);
+                m.kill_len = 0;
+            }
+        }
+    }
+}
+
+fn monitor_bar(screen: &Screen, x: i64, y: i64, w: i64, h: i64, permille: i64, color: u32) {
+    screen.round_rect(x, y, w, h, h / 2, SURFACE_MAX());
+    let fill = (w * permille.clamp(0, 1000) / 1000).max(if permille > 0 { h } else { 0 });
+    if fill > 0 {
+        screen.round_rect(x, y, fill, h, h / 2, color);
+    }
+}
+
+fn kb_text(kb: u64, buf: &mut [u8; 24]) -> &str {
+    let mut used = 0;
+    let mut num = [0u8; 20];
+    if kb >= 1024 * 1024 {
+        push_str(buf, &mut used, format_tenths((kb / 1024) as i64 * 10 / 1024, &mut num).as_bytes());
+        push_str(buf, &mut used, b" GB");
+    } else if kb >= 1024 {
+        push_str(buf, &mut used, unsigned(kb / 1024, &mut num).as_bytes());
+        push_str(buf, &mut used, b" MB");
+    } else {
+        push_str(buf, &mut used, unsigned(kb, &mut num).as_bytes());
+        push_str(buf, &mut used, b" KB");
+    }
+    slice_str(&buf[..used])
+}
+
+fn draw_monitor(screen: &Screen, m: &mut Monitor) {
+    let width = screen.width();
+    screen.fill(0, 93, width, screen.height() - 93, BLACK());
+    let now = k::uptime_ms();
+    if now.saturating_sub(m.last_refresh) >= 1000 {
+        m.refresh();
+    }
+
+    if let Some(pid) = m.selected {
+        let Some(p) = m.find(pid).copied() else {
+            m.selected = None;
+            return;
+        };
+        screen.round_rect(20, 104, width - 40, 440, 26, SURFACE());
+        let name = slice_str(&p.name[..p.name_len]);
+        screen.text(40, 124, name, 3, TEXT());
+        let mut buf = [0u8; 20];
+        screen.text(40, 180, "PID", 1, MUTED());
+        screen.text(150, 180, unsigned(p.pid, &mut buf), 2, TEXT());
+        screen.text(40, 216, "Parent", 1, MUTED());
+        screen.text(150, 216, unsigned(p.ppid, &mut buf), 2, TEXT());
+        screen.text(40, 252, "Memory", 1, MUTED());
+        let mut mem = [0u8; 24];
+        screen.text(150, 252, kb_text(p.ram_kb, &mut mem), 2, TEXT());
+        monitor_bar(screen, 40, 288, width - 80, 12, (p.ram_kb * 1000 / m.info[1].max(1)) as i64, RED());
+        screen.text(40, 316, "CPU", 1, MUTED());
+        let mut cpu = [0u8; 24];
+        let mut used = 0;
+        push_str(&mut cpu, &mut used, format_tenths(p.cpu_x10 as i64, &mut buf).as_bytes());
+        push_str(&mut cpu, &mut used, b" %");
+        screen.text(150, 316, slice_str(&cpu[..used]), 2, TEXT());
+        screen.text(40, 352, "State", 1, MUTED());
+        let state = match p.state { 0 => "Running", 1 => "Sleeping", 2 => "Zombie", _ => "Unknown" };
+        screen.text(150, 352, state, 2, TEXT());
+        screen.text(40, 396, "Cmdline", 1, MUTED());
+        screen.text(150, 396, "not exposed by the kernel", 1, MUTED());
+        screen.text(40, 430, "Memory breakdown: resident set only", 1, MUTED());
+        screen.text(40, 452, "(no per-region map available)", 1, MUTED());
+        button(screen, 120, 560, 240, 52, "TERMINATE", RED(), TEXT());
+        if m.kill_len > 0 {
+            screen.text_centered(width / 2, 636, slice_str(&m.kill_msg[..m.kill_len]), 1, GREEN());
+        }
+        screen.text(40, 700, "Tap elsewhere to go back", 1, MUTED());
+        return;
+    }
+
+    if !m.has_info {
+        screen.text_centered(width / 2, 300, "System stats unavailable", 2, MUTED());
+        screen.text_centered(width / 2, 340, "Needs the libOS host (SYS_SYSINFO)", 1, MUTED());
+    }
+
+    let cpu_permille = (m.info[0] as i64 * 100 / 10).min(1000);
+    screen.round_rect(20, 104, width - 40, 84, 22, SURFACE());
+    screen.text(36, 116, "CPU", 1, MUTED());
+    let mut buf = [0u8; 20];
+    let mut line = [0u8; 32];
+    let mut used = 0;
+    push_str(&mut line, &mut used, format_tenths(m.info[0] as i64, &mut buf).as_bytes());
+    push_str(&mut line, &mut used, b"%");
+    screen.text(width - 36 - Screen::text_width(slice_str(&line[..used]), 2), 112, slice_str(&line[..used]), 2, TEXT());
+    monitor_bar(screen, 36, 142, 240, 12, cpu_permille, RED());
+    let hist_x = 300i64;
+    let hist_w = 144i64;
+    for i in 0..m.hist_len {
+        let x = hist_x + (i as i64 * hist_w) / 48;
+        let h = (m.cpu_hist[i] as i64 * 30 / 100).max(1);
+        screen.fill(x, 172 - h, 2, h, RED_DIM());
+    }
+    screen.text(36, 164, "load history", 1, MUTED());
+
+    screen.round_rect(20, 196, width - 40, 64, 20, SURFACE());
+    screen.text(36, 206, "RAM", 1, MUTED());
+    let mut ram = [0u8; 48];
+    let mut rn = 0;
+    let mut t1 = [0u8; 24];
+    let mut t2 = [0u8; 24];
+    push_str(&mut ram, &mut rn, kb_text(m.info[2], &mut t1).as_bytes());
+    push_str(&mut ram, &mut rn, b" / ");
+    push_str(&mut ram, &mut rn, kb_text(m.info[1], &mut t2).as_bytes());
+    screen.text(width - 36 - Screen::text_width(slice_str(&ram[..rn]), 1), 206, slice_str(&ram[..rn]), 1, TEXT());
+    let ram_permille = if m.info[1] > 0 { (m.info[2] * 1000 / m.info[1]) as i64 } else { 0 };
+    monitor_bar(screen, 36, 234, width - 72, 12, ram_permille, 0x00b8_c4ff);
+
+    screen.round_rect(20, 268, width - 40, 64, 20, SURFACE());
+    screen.text(36, 278, "STORAGE", 1, MUTED());
+    let mut sto = [0u8; 48];
+    let mut sn = 0;
+    push_str(&mut sto, &mut sn, kb_text(m.info[4], &mut t1).as_bytes());
+    push_str(&mut sto, &mut sn, b" / ");
+    push_str(&mut sto, &mut sn, kb_text(m.info[3], &mut t2).as_bytes());
+    screen.text(width - 36 - Screen::text_width(slice_str(&sto[..sn]), 1), 278, slice_str(&sto[..sn]), 1, TEXT());
+    let sto_permille = if m.info[3] > 0 { (m.info[4] * 1000 / m.info[3]) as i64 } else { 0 };
+    monitor_bar(screen, 36, 306, width - 72, 12, sto_permille, GREEN());
+
+    let mut row1 = [0u8; 96];
+    let mut u1 = 0;
+    push_str(&mut row1, &mut u1, b"Battery ");
+    push_str(&mut row1, &mut u1, unsigned(m.info[7], &mut buf).as_bytes());
+    push_str(&mut row1, &mut u1, if m.info[8] != 0 { b"% charging" } else { b"%" });
+    push_str(&mut row1, &mut u1, b"   Uptime ");
+    let up = m.info[5];
+    push_str(&mut row1, &mut u1, unsigned(up / 3600, &mut buf).as_bytes());
+    push_str(&mut row1, &mut u1, b"h ");
+    push_str(&mut row1, &mut u1, unsigned((up / 60) % 60, &mut buf).as_bytes());
+    push_str(&mut row1, &mut u1, b"m");
+    screen.text(24, 348, slice_str(&row1[..u1]), 1, TEXT());
+    let mut row2 = [0u8; 96];
+    let mut u2 = 0;
+    push_str(&mut row2, &mut u2, b"Processes ");
+    push_str(&mut row2, &mut u2, unsigned(m.info[6], &mut buf).as_bytes());
+    push_str(&mut row2, &mut u2, b"   FPS ");
+    push_str(&mut row2, &mut u2, format_tenths(m.fps_x10 as i64, &mut buf).as_bytes());
+    screen.text(24, 372, slice_str(&row2[..u2]), 1, TEXT());
+
+    screen.text(24, 400, "ACTIVE APPS", 1, MUTED());
+    let mut apps_line = [0u8; 128];
+    let mut an = 0;
+    for i in 0..m.active_count {
+        if i > 0 {
+            push_str(&mut apps_line, &mut an, b"  ");
+        }
+        push_str(&mut apps_line, &mut an, &m.active[i][..m.active_len[i] as usize]);
+    }
+    if an == 0 {
+        push_str(&mut apps_line, &mut an, b"(none yet)");
+    }
+    let shown = an.min(56);
+    screen.text(24, 420, slice_str(&apps_line[..shown]), 1, TEXT());
+
+    screen.text(24, 452, "PROCESSES", 1, MUTED());
+    button(screen, 360, 440, 44, 30, "up", SURFACE_HI(), MUTED());
+    button(screen, 412, 440, 44, 30, "dn", SURFACE_HI(), MUTED());
+    if m.proc_count == 0 {
+        screen.text_centered(width / 2, 560, "No process data (host only)", 1, MUTED());
+        return;
+    }
+    for row in 0..10usize {
+        let index = m.scroll + row;
+        if index >= m.proc_count {
+            break;
+        }
+        let p = &m.procs[index];
+        let y = 476 + row as i64 * 28;
+        screen.round_rect(20, y, width - 40, 26, 10, if row % 2 == 0 { SURFACE() } else { BLACK() });
+        let mut pid = [0u8; 20];
+        screen.text(28, y + 8, unsigned(p.pid, &mut pid), 1, MUTED());
+        let name = slice_str(&p.name[..p.name_len]);
+        let nlen = name.len().min(18);
+        screen.text(76, y + 8, &name[..nlen], 1, TEXT());
+        let mut mem = [0u8; 24];
+        let mem_text = kb_text(p.ram_kb, &mut mem);
+        screen.text(250, y + 8, mem_text, 1, MUTED());
+        let mut cpu = [0u8; 20];
+        let mut cn = 0;
+        push_str(&mut cpu, &mut cn, format_tenths(p.cpu_x10 as i64, &mut pid).as_bytes());
+        push_str(&mut cpu, &mut cn, b"%");
+        screen.text(340, y + 8, slice_str(&cpu[..cn]), 1, MUTED());
+        let state = match p.state { 0 => "R", 1 => "S", 2 => "Z", _ => "?" };
+        screen.text(430, y + 8, state, 1, if p.state == 0 { GREEN() } else { MUTED() });
+    }
+}
+
 // ---- Marketplace (powered by kpkg) ----------------------------------------
 
 #[derive(Clone, Copy)]
@@ -3421,6 +4455,9 @@ pub struct Market {
     status: [u8; 64],
     status_len: usize,
     repo_ok: bool,
+    import_paths: [[u8; 96]; 8],
+    import_lens: [usize; 8],
+    import_count: usize,
 }
 
 const EMPTY_ITEM: MarketItem = MarketItem {
@@ -3438,6 +4475,9 @@ impl Market {
             status: [0; 64],
             status_len: 0,
             repo_ok: false,
+            import_paths: [[0; 96]; 8],
+            import_lens: [0; 8],
+            import_count: 0,
         };
         m.set_status("Themes, fonts & apps — powered by kpkg");
         m
@@ -3480,11 +4520,70 @@ impl Market {
             self.push(p.name_str(), p.desc_str(), kind, 1, ord, installed);
             ord += 1;
         });
+        self.scan_imports();
         self.repo_ok = k::kpkg::repo_cached();
         for t in 0..3 {
             let n = self.kind_count(t as u8);
             if self.scroll[t] + 6 > n { self.scroll[t] = n.saturating_sub(6); }
         }
+    }
+
+    fn scan_imports(&mut self) {
+        let _ = k::mkdir("/disk/import");
+        let mut kept = 0usize;
+        for i in 0..self.count {
+            if self.items[i].source != 2 {
+                self.items[kept] = self.items[i];
+                kept += 1;
+            }
+        }
+        self.count = kept;
+        self.import_count = 0;
+        let mut buffer = [0u8; 1024];
+        let Some(n) = k::listdir("/disk/import", &mut buffer) else { return };
+        for name in buffer[..n].split(|&b| b == 0) {
+            if name.is_empty() || name.last() == Some(&b'/') || self.import_count >= 8 {
+                continue;
+            }
+            let kind = if name.ends_with(b".ktheme") {
+                0u8
+            } else if name.ends_with(b".kfont") {
+                1u8
+            } else if name.ends_with(b".kpkg") {
+                2u8
+            } else {
+                continue;
+            };
+            if name.len() > 40 || self.count >= self.items.len() {
+                continue;
+            }
+            let slot = self.import_count;
+            let mut path = [0u8; 96];
+            let mut used = 0;
+            push_str(&mut path, &mut used, b"/disk/import/");
+            push_str(&mut path, &mut used, name);
+            self.import_paths[slot][..used].copy_from_slice(&path[..used]);
+            self.import_lens[slot] = used;
+            self.import_count += 1;
+            let stem = match name.iter().rposition(|&b| b == b'.') {
+                Some(i) if i > 0 => &name[..i],
+                _ => name,
+            };
+            let stem_str = slice_str(stem);
+            let mut dest = [0u8; 96];
+            let dest_path = asset_path(kind, stem_str, &mut dest);
+            let installed = k::stat(dest_path).is_some();
+            self.push(stem_str, "Local file - validate & install", kind, 2, slot, installed);
+        }
+    }
+
+    fn import_picker(&mut self) {
+        if k::import_file("/disk/import") {
+            self.set_status("Picker opened - Refresh after importing");
+        } else {
+            self.set_status("Import unavailable on this host");
+        }
+        self.scan_imports();
     }
 
     fn kind_count(&self, kind: u8) -> usize {
@@ -3504,6 +4603,10 @@ impl Market {
     }
 
     fn action(&mut self, it: MarketItem) {
+        if it.source == 2 {
+            self.action_import(it);
+            return;
+        }
         let name = it.name_str();
         match it.kind {
             0 => {
@@ -3545,6 +4648,45 @@ impl Market {
     }
 }
 
+impl Market {
+    fn action_import(&mut self, it: MarketItem) {
+        if it.index >= self.import_count {
+            self.set_status("Import slot missing - Refresh");
+            return;
+        }
+        let path = slice_str(&self.import_paths[it.index][..self.import_lens[it.index]]);
+        let result = k::kpkg::import_local(path);
+        if !result.ok {
+            self.set_status(result.msg_str());
+            self.refresh();
+            return;
+        }
+        match result.kind {
+            0 => {
+                if crate::theme::load_theme_file(result.dest_str(), result.name_str()) {
+                    crate::theme::save();
+                    self.set_status("Theme imported & applied");
+                } else {
+                    self.set_status("Installed, but palette parse failed");
+                }
+            }
+            1 => {
+                if crate::font_store::load(result.dest_str(), result.name_str()) {
+                    crate::theme::apply_font(4);
+                    crate::theme::save();
+                    self.set_status("Font imported & applied");
+                } else {
+                    self.set_status("Installed, but font parse failed");
+                }
+            }
+            _ => {
+                self.set_status("App installed - run it in Files/Terminal");
+            }
+        }
+        self.refresh();
+    }
+}
+
 fn asset_path<'a>(kind: u8, name: &str, buf: &'a mut [u8; 96]) -> &'a str {
     let (dir, ext) = match kind {
         0 => ("/disk/themes/", ".theme"),
@@ -3576,14 +4718,20 @@ fn market_tap(apps: &mut Apps, point: (i64, i64)) {
         m.tab = if point.0 < 165 { 0 } else if point.0 < 315 { 1 } else { 2 };
         return;
     }
-    if point.1 >= 150 && point.1 <= 186 && point.0 >= 330 {
-        if k::kpkg::update_quiet("") {
-            m.set_status("Repo updated");
-        } else {
-            m.set_status("Fetch failed — built-ins still available");
+    if point.1 >= 150 && point.1 <= 186 {
+        if point.0 >= 200 && point.0 < 326 {
+            m.import_picker();
+            return;
         }
-        m.refresh();
-        return;
+        if point.0 >= 330 {
+            if k::kpkg::update_quiet("") {
+                m.set_status("Repo updated");
+            } else {
+                m.set_status("Fetch failed — built-ins still available");
+            }
+            m.refresh();
+            return;
+        }
     }
     if point.1 >= 760 {
         if point.0 < 160 {
@@ -3617,7 +4765,9 @@ fn draw_market(screen: &Screen, m: &Market) {
         screen.text_centered(x + w / 2, 110, tabs[t], 2, if active { TEXT() } else { MUTED() });
     }
 
-    screen.text(24, 162, slice_str(&m.status[..m.status_len]), 1, MUTED());
+    let status_shown = m.status_len.min(32);
+    screen.text(24, 162, slice_str(&m.status[..status_shown]), 1, MUTED());
+    button(screen, 200, 150, 120, 36, "Import", RED_DIM(), TEXT());
     button(screen, 330, 150, 126, 36, "Refresh", SURFACE_HI(), TEXT());
 
     let kind = m.tab as u8;
@@ -3636,11 +4786,18 @@ fn draw_market(screen: &Screen, m: &Market) {
         let desc = it.desc_str();
         let dlen = desc.len().min(44);
         screen.text(40, y + 46, &desc[..dlen], 1, MUTED());
-        let tag = match it.kind { 0 => "THEME", 1 => "FONT", _ => "APP" };
+        let tag = match (it.kind, it.source) {
+            (_, 2) => "LOCAL",
+            (0, _) => "THEME",
+            (1, _) => "FONT",
+            _ => "APP",
+        };
         screen.text(40, y + 66, tag, 1, OUTLINE());
 
         let active = item_active(&it);
-        let (label, bg, fg) = if it.kind == 2 {
+        let (label, bg, fg) = if it.source == 2 {
+            if it.installed { ("Installed", SURFACE_HI(), MUTED()) } else { ("Import", RED(), TEXT()) }
+        } else if it.kind == 2 {
             if it.installed { ("Installed", SURFACE_HI(), MUTED()) } else { ("Install", SURFACE_HI(), TEXT()) }
         } else if active {
             ("Active", SURFACE_MAX(), GREEN())

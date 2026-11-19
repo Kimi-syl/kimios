@@ -51,7 +51,8 @@ JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *reserved) {
 // and cannot see app classes, so every GUI-thread JNI call must use these.
 static jclass g_bridge;
 static jmethodID g_fetch_mid, g_local_time_mid, g_location_mid, g_open_url_mid,
-                 g_audio_mid, g_audio_query_mid, g_import_mid;
+                 g_audio_mid, g_audio_query_mid, g_import_mid,
+                 g_sysinfo_mid, g_proclist_mid;
 static jmethodID g_web_init_mid, g_web_buf_mid, g_web_render_mid, g_web_touch_mid,
                  g_web_load_mid, g_web_back_mid, g_web_fwd_mid, g_web_reload_mid,
                  g_web_url_mid, g_web_title_mid, g_web_canback_mid, g_web_canfwd_mid,
@@ -85,6 +86,28 @@ static uint64_t call_longs(jmethodID mid, uint64_t *out, int n) {
                 (*env)->ReleaseLongArrayElements(env, arr, e, JNI_ABORT);
                 r = 0;
             }
+        }
+        (*env)->DeleteLocalRef(env, arr);
+    }
+    gui_done(env, attached);
+    return r;
+}
+// Call a static KimiBridge method (int) -> long[]; copy up to cap elements to
+// out, return the number copied (flat u64 records). ERROR on failure.
+static uint64_t call_int_longs(jmethodID mid, jint arg, uint64_t *out, uint64_t cap) {
+    if (!g_bridge || !mid || !out || cap == 0) return ERROR;
+    int attached = 0; JNIEnv *env = gui_env(&attached);
+    if (!env) return ERROR;
+    uint64_t r = ERROR;
+    jlongArray arr = (jlongArray)(*env)->CallStaticObjectMethod(env, g_bridge, mid, arg);
+    if (!(*env)->ExceptionCheck(env) && arr) {
+        uint64_t len = (uint64_t)(*env)->GetArrayLength(env, arr);
+        uint64_t n = len < cap ? len : cap;
+        jlong *e = (*env)->GetLongArrayElements(env, arr, NULL);
+        if (e) {
+            for (uint64_t i = 0; i < n; i++) out[i] = (uint64_t)e[i];
+            (*env)->ReleaseLongArrayElements(env, arr, e, JNI_ABORT);
+            r = n;
         }
         (*env)->DeleteLocalRef(env, arr);
     }
@@ -421,6 +444,51 @@ static uint64_t fs_fetch_url(const char *url, const char *dest) {
 static uint64_t str_arg(uint64_t p, uint64_t len, char *out, size_t cap);
 struct linux_run_req { uint64_t bin_ptr, bin_len, arg_ptr, arg_len, out_ptr, out_cap, out_len, code; };
 extern int kimi_guest_capture(const char *, const char *, char *const *, char *const *, char *, size_t, size_t *, int *);
+
+// Shared guest environment (SYS_LINUX_RUN + SYS_RUN_PATH): point the dynamic
+// loader, PATH, HOME/TMPDIR, TLS certs and ICU data at the sysroot/sandbox.
+// envp needs room for 12 entries + NULL; buffers live in the caller's GuestEnv.
+typedef struct {
+    char lib[700], path[700], home[400], tmp[400];
+    char sslfile[700], ssldir[600], icudata[700];
+    char phome[500], ppath[900];
+} GuestEnv;
+static int guest_env_build(const char *sysroot, GuestEnv *s, char **envp, int is_py) {
+    snprintf(s->lib, sizeof s->lib, "LD_LIBRARY_PATH=%s/usr/lib:%s/lib", sysroot, sysroot);
+    snprintf(s->path, sizeof s->path, "PATH=%s/usr/bin:%s/bin", sysroot, sysroot);
+    snprintf(s->home, sizeof s->home, "HOME=%s/home", diskRoot);
+    snprintf(s->tmp, sizeof s->tmp, "TMPDIR=%s/tmp", diskRoot);
+    char hd[520], td[520];
+    snprintf(hd, sizeof hd, "%s/home", diskRoot); mkdir(hd, 0755);
+    snprintf(td, sizeof td, "%s/tmp", diskRoot); mkdir(td, 0755);
+    int e = 0;
+    envp[e++] = s->lib; envp[e++] = s->path; envp[e++] = s->home; envp[e++] = s->tmp; envp[e++] = "LANG=C.UTF-8";
+    snprintf(s->sslfile, sizeof s->sslfile, "SSL_CERT_FILE=%s/etc/ssl/certs/ca-certificates.crt", sysroot);
+    snprintf(s->ssldir, sizeof s->ssldir, "SSL_CERT_DIR=%s/etc/ssl/certs", sysroot);
+    envp[e++] = s->sslfile; envp[e++] = s->ssldir;
+    // ICU data (node Intl.Collator etc.): absolute /usr/share/icu path is absent
+    // on Android; point ICU_DATA at the sysroot's versioned data dir.
+    s->icudata[0] = 0;
+    char icudir[600]; snprintf(icudir, sizeof icudir, "%s/usr/share/icu", sysroot);
+    DIR *id = opendir(icudir);
+    if (id) {
+        struct dirent *ie;
+        while ((ie = readdir(id))) {
+            if (ie->d_name[0] != '.') {
+                snprintf(s->icudata, sizeof s->icudata, "ICU_DATA=%s/%s", icudir, ie->d_name);
+                break;
+            }
+        }
+        closedir(id);
+    }
+    if (s->icudata[0]) envp[e++] = s->icudata;
+    if (is_py) {
+        snprintf(s->phome, sizeof s->phome, "PYTHONHOME=%s/usr", sysroot);
+        snprintf(s->ppath, sizeof s->ppath, "PYTHONPATH=%s/usr/lib/python3.14:%s/usr/lib/python3.14/lib-dynload", sysroot, sysroot);
+        envp[e++] = s->phome; envp[e++] = s->ppath; envp[e++] = "PYTHONDONTWRITEBYTECODE=1";
+    }
+    return e;
+}
 static uint64_t fs_linux_run(uint64_t a0) {
     struct linux_run_req *rq = (struct linux_run_req *)a0;
     char bin[160], arg[4096];
@@ -431,13 +499,6 @@ static uint64_t fs_linux_run(uint64_t a0) {
     if (strchr(bin, '/')) snprintf(exe, sizeof exe, "%s/%s", sysroot, bin);
     else snprintf(exe, sizeof exe, "%s/usr/bin/%s", sysroot, bin);
     const char *base = strrchr(bin, '/'); base = base ? base + 1 : bin;
-    char lib[700], ppath[900], phome[500], path[700], home[400], tmp[400], hd[400], td[400];
-    snprintf(lib, sizeof lib, "LD_LIBRARY_PATH=%s/usr/lib:%s/lib", sysroot, sysroot);
-    snprintf(path, sizeof path, "PATH=%s/usr/bin:%s/bin", sysroot, sysroot);
-    snprintf(home, sizeof home, "HOME=%s/home", diskRoot);
-    snprintf(tmp, sizeof tmp, "TMPDIR=%s/tmp", diskRoot);
-    snprintf(hd, sizeof hd, "%s/home", diskRoot); mkdir(hd, 0755);
-    snprintf(td, sizeof td, "%s/tmp", diskRoot); mkdir(td, 0755);
     int is_node = strstr(base, "node") != NULL;
     int is_py = strstr(base, "python") != NULL;
     int is_sh = strcmp(base, "sh") == 0 || strcmp(base, "busybox") == 0;
@@ -467,38 +528,63 @@ static uint64_t fs_linux_run(uint64_t a0) {
         }
     }
     argv[n] = NULL;
-    char *envp[16]; int e = 0;
-    envp[e++] = lib; envp[e++] = path; envp[e++] = home; envp[e++] = tmp; envp[e++] = "LANG=C.UTF-8";
-    char sslfile[700], ssldir[600];
-    snprintf(sslfile, sizeof sslfile, "SSL_CERT_FILE=%s/etc/ssl/certs/ca-certificates.crt", sysroot);
-    snprintf(ssldir, sizeof ssldir, "SSL_CERT_DIR=%s/etc/ssl/certs", sysroot);
-    envp[e++] = sslfile; envp[e++] = ssldir;
-    // ICU data (node Intl.Collator etc.): absolute /usr/share/icu path is absent
-    // on Android; point ICU_DATA at the sysroot's versioned data dir.
-    char icudata[700]; icudata[0] = 0;
-    char icudir[600]; snprintf(icudir, sizeof icudir, "%s/usr/share/icu", sysroot);
-    DIR *id = opendir(icudir);
-    if (id) {
-        struct dirent *ie;
-        while ((ie = readdir(id))) {
-            if (ie->d_name[0] != '.') {
-                snprintf(icudata, sizeof icudata, "ICU_DATA=%s/%s", icudir, ie->d_name);
-                break;
-            }
-        }
-        closedir(id);
-    }
-    if (icudata[0]) envp[e++] = icudata;
-    if (is_py) {
-        snprintf(phome, sizeof phome, "PYTHONHOME=%s/usr", sysroot);
-        snprintf(ppath, sizeof ppath, "PYTHONPATH=%s/usr/lib/python3.14:%s/usr/lib/python3.14/lib-dynload", sysroot, sysroot);
-        envp[e++] = phome; envp[e++] = ppath; envp[e++] = "PYTHONDONTWRITEBYTECODE=1";
-    }
+    GuestEnv ge;
+    char *envp[16];
+    int e = guest_env_build(sysroot, &ge, envp, is_py);
     envp[e] = NULL;
     size_t olen = 0; int code = 0;
     kimi_guest_capture(exe, sysroot, argv, envp, (char *)rq->out_ptr, (size_t)rq->out_cap, &olen, &code);
     rq->out_len = olen; rq->code = (uint64_t)code;
     return (uint64_t)code;
+}
+// SYS_RUN_PATH: execute an absolute /disk/... program via the guest loader.
+// argv = [abspath, arg] (arg omitted when empty); same sysroot env as
+// SYS_LINUX_RUN. Returns the guest exit code, ERROR when spawn fails.
+static uint64_t fs_run_path(const char *path, const char *arg) {
+    if (strncmp(path, "/disk/", 6)) return ERROR;
+    const char *rel = path + 6;
+    if (!*rel || !safe_rel(rel)) return ERROR;
+    char exe[512]; disk_path(rel, exe, sizeof exe);
+    struct stat st;
+    if (stat(exe, &st) != 0 || !S_ISREG(st.st_mode)) return ERROR;
+    char sysroot[512]; snprintf(sysroot, sizeof sysroot, "%s/alpine/root", diskRoot);
+    const char *base = strrchr(rel, '/'); base = base ? base + 1 : rel;
+    GuestEnv ge;
+    char *envp[16];
+    int e = guest_env_build(sysroot, &ge, envp, strstr(base, "python") != NULL);
+    envp[e] = NULL;
+    char *argv[3]; int n = 0;
+    argv[n++] = exe;
+    if (arg && arg[0]) argv[n++] = (char *)arg;
+    argv[n] = NULL;
+    static char out[8192];
+    size_t olen = 0; int code = 0;
+    if (kimi_guest_capture(exe, sysroot, argv, envp, out, sizeof out, &olen, &code) < 0) return ERROR;
+    LOG("run_path %s code=%d out=%s", exe, code, out);
+    return (uint64_t)code;
+}
+// SYS_COPY: byte-copy src -> dst, both /disk/... paths. Creates the dst parent
+// directory. Returns 0 ok, ERROR on failure (partial dst removed).
+static uint64_t fs_copy(const char *src, const char *dst) {
+    if (strncmp(src, "/disk/", 6) || strncmp(dst, "/disk/", 6)) return ERROR;
+    const char *sr = src + 6, *dr = dst + 6;
+    if (!*sr || !*dr || !safe_rel(sr) || !safe_rel(dr)) return ERROR;
+    char sp[512], dp[512];
+    disk_path(sr, sp, sizeof sp); disk_path(dr, dp, sizeof dp);
+    if (!strcmp(sp, dp)) return ERROR;
+    if (is_dir(sp) || is_dir(dp)) return ERROR;
+    char dir[512]; snprintf(dir, sizeof dir, "%s", dp);
+    char *slash = strrchr(dir, '/'); if (slash) { *slash = 0; mkdir_p(dir); }
+    FILE *in = fopen(sp, "rb"); if (!in) return ERROR;
+    FILE *out = fopen(dp, "wb"); if (!out) { fclose(in); return ERROR; }
+    char buf[8192]; size_t n; uint64_t r = 0;
+    while ((n = fread(buf, 1, sizeof buf, in)) > 0)
+        if (fwrite(buf, 1, n, out) != n) { r = ERROR; break; }
+    if (ferror(in)) r = ERROR;
+    fclose(in);
+    if (fclose(out) != 0) r = ERROR;
+    if (r == ERROR) unlink(dp);
+    return r;
 }
 static uint64_t fs_rename(const char *o, const char *n) { if (strncmp(o, "/disk/", 6) || strncmp(n, "/disk/", 6)) return ERROR; char op[512], np[512]; disk_path(o + 6, op, sizeof op); disk_path(n + 6, np, sizeof np); if (!file_exists(op) || file_exists(np)) return ERROR; return rename(op, np) == 0 ? 0 : ERROR; }
 static uint64_t disk_file_count(void) { uint64_t n = 0; DIR *d = opendir(diskRoot); if (d) { struct dirent *e; while ((e = readdir(d))) if (e->d_name[0] != '.') n++; closedir(d); } return n; }
@@ -637,6 +723,24 @@ uint64_t kimi_host_syscall(uint64_t n, uint64_t a0, uint64_t a1, uint64_t a2, ui
         default: return ERROR;
         }
     }
+    case 49: return call_longs(g_sysinfo_mid, (uint64_t *)a0, 10); // SYS_SYSINFO
+    case 50: { // SYS_PROCLIST: flat 8-u64 records, a1 = max records
+        if (a1 == 0 || a1 > 4096) return ERROR;
+        uint64_t n = call_int_longs(g_proclist_mid, (jint)a1, (uint64_t *)a0, a1 * 8);
+        return n == ERROR ? ERROR : n / 8;
+    }
+    case 51: { // SYS_RUN_PATH: execute a /disk/... binary via the guest loader
+        char rp[512], rarg[4096];
+        str_arg(a0, a1, rp, sizeof rp);
+        str_arg(a2, a3, rarg, sizeof rarg);
+        return fs_run_path(rp, rarg);
+    }
+    case 52: { // SYS_COPY: copy a file within /disk
+        char src[512], dst[512];
+        str_arg(a0, a1, src, sizeof src);
+        str_arg(a2, a3, dst, sizeof dst);
+        return fs_copy(src, dst);
+    }
     case 23: { if (a1 < 1) return ERROR; uint64_t *o = (uint64_t *)a0; o[0] = 1; o[1] = 0; o[2] = 2; o[3] = 0; return 1; }
     case 12: return 2048;
     case 22: return 0;
@@ -680,6 +784,8 @@ Java_com_kimios_libos_KimiBridge_nativeInit(JNIEnv *env, jclass cls, jstring fil
         g_audio_mid       = (*env)->GetStaticMethodID(env, g_bridge, "nativeAudio",      "(Ljava/lang/String;I)J");
         g_audio_query_mid = (*env)->GetStaticMethodID(env, g_bridge, "nativeAudioQuery", "()[J");
         g_import_mid      = (*env)->GetStaticMethodID(env, g_bridge, "nativeImportFile", "(Ljava/lang/String;)J");
+        g_sysinfo_mid     = (*env)->GetStaticMethodID(env, g_bridge, "nativeSysInfo",  "()[J");
+        g_proclist_mid    = (*env)->GetStaticMethodID(env, g_bridge, "nativeProcList", "(I)[J");
         g_web_init_mid     = (*env)->GetStaticMethodID(env, g_bridge, "nativeWebInit",        "(II)J");
         g_web_buf_mid      = (*env)->GetStaticMethodID(env, g_bridge, "nativeWebBuf",         "()Ljava/nio/ByteBuffer;");
         g_web_render_mid   = (*env)->GetStaticMethodID(env, g_bridge, "nativeWebRender",      "(Z)J");
@@ -695,6 +801,14 @@ Java_com_kimios_libos_KimiBridge_nativeInit(JNIEnv *env, jclass cls, jstring fil
         g_web_viewport_mid = (*env)->GetStaticMethodID(env, g_bridge, "nativeWebViewport",    "(II)J");
         g_web_pause_mid    = (*env)->GetStaticMethodID(env, g_bridge, "nativeWebPause",       "()J");
         g_web_resume_mid   = (*env)->GetStaticMethodID(env, g_bridge, "nativeWebResume",      "()J");
+        jmethodID setroot = (*env)->GetStaticMethodID(env, g_bridge, "setDiskRoot", "(Ljava/lang/String;)V");
+        if (setroot) {
+            jstring jr = (*env)->NewStringUTF(env, diskRoot);
+            if (jr) {
+                (*env)->CallStaticVoidMethod(env, g_bridge, setroot, jr);
+                (*env)->DeleteLocalRef(env, jr);
+            }
+        }
         if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
         LOG("bridge class + method IDs cached");
     }

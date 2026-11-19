@@ -16,3 +16,4 @@
 /ios/host-harness/shelltest/target
 /disk256.img
 /ios/host-harness/elftest/out/
+tools/__pycache__/

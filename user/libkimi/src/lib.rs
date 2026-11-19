@@ -687,6 +687,49 @@ pub fn web_viewport(w: u32, h: u32) -> bool { syscall4(SYS_WEB, 12, w as u64, h 
 pub fn web_pause() -> bool { syscall3(SYS_WEB, 13, 0, 0) == 0 }
 pub fn web_resume() -> bool { syscall3(SYS_WEB, 14, 0, 0) == 0 }
 
+/// System monitor (P2). Host-only real stats from /proc + statvfs.
+pub const SYS_SYSINFO: u64 = 49;
+pub const SYS_PROCLIST: u64 = 50;
+pub const SYS_RUN_PATH: u64 = 51;
+pub const SYS_COPY: u64 = 52;
+
+/// `[cpu_pct_x10, ram_total_kb, ram_used_kb, storage_total_kb, storage_used_kb,
+/// uptime_s, proc_count, battery_pct, battery_charging, reserved]`.
+pub fn sysinfo() -> Option<[u64; 10]> {
+    let mut f = [0u64; 10];
+    if syscall3(SYS_SYSINFO, f.as_mut_ptr() as u64, 0, 0) == ERROR { None } else { Some(f) }
+}
+
+/// Process list: `out` holds N records of 8 u64 each:
+/// `[pid, ppid, ram_kb, cpu_x10, state, name[0..8], name[8..16], name[16..24]]`
+/// (name = 24 bytes NUL-padded in the last 3 u64; state 0=run,1=sleep,2=zombie).
+/// Returns record count.
+pub fn proclist(out: &mut [u64]) -> usize {
+    let cap = (out.len() / 8) as u64;
+    let n = syscall3(SYS_PROCLIST, out.as_mut_ptr() as u64, cap, 0);
+    if n == ERROR { 0 } else { n as usize }
+}
+
+/// Run an executable at an absolute `/disk/...` path (Files "execute program").
+/// `arg` is passed as a single argument string. Returns the exit code.
+pub fn run_path(path: &str, arg: &str) -> Option<u64> {
+    let r = syscall5(
+        SYS_RUN_PATH,
+        path.as_ptr() as u64, path.len() as u64,
+        arg.as_ptr() as u64, arg.len() as u64, 0,
+    );
+    if r == ERROR { None } else { Some(r) }
+}
+
+/// Copy file `src` -> `dst` (both `/disk/...` paths).
+pub fn copy_file(src: &str, dst: &str) -> bool {
+    syscall5(
+        SYS_COPY,
+        src.as_ptr() as u64, src.len() as u64,
+        dst.as_ptr() as u64, dst.len() as u64, 0,
+    ) == 0
+}
+
 /// File metadata: `(kind, size)` where kind 0 is RamFS and 1 is a disk file.
 pub fn stat(path: &str) -> Option<(u64, u64)> {
     let mut fields = [0u64; 3];

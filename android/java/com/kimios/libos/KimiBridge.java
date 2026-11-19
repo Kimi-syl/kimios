@@ -441,5 +441,213 @@ public final class KimiBridge {
         }, "kimi-import").start();
     }
 
+    // ---- SYS_SYSINFO=49 / SYS_PROCLIST=50: real host stats from /proc +
+    // Android APIs. Called from C on the GUI pthread via cached method IDs. ----
+
+    private static volatile String diskRoot;
+    /** Set from C nativeInit: absolute sandbox disk root (<filesDir>/disk). */
+    public static void setDiskRoot(String root) { diskRoot = root; }
+
+    private static String firstLine(String path) {
+        try (java.io.BufferedReader r = new java.io.BufferedReader(new java.io.FileReader(path))) {
+            return r.readLine();
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private static long parseKb(String line) {
+        String[] t = line.trim().split("\\s+");
+        try { return t.length >= 2 ? Long.parseLong(t[1]) : 0; }
+        catch (NumberFormatException e) { return 0; }
+    }
+
+    private static long cpuPrevTotal = -1, cpuPrevIdle;
+
+    /** [total_jiffies, idle_jiffies] from /proc/stat's first line, or null. */
+    private static long[] cpuSample() {
+        String line = firstLine("/proc/stat");
+        if (line == null || !line.startsWith("cpu ")) return null;
+        String[] t = line.trim().split("\\s+");
+        if (t.length < 8) return null;
+        try {
+            long total = 0;
+            for (int i = 1; i <= 7; i++) total += Long.parseLong(t[i]); // user..softirq
+            long idle = Long.parseLong(t[4]) + Long.parseLong(t[5]);    // idle + iowait
+            return new long[] {total, idle};
+        } catch (NumberFormatException e) {
+            return null;
+        }
+    }
+
+    /** CPU usage % x10. Uses the delta against the previous call's cached
+     *  /proc/stat sample; the very first call samples twice ~100 ms apart.
+     *  Falls back to /proc/loadavg normalized by core count. */
+    private static synchronized long cpuPctX10() {
+        long[] s = cpuSample();
+        if (s == null) {
+            String la = firstLine("/proc/loadavg");
+            if (la != null) {
+                try {
+                    double load = Double.parseDouble(la.split("\\s+")[0]);
+                    int cores = Math.max(1, Runtime.getRuntime().availableProcessors());
+                    long v = (long) (load * 1000 / cores);
+                    return v < 0 ? 0 : (v > 1000 ? 1000 : v);
+                } catch (Exception ignored) {}
+            }
+            return 0;
+        }
+        long total = s[0], idle = s[1], pct;
+        if (cpuPrevTotal >= 0) {
+            long dt = total - cpuPrevTotal, di = idle - cpuPrevIdle;
+            pct = dt > 0 ? (dt - di) * 1000 / dt : 0;
+        } else {
+            try { Thread.sleep(100); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
+            long[] s2 = cpuSample();
+            if (s2 == null) return 0;
+            long dt = s2[0] - total, di = s2[1] - idle;
+            pct = dt > 0 ? (dt - di) * 1000 / dt : 0;
+            total = s2[0]; idle = s2[1];
+        }
+        cpuPrevTotal = total; cpuPrevIdle = idle;
+        return pct < 0 ? 0 : (pct > 1000 ? 1000 : pct);
+    }
+
+    private static boolean allDigits(String s) {
+        if (s.isEmpty()) return false;
+        for (int i = 0; i < s.length(); i++)
+            if (s.charAt(i) < '0' || s.charAt(i) > '9') return false;
+        return true;
+    }
+
+    private static long procCount() {
+        String[] pids = new java.io.File("/proc").list();
+        long n = 0;
+        if (pids != null) for (String p : pids) if (allDigits(p)) n++;
+        if (n == 0) {
+            // hidepid may hide other uids' processes; count our own threads.
+            String[] tasks = new java.io.File("/proc/self/task").list();
+            n = tasks != null ? tasks.length : 1;
+        }
+        return n;
+    }
+
+    /** Called from C (SYS_SYSINFO): real system stats as
+     *  [cpu_pct_x10, ram_total_kb, ram_used_kb, storage_total_kb, storage_used_kb,
+     *   uptime_s, proc_count, battery_pct, battery_charging, reserved]. */
+    public static long[] nativeSysInfo() {
+        long[] r = new long[10];
+        r[0] = cpuPctX10();
+        long memTotal = 0, memAvail = -1;
+        try (java.io.BufferedReader br = new java.io.BufferedReader(new java.io.FileReader("/proc/meminfo"))) {
+            String line;
+            while ((line = br.readLine()) != null) {
+                if (line.startsWith("MemTotal:")) memTotal = parseKb(line);
+                else if (line.startsWith("MemAvailable:")) memAvail = parseKb(line);
+            }
+        } catch (Exception ignored) {}
+        r[1] = memTotal;
+        r[2] = memAvail >= 0 && memTotal > memAvail ? memTotal - memAvail : 0;
+        String root = diskRoot;
+        if (root == null) {
+            Context ctx = appContext;
+            root = ctx != null ? ctx.getFilesDir().getAbsolutePath() + "/disk" : "/data";
+        }
+        try {
+            android.os.StatFs sf = new android.os.StatFs(root);
+            long total = sf.getTotalBytes() / 1024;
+            long avail = sf.getAvailableBytes() / 1024;
+            r[3] = total;
+            r[4] = total > avail ? total - avail : 0;
+        } catch (Exception ignored) {}
+        r[5] = android.os.SystemClock.elapsedRealtime() / 1000;
+        r[6] = procCount();
+        Context ctx = appContext;
+        if (ctx != null) {
+            try {
+                Intent bi = ctx.registerReceiver(null,
+                        new android.content.IntentFilter(Intent.ACTION_BATTERY_CHANGED));
+                if (bi != null) {
+                    int level = bi.getIntExtra(android.os.BatteryManager.EXTRA_LEVEL, -1);
+                    int scale = bi.getIntExtra(android.os.BatteryManager.EXTRA_SCALE, 100);
+                    int status = bi.getIntExtra(android.os.BatteryManager.EXTRA_STATUS, -1);
+                    if (level >= 0 && scale > 0) r[7] = level * 100L / scale;
+                    r[8] = (status == android.os.BatteryManager.BATTERY_STATUS_CHARGING
+                            || status == android.os.BatteryManager.BATTERY_STATUS_FULL) ? 1 : 0;
+                }
+            } catch (Exception ignored) {}
+        }
+        return r;
+    }
+
+    // pid -> {utime+stime jiffies, elapsedRealtime ms} from the previous call.
+    private static java.util.HashMap<Integer, long[]> procPrev = new java.util.HashMap<>();
+
+    /** Called from C (SYS_PROCLIST): flat records of 8 longs each:
+     *  [pid, ppid, ram_kb, cpu_x10, state, name[0..8], name[8..16], name[16..24]]
+     *  (name = 24 bytes NUL-padded, little-endian in the last 3 u64;
+     *   state 0=run, 1=sleep, 2=zombie). Sorted by ram desc, capped at max. */
+    public static synchronized long[] nativeProcList(int max) {
+        if (max <= 0) return new long[0];
+        if (max > 256) max = 256;
+        java.io.File[] dirs = new java.io.File("/proc").listFiles();
+        if (dirs == null) return new long[0];
+        long now = android.os.SystemClock.elapsedRealtime();
+        java.util.ArrayList<long[]> recs = new java.util.ArrayList<>();
+        java.util.HashMap<Integer, long[]> cur = new java.util.HashMap<>();
+        for (java.io.File d : dirs) {
+            String nm = d.getName();
+            if (!allDigits(nm)) continue;
+            int pid;
+            try { pid = Integer.parseInt(nm); } catch (NumberFormatException e) { continue; }
+            String stat = firstLine("/proc/" + nm + "/stat");
+            if (stat == null) continue;
+            int lo = stat.indexOf('('), hi = stat.lastIndexOf(')');
+            if (lo < 0 || hi <= lo) continue;
+            String comm = stat.substring(lo + 1, hi);
+            String[] t = stat.substring(hi + 1).trim().split("\\s+");
+            if (t.length < 13) continue;
+            long ppid, ticks;
+            try {
+                ppid = Long.parseLong(t[1]);
+                ticks = Long.parseLong(t[11]) + Long.parseLong(t[12]); // utime + stime
+            } catch (NumberFormatException e) { continue; }
+            char sc = t[0].charAt(0);
+            long state = sc == 'R' ? 0 : (sc == 'Z' ? 2 : 1);
+            long ramKb = 0;
+            try (java.io.BufferedReader br = new java.io.BufferedReader(
+                    new java.io.FileReader("/proc/" + nm + "/status"))) {
+                String line;
+                while ((line = br.readLine()) != null)
+                    if (line.startsWith("VmRSS:")) { ramKb = parseKb(line); break; }
+            } catch (Exception ignored) {}
+            long cpuX10 = 0;
+            long[] prev = procPrev.get(pid);
+            if (prev != null && now > prev[1] && ticks >= prev[0]) {
+                cpuX10 = (ticks - prev[0]) * 100 / (now - prev[1]);
+                if (cpuX10 > 1000) cpuX10 = 1000;
+            }
+            cur.put(pid, new long[] {ticks, now});
+            byte[] nb = new byte[24];
+            byte[] cb = comm.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+            System.arraycopy(cb, 0, nb, 0, Math.min(cb.length, 24));
+            long w0 = 0, w1 = 0, w2 = 0;
+            for (int i = 0; i < 8; i++) {
+                w0 |= (nb[i] & 0xffL) << (8 * i);
+                w1 |= (nb[i + 8] & 0xffL) << (8 * i);
+                w2 |= (nb[i + 16] & 0xffL) << (8 * i);
+            }
+            recs.add(new long[] {pid, ppid, ramKb, cpuX10, state, w0, w1, w2});
+        }
+        procPrev = cur;
+        java.util.Collections.sort(recs, new java.util.Comparator<long[]>() {
+            @Override public int compare(long[] a, long[] b) { return Long.compare(b[2], a[2]); }
+        });
+        int n = Math.min(max, recs.size());
+        long[] out = new long[n * 8];
+        for (int i = 0; i < n; i++) System.arraycopy(recs.get(i), 0, out, i * 8, 8);
+        return out;
+    }
+
     private KimiBridge() {}
 }
