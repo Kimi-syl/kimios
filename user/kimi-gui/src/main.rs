@@ -1958,7 +1958,39 @@ fn draw_scene(screen: &Screen, ui: &mut Ui, clock: [u64; 7], paint_bg: bool) {
     }
 }
 
+static mut WP_CACHE: [u32; 1080 * 1920] = [0; 1080 * 1920];
+static mut WP_STATE: u8 = 0; // 0 invalid, 1 dark, 2 light
+
 fn draw_wallpaper(screen: &Screen, y_offset: i64, dark: bool) {
+    let (pw, ph) = screen.physical_size();
+    // Full-screen wallpaper is static: render the fill + dot grid once into a
+    // cache, then blit it on repaints (animation frames) instead of redrawing
+    // hundreds of dots every frame.
+    if y_offset == 0 && pw == 1080 && ph == 1920 {
+        unsafe {
+            let want = if dark { 1 } else { 2 };
+            if WP_STATE != want {
+                let cs = Screen::new(WP_CACHE.as_mut_ptr() as u64, 1080, 1920, 1080 * 4);
+                paint_wallpaper(&cs, 0, dark);
+                WP_STATE = want;
+            }
+            let dst = screen.back_ptr();
+            let stride = screen.stride_pixels();
+            for y in 0..1920usize {
+                core::ptr::copy_nonoverlapping(
+                    WP_CACHE.as_ptr().add(y * 1080),
+                    dst.add(y * stride as usize),
+                    1080,
+                );
+            }
+            screen.mark_full_dirty();
+            return;
+        }
+    }
+    paint_wallpaper(screen, y_offset, dark);
+}
+
+fn paint_wallpaper(screen: &Screen, y_offset: i64, dark: bool) {
     let color = if dark { 0x0004_0406 } else { 0x00dc_dce6 };
     screen.fill(0, y_offset, screen.width(), screen.height() - y_offset, color);
     if dark {

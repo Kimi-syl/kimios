@@ -74,6 +74,11 @@ impl Screen {
         self.mark_dirty(0, 0, self.physical_width, self.physical_height);
     }
 
+    /// Raw back-buffer pointer / stride / physical size (for cached blits).
+    pub fn back_ptr(&self) -> *mut u32 { self.pixels }
+    pub fn stride_pixels(&self) -> i64 { self.stride }
+    pub fn physical_size(&self) -> (i64, i64) { (self.physical_width, self.physical_height) }
+
     /// Apps are laid out in a fixed 480x800 space; on shorter/wider screens
     /// that space is mapped onto the full framebuffer (uniform compression).
     pub fn set_app_space(&self, enabled: bool) {

@@ -29,6 +29,11 @@
 
 #define LOG(...) __android_log_print(ANDROID_LOG_INFO, "KimiOS", __VA_ARGS__)
 #define ERROR UINT64_MAX
+// HAL_PIXEL_FORMAT_BGRX_8888 (not exposed as a WINDOW_FORMAT_ constant in the
+// NDK). Matches the GUI's 0x00RRGGBB memory layout (B,G,R,X) for memcpy blits.
+#ifndef WINDOW_FORMAT_BGRX_8888
+#define WINDOW_FORMAT_BGRX_8888 0x104
+#endif
 #define FB_W 1080
 #define FB_H 1920
 
@@ -278,12 +283,13 @@ static void blit_to_window(void) {
     uint32_t *dst = (uint32_t *)buf.bits;
     int w = FB_W < buf.width ? FB_W : buf.width;
     int h = FB_H < buf.height ? FB_H : buf.height;
-    // GUI pixels are 0x00RRGGBB (XRGB); window is RGBX_8888 (R,G,B,X bytes).
-    // bswap32(p) >> 8 swaps R and B into RGBX order.
-    for (int y = 0; y < h; y++) {
-        uint32_t *d = dst + (size_t)y * buf.stride;
-        const uint32_t *s = front + (size_t)y * FB_W;
-        for (int x = 0; x < w; x++) d[x] = __builtin_bswap32(s[x]) >> 8;
+    // GUI pixels are 0x00RRGGBB -> memory bytes B,G,R,X, which is exactly
+    // BGRX_8888, so the blit is a plain memcpy (no per-pixel swizzle).
+    if (buf.stride == FB_W && w == FB_W) {
+        memcpy(dst, front, (size_t)FB_W * h * 4);
+    } else {
+        for (int y = 0; y < h; y++)
+            memcpy(dst + (size_t)y * buf.stride, front + (size_t)y * FB_W, (size_t)w * 4);
     }
     ANativeWindow_unlockAndPost(window);
 }
@@ -821,7 +827,7 @@ Java_com_kimios_libos_KimiBridge_nativeSetSurface(JNIEnv *env, jclass cls, jobje
     if (window) { ANativeWindow_release(window); window = NULL; }
     if (surface) {
         window = ANativeWindow_fromSurface(env, surface);
-        if (window) ANativeWindow_setBuffersGeometry(window, FB_W, FB_H, WINDOW_FORMAT_RGBX_8888);
+        if (window) ANativeWindow_setBuffersGeometry(window, FB_W, FB_H, WINDOW_FORMAT_BGRX_8888);
     }
 }
 
