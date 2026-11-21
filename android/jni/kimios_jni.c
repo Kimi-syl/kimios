@@ -824,7 +824,7 @@ static uint64_t str_arg(uint64_t p, uint64_t len, char *out, size_t cap) { if (l
 //  6 close(slot)
 extern pid_t kimi_guest_spawn_pty(const char *, const char *, char *const *, char *const *, int, int, int *);
 #define PROC_MAX 8
-static struct { int master; pid_t pid; int used; int exited; int code; } procs[PROC_MAX];
+static struct { int infd; int outfd; pid_t pid; int used; int exited; int code; } procs[PROC_MAX];
 static pthread_mutex_t proc_lock = PTHREAD_MUTEX_INITIALIZER;
 
 static uint64_t proc_spawn(uint64_t a1) {
@@ -834,22 +834,37 @@ static uint64_t proc_spawn(uint64_t a1) {
     str_arg(rq->arg_ptr, rq->arg_len, arg, sizeof arg);
     char sysroot[400], exe[600];
     snprintf(sysroot, sizeof sysroot, "%s/alpine/root", diskRoot);
-    if (strchr(bin, '/')) snprintf(exe, sizeof exe, "%s/%s", sysroot, bin);
-    else snprintf(exe, sizeof exe, "%s/usr/bin/%s", sysroot, bin);
-    if (!file_exists(exe)) {
-        // fall back to /bin (busybox sh/top/vi live there)
-        const char *base = strrchr(bin, '/'); base = base ? base + 1 : bin;
-        snprintf(exe, sizeof exe, "%s/bin/%s", sysroot, base);
-        if (!file_exists(exe)) return ERROR;
-    }
-    const char *base = strrchr(exe, '/'); base = base ? base + 1 : exe;
-    int interactive_sh = (strcmp(base, "sh") == 0 || strcmp(base, "ash") == 0) && !arg[0];
+    const char *b0 = strrchr(bin, '/'); b0 = b0 ? b0 + 1 : bin;
+    const char *base = b0;
+    int is_shell = (strcmp(b0, "sh") == 0 || strcmp(b0, "ash") == 0 || bin[0] == 0);
     static char tokbuf[2048];
     char *argv[64]; int n = 0;
-    argv[n++] = exe;
-    if (interactive_sh) {
-        argv[n++] = "-i";
-    } else if (arg[0]) {
+    const char *applet = NULL;
+    char bb[600];
+    snprintf(bb, sizeof bb, "%s/bin/busybox", sysroot);
+    if (!file_exists(bb)) snprintf(bb, sizeof bb, "%s/usr/bin/busybox", sysroot);
+    if (is_shell) {
+        // /bin/sh is an ABSOLUTE symlink to /bin/busybox which the guest cannot
+        // resolve (absolute paths hit the Android host root). Launch busybox's
+        // sh applet directly with the real binary.
+        if (!file_exists(bb)) return ERROR;
+        snprintf(exe, sizeof exe, "%s", bb);
+        argv[n++] = exe; argv[n++] = (char *)"sh";
+    } else {
+        if (strchr(bin, '/')) snprintf(exe, sizeof exe, "%s/%s", sysroot, bin);
+        else snprintf(exe, sizeof exe, "%s/usr/bin/%s", sysroot, bin);
+        if (!file_exists(exe)) snprintf(exe, sizeof exe, "%s/bin/%s", sysroot, b0);
+        if (!file_exists(exe)) {
+            // Bare name that is a busybox applet (top/vi/ls/…): run it via the
+            // real busybox binary, avoiding the broken absolute symlinks.
+            if (!file_exists(bb)) return ERROR;
+            snprintf(exe, sizeof exe, "%s", bb);
+            applet = b0;
+        }
+        argv[n++] = exe;
+        if (applet) argv[n++] = (char *)applet;
+    }
+    if (arg[0]) {
         strncpy(tokbuf, arg, sizeof tokbuf - 1); tokbuf[sizeof tokbuf - 1] = 0;
         char *save = NULL;
         for (char *t = strtok_r(tokbuf, " \t", &save); t && n < 60; t = strtok_r(NULL, " \t", &save))
@@ -864,25 +879,31 @@ static uint64_t proc_spawn(uint64_t a1) {
     envp[e] = NULL;
     int rows = rq->rows ? (int)rq->rows : 24;
     int cols = rq->cols ? (int)rq->cols : 80;
+    (void)rows; (void)cols;
     pthread_mutex_lock(&proc_lock);
     int slot = -1;
     for (int i = 0; i < PROC_MAX; i++) if (!procs[i].used) { slot = i; break; }
     if (slot < 0) { pthread_mutex_unlock(&proc_lock); return ERROR; }
-    int master = -1;
-    pid_t pid = kimi_guest_spawn_pty(exe, sysroot, argv, envp, rows, cols, &master);
-    if (pid < 0 || master < 0) { pthread_mutex_unlock(&proc_lock); return ERROR; }
-    procs[slot].master = master; procs[slot].pid = pid;
+    // NOTE: PTY sessions die with an uncatchable SIGSYS on this Android
+    // emulator (the guest's tty std fds trip its seccomp KILL policy), so we
+    // use the proven pipe path: stdin/stdout pipes, non-blocking output.
+    int in = -1, of = -1;
+    pid_t pid = kimi_guest_spawn(exe, sysroot, argv, envp, &in, &of);
+    if (pid < 0 || in < 0 || of < 0) { pthread_mutex_unlock(&proc_lock); return ERROR; }
+    int fl = fcntl(of, F_GETFL, 0);
+    if (fl >= 0) fcntl(of, F_SETFL, fl | O_NONBLOCK);
+    procs[slot].infd = in; procs[slot].outfd = of; procs[slot].pid = pid;
     procs[slot].used = 1; procs[slot].exited = 0; procs[slot].code = 0;
     pthread_mutex_unlock(&proc_lock);
-    LOG("proc spawn slot=%d pid=%d exe=%s", slot, (int)pid, exe);
+    LOG("proc spawn slot=%d pid=%d exe=%s (pipes)", slot, (int)pid, exe);
     return (uint64_t)slot;
 }
 static uint64_t proc_read(uint64_t slot, void *buf, uint64_t cap) {
     if (slot >= PROC_MAX) return 0;
     pthread_mutex_lock(&proc_lock);
     uint64_t r = 0;
-    if (procs[slot].used && procs[slot].master >= 0) {
-        ssize_t n = read(procs[slot].master, buf, cap);
+    if (procs[slot].used && procs[slot].outfd >= 0) {
+        ssize_t n = read(procs[slot].outfd, buf, cap);
         if (n > 0) r = (uint64_t)n;
     }
     pthread_mutex_unlock(&proc_lock);
@@ -892,8 +913,8 @@ static uint64_t proc_write(uint64_t slot, const void *buf, uint64_t len) {
     if (slot >= PROC_MAX) return 0;
     pthread_mutex_lock(&proc_lock);
     uint64_t r = 0;
-    if (procs[slot].used && procs[slot].master >= 0) {
-        ssize_t n = write(procs[slot].master, buf, len);
+    if (procs[slot].used && procs[slot].infd >= 0) {
+        ssize_t n = write(procs[slot].infd, buf, len);
         if (n > 0) r = (uint64_t)n;
     }
     pthread_mutex_unlock(&proc_lock);
@@ -907,16 +928,8 @@ static uint64_t proc_kill(uint64_t slot) {
     return 0;
 }
 static uint64_t proc_resize(uint64_t slot, uint64_t rows, uint64_t cols) {
-    if (slot >= PROC_MAX) return ERROR;
-    pthread_mutex_lock(&proc_lock);
-    if (procs[slot].used && procs[slot].master >= 0) {
-        struct winsize ws; memset(&ws, 0, sizeof ws);
-        ws.ws_row = (unsigned short)rows; ws.ws_col = (unsigned short)cols;
-        ioctl(procs[slot].master, TIOCSWINSZ, &ws);
-        if (procs[slot].pid > 0) kill(procs[slot].pid, SIGWINCH);
-    }
-    pthread_mutex_unlock(&proc_lock);
-    return 0;
+    (void)slot; (void)rows; (void)cols;
+    return 0; // pipe sessions have no window size
 }
 static uint64_t proc_status(uint64_t slot) {
     if (slot >= PROC_MAX) return ERROR;
@@ -930,7 +943,7 @@ static uint64_t proc_status(uint64_t slot) {
             pid_t w = waitpid(procs[slot].pid, &st, WNOHANG);
             if (w == procs[slot].pid) {
                 procs[slot].exited = 1;
-                procs[slot].code = WIFEXITED(st) ? WEXITSTATUS(st) : (128 + WTERMSIG(st));
+                procs[slot].code = WIFEXITED(st) ? WEXITSTATUS(st) : (256 + WTERMSIG(st));
                 r = (uint64_t)procs[slot].code + 1;
             } else if (w == 0) {
                 r = 0; // still running
@@ -945,9 +958,10 @@ static uint64_t proc_close(uint64_t slot) {
     pthread_mutex_lock(&proc_lock);
     if (procs[slot].used) {
         if (procs[slot].pid > 0 && !procs[slot].exited) kill(procs[slot].pid, SIGHUP);
-        if (procs[slot].master >= 0) close(procs[slot].master);
+        if (procs[slot].infd >= 0) close(procs[slot].infd);
+        if (procs[slot].outfd >= 0) close(procs[slot].outfd);
         if (procs[slot].pid > 0) { int st; waitpid(procs[slot].pid, &st, WNOHANG); }
-        procs[slot].used = 0; procs[slot].master = -1; procs[slot].pid = -1;
+        procs[slot].used = 0; procs[slot].infd = -1; procs[slot].outfd = -1; procs[slot].pid = -1;
     }
     pthread_mutex_unlock(&proc_lock);
     return 0;

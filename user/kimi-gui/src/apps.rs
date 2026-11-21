@@ -6663,24 +6663,27 @@ pub fn test_term(out: &mut [u8]) -> u64 {
     let Some(slot) = k::proc_spawn("sh", "", 24, 76) else { return 0 };
     let mut total = 0usize;
     let mut buf = [0u8; 2048];
-    let mut pump = |total: &mut usize, out: &mut [u8]| {
-        for _ in 0..12 {
-            k::sleep_ms(40);
-            if let Some(n) = k::proc_read(slot, &mut buf) {
-                if n > 0 {
-                    let take = n.min(out.len().saturating_sub(*total));
-                    out[*total..*total + take].copy_from_slice(&buf[..take]);
-                    *total += take;
-                }
+    for _ in 0..18 {
+        k::sleep_ms(40);
+        if let Some(n) = k::proc_read(slot, &mut buf) {
+            if n > 0 {
+                let take = n.min(out.len().saturating_sub(total));
+                out[total..total + take].copy_from_slice(&buf[..take]);
+                total += take;
             }
         }
-    };
-    pump(&mut total, out);
-    let _ = k::proc_write(slot, b"echo HELLO_TUI\r");
-    pump(&mut total, out);
-    let _ = k::proc_write(slot, b"exit\r");
-    k::sleep_ms(120);
-    pump(&mut total, out);
+    }
+    let _ = k::proc_write(slot, b"echo OK999\n");
+    for _ in 0..18 {
+        k::sleep_ms(40);
+        if let Some(n) = k::proc_read(slot, &mut buf) {
+            if n > 0 {
+                let take = n.min(out.len().saturating_sub(total));
+                out[total..total + take].copy_from_slice(&buf[..take]);
+                total += take;
+            }
+        }
+    }
     let _ = k::proc_close(slot);
     total as u64
 }

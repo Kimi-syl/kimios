@@ -341,17 +341,14 @@ static void k_sig_default(int sig) {
 __attribute__((no_stack_protector))
 static void sigsys_handler(int sig, siginfo_t *si, void *ucv) {
     if (si->si_code == SYS_SECCOMP) {
-        int nr = si->si_syscall;
-        if (nr == SYS_io_uring_setup || nr == SYS_io_uring_enter ||
-            nr == SYS_io_uring_register || nr == SYS_openat2 ||
-            nr == SYS_faccessat2 || nr == SYS_fchmodat2 || nr == SYS_clone3 ||
-            nr == SYS_epoll_pwait2 || nr == 334 /*statx on old kernels*/) {
-            ucontext_t *uc = (ucontext_t *)ucv;
-            uc->uc_mcontext.regs[0] = (uint64_t)(-38); // -ENOSYS
-            return;
-        }
+        // Android's app seccomp filter answers blocked syscalls with a SIGSYS
+        // trap; musl/libc probe them expecting ENOSYS fallback. Answer every
+        // trapped syscall with -ENOSYS so callers fall back instead of dying.
+        ucontext_t *uc = (ucontext_t *)ucv;
+        uc->uc_mcontext.regs[0] = (uint64_t)(-38); // -ENOSYS
+        return;
     }
-    k_sig_default(sig); // unhandled: restore default, return -> re-fatal
+    k_sig_default(sig); // not a seccomp trap: real SIGSYS -> fatal
 }
 
 // ---------------- guest fatal-signal diagnostics ----------------
@@ -505,10 +502,12 @@ pid_t kimi_guest_spawn_pty(const char *exe, const char *sysroot,
 
     pid_t pid = fork();
     if (pid == 0) {
-        // child: new session + controlling tty, then raw syscalls only
-        close(master);
-        setsid();
-        ioctl(slave, TIOCSCTTY, 0);
+        // child: new session + controlling tty. RAW syscalls only after fork
+        // (calling bionic close/setsid/ioctl here trips the seccomp filter ->
+        // uncatchable SIGSYS death). setsid=157, ioctl=29, TIOCSCTTY=0x540E.
+        k_sys(SYS_close, master, 0, 0, 0, 0, 0);
+        k_sys(157 /*setsid*/, 0, 0, 0, 0, 0, 0);
+        k_sys(29 /*ioctl*/, slave, 0x540E /*TIOCSCTTY*/, 0, 0, 0, 0);
         k_sys(SYS_dup3, slave, 0, 0, 0, 0, 0);
         k_sys(SYS_dup3, slave, 1, 0, 0, 0, 0);
         k_sys(SYS_dup3, slave, 2, 0, 0, 0, 0);
