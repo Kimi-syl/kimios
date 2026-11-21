@@ -278,8 +278,6 @@ pub struct Terminal {
     started: bool,
     pub exited: bool,
     ctrl_next: bool,
-    input: [u8; 200],
-    input_len: usize,
 }
 
 const BROWSER_WIDTH: usize = 50;
@@ -1458,8 +1456,6 @@ impl Terminal {
             started: false,
             exited: false,
             ctrl_next: false,
-            input: [0; 200],
-            input_len: 0,
         }
     }
 
@@ -1554,29 +1550,6 @@ fn terminal_send(apps: &mut Apps, bytes: &[u8]) {
     }
     if let Some(slot) = apps.terminal.slot {
         let _ = k::proc_write(slot, bytes);
-    }
-}
-
-/// Submit the current input line to the shell, echoing it into the output grid.
-fn terminal_enter(apps: &mut Apps) {
-    if apps.terminal.exited || apps.terminal.slot.is_none() {
-        apps.terminal.started = false;
-        apps.terminal.exited = false;
-        terminal_start(apps);
-    }
-    let t = &mut apps.terminal;
-    let n = t.input_len.min(t.input.len());
-    let mut line = [0u8; 200];
-    line[..n].copy_from_slice(&t.input[..n]);
-    t.input_len = 0;
-    t.vt.feed(b"$ ");
-    t.vt.feed(&line[..n]);
-    t.vt.feed(b"\r\n");
-    if let Some(slot) = t.slot {
-        let mut buf = [0u8; 201];
-        buf[..n].copy_from_slice(&line[..n]);
-        buf[n] = b'\n';
-        let _ = k::proc_write(slot, &buf[..n + 1]);
     }
 }
 
@@ -2840,28 +2813,30 @@ pub fn key(apps: &mut Apps, app: AppKind, code: u16, shift: bool) -> bool {
             }
         }
         AppKind::Terminal => {
-            // Line-edited input (the pipe-backed shell does not echo/prompt).
-            match code {
-                28 => { terminal_enter(apps); true }
+            // Raw keys to the PTY (the interactive shell echoes/edits/prompts).
+            let seq: &[u8] = match code {
+                28 => b"\r",
+                14 => b"\x7f",
+                15 => b"\t",
+                1 => b"\x1b",
+                103 => b"\x1b[A",
+                108 => b"\x1b[B",
+                106 => b"\x1b[C",
+                105 => b"\x1b[D",
                 _ => match key_event(code, shift) {
-                    Some((0, true)) => {
-                        if apps.terminal.input_len > 0 { apps.terminal.input_len -= 1; }
-                        true
-                    }
-                    Some((b'\n', _)) => { terminal_enter(apps); true }
+                    Some((0, true)) => b"\x7f",
+                    Some((b'\n', _)) => b"\r",
                     Some((byte, _)) => {
                         let b = if apps.terminal.ctrl_next { byte & 0x1f } else { byte };
                         apps.terminal.ctrl_next = false;
-                        let t = &mut apps.terminal;
-                        if t.input_len < t.input.len() {
-                            t.input[t.input_len] = b;
-                            t.input_len += 1;
-                        }
-                        true
+                        terminal_send(apps, &[b]);
+                        return true;
                     }
-                    None => false,
+                    None => return false,
                 },
-            }
+            };
+            terminal_send(apps, seq);
+            true
         }
         AppKind::Browser => {
             if !apps.browser.editing {
@@ -4152,14 +4127,6 @@ fn draw_terminal(screen: &Screen, terminal: &Terminal, osk: bool) {
         let cy = TERM_Y0 + vt.cy as i64 * chh;
         screen.fill(cx, cy + chh - 2, cw, 2, GREEN());
     }
-    // Input line (pipe shell has no prompt/echo, so draw it here).
-    screen.fill(12, 393, width - 24, 1, OUTLINE());
-    let mut line = [0u8; 210];
-    let mut ln = 0usize;
-    push_str(&mut line, &mut ln, b"$ ");
-    let n = terminal.input_len.min(terminal.input.len());
-    push_str(&mut line, &mut ln, &terminal.input[..n]);
-    screen.text_mono(12, 398, slice_str(&line[..ln]), 1, TEXT());
     // Control-key strip (always visible, just above the OSK).
     let labels = ["ESC", "TAB", "^C", "^D", "<", "^", "v", ">"];
     for i in 0..8 {

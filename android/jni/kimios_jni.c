@@ -824,7 +824,7 @@ static uint64_t str_arg(uint64_t p, uint64_t len, char *out, size_t cap) { if (l
 //  6 close(slot)
 extern pid_t kimi_guest_spawn_pty(const char *, const char *, char *const *, char *const *, int, int, int *);
 #define PROC_MAX 8
-static struct { int infd; int outfd; pid_t pid; int used; int exited; int code; } procs[PROC_MAX];
+static struct { int master; int infd; int outfd; pid_t pid; int used; int exited; int code; } procs[PROC_MAX];
 static pthread_mutex_t proc_lock = PTHREAD_MUTEX_INITIALIZER;
 
 static uint64_t proc_spawn(uint64_t a1) {
@@ -879,32 +879,42 @@ static uint64_t proc_spawn(uint64_t a1) {
     envp[e] = NULL;
     int rows = rq->rows ? (int)rq->rows : 24;
     int cols = rq->cols ? (int)rq->cols : 80;
-    (void)rows; (void)cols;
     pthread_mutex_lock(&proc_lock);
     int slot = -1;
     for (int i = 0; i < PROC_MAX; i++) if (!procs[i].used) { slot = i; break; }
     if (slot < 0) { pthread_mutex_unlock(&proc_lock); return ERROR; }
-    // NOTE: PTY sessions die with an uncatchable SIGSYS on this Android
-    // emulator (the guest's tty std fds trip its seccomp KILL policy), so we
-    // use the proven pipe path: stdin/stdout pipes, non-blocking output.
+    // Prefer a real PTY (interactive shell: isatty, prompt, echo, job control,
+    // full-screen TUI). Fall back to pipes if the PTY path fails.
+    int master = -1;
+    pid_t pid = kimi_guest_spawn_pty(exe, sysroot, argv, envp, rows, cols, &master);
     int in = -1, of = -1;
-    pid_t pid = kimi_guest_spawn(exe, sysroot, argv, envp, &in, &of);
-    if (pid < 0 || in < 0 || of < 0) { pthread_mutex_unlock(&proc_lock); return ERROR; }
-    int fl = fcntl(of, F_GETFL, 0);
-    if (fl >= 0) fcntl(of, F_SETFL, fl | O_NONBLOCK);
-    procs[slot].infd = in; procs[slot].outfd = of; procs[slot].pid = pid;
+    int is_pty = 0;
+    if (pid >= 0 && master >= 0) {
+        is_pty = 1;
+        int fl = fcntl(master, F_GETFL, 0);
+        if (fl >= 0) fcntl(master, F_SETFL, fl | O_NONBLOCK);
+    } else {
+        pid = kimi_guest_spawn(exe, sysroot, argv, envp, &in, &of);
+        if (pid < 0 || in < 0 || of < 0) { pthread_mutex_unlock(&proc_lock); return ERROR; }
+        int fl = fcntl(of, F_GETFL, 0);
+        if (fl >= 0) fcntl(of, F_SETFL, fl | O_NONBLOCK);
+    }
+    procs[slot].master = is_pty ? master : -1;
+    procs[slot].infd = is_pty ? -1 : in;
+    procs[slot].outfd = is_pty ? -1 : of;
+    procs[slot].pid = pid;
     procs[slot].used = 1; procs[slot].exited = 0; procs[slot].code = 0;
     pthread_mutex_unlock(&proc_lock);
-    LOG("proc spawn slot=%d pid=%d exe=%s (pipes)", slot, (int)pid, exe);
+    LOG("proc spawn slot=%d pid=%d exe=%s (%s)", slot, (int)pid, exe, is_pty ? "pty" : "pipes");
     return (uint64_t)slot;
 }
 static uint64_t proc_read(uint64_t slot, void *buf, uint64_t cap) {
     if (slot >= PROC_MAX) return 0;
     pthread_mutex_lock(&proc_lock);
     uint64_t r = 0;
-    if (procs[slot].used && procs[slot].outfd >= 0) {
-        ssize_t n = read(procs[slot].outfd, buf, cap);
-        if (n > 0) r = (uint64_t)n;
+    if (procs[slot].used) {
+        int fd = procs[slot].master >= 0 ? procs[slot].master : procs[slot].outfd;
+        if (fd >= 0) { ssize_t n = read(fd, buf, cap); if (n > 0) r = (uint64_t)n; }
     }
     pthread_mutex_unlock(&proc_lock);
     return r;
@@ -913,9 +923,9 @@ static uint64_t proc_write(uint64_t slot, const void *buf, uint64_t len) {
     if (slot >= PROC_MAX) return 0;
     pthread_mutex_lock(&proc_lock);
     uint64_t r = 0;
-    if (procs[slot].used && procs[slot].infd >= 0) {
-        ssize_t n = write(procs[slot].infd, buf, len);
-        if (n > 0) r = (uint64_t)n;
+    if (procs[slot].used) {
+        int fd = procs[slot].master >= 0 ? procs[slot].master : procs[slot].infd;
+        if (fd >= 0) { ssize_t n = write(fd, buf, len); if (n > 0) r = (uint64_t)n; }
     }
     pthread_mutex_unlock(&proc_lock);
     return r;
@@ -928,8 +938,16 @@ static uint64_t proc_kill(uint64_t slot) {
     return 0;
 }
 static uint64_t proc_resize(uint64_t slot, uint64_t rows, uint64_t cols) {
-    (void)slot; (void)rows; (void)cols;
-    return 0; // pipe sessions have no window size
+    if (slot >= PROC_MAX) return ERROR;
+    pthread_mutex_lock(&proc_lock);
+    if (procs[slot].used && procs[slot].master >= 0) {
+        struct winsize ws; memset(&ws, 0, sizeof ws);
+        ws.ws_row = (unsigned short)rows; ws.ws_col = (unsigned short)cols;
+        ioctl(procs[slot].master, TIOCSWINSZ, &ws);
+        if (procs[slot].pid > 0) kill(procs[slot].pid, SIGWINCH);
+    }
+    pthread_mutex_unlock(&proc_lock);
+    return 0;
 }
 static uint64_t proc_status(uint64_t slot) {
     if (slot >= PROC_MAX) return ERROR;
@@ -958,10 +976,11 @@ static uint64_t proc_close(uint64_t slot) {
     pthread_mutex_lock(&proc_lock);
     if (procs[slot].used) {
         if (procs[slot].pid > 0 && !procs[slot].exited) kill(procs[slot].pid, SIGHUP);
+        if (procs[slot].master >= 0) close(procs[slot].master);
         if (procs[slot].infd >= 0) close(procs[slot].infd);
         if (procs[slot].outfd >= 0) close(procs[slot].outfd);
         if (procs[slot].pid > 0) { int st; waitpid(procs[slot].pid, &st, WNOHANG); }
-        procs[slot].used = 0; procs[slot].infd = -1; procs[slot].outfd = -1; procs[slot].pid = -1;
+        procs[slot].used = 0; procs[slot].master = -1; procs[slot].infd = -1; procs[slot].outfd = -1; procs[slot].pid = -1;
     }
     pthread_mutex_unlock(&proc_lock);
     return 0;
