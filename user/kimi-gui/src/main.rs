@@ -12,6 +12,7 @@ mod keyboard;
 mod theme;
 mod font_store;
 mod vt;
+mod ai;
 
 use core::panic::PanicInfo;
 use core::sync::atomic::{AtomicU64, Ordering};
@@ -32,7 +33,7 @@ fn appkind_from_u64(v: u64) -> Option<AppKind> {
         6 => AppKind::Photos, 7 => AppKind::Files, 8 => AppKind::Weather,
         9 => AppKind::Terminal, 10 => AppKind::Browser, 11 => AppKind::Apk,
         12 => AppKind::Dvm, 13 => AppKind::Market, 14 => AppKind::Monitor,
-        15 => AppKind::Plugins,
+        15 => AppKind::Plugins, 16 => AppKind::AiStudio,
         _ => return None,
     })
 }
@@ -90,6 +91,7 @@ enum AppKind {
     Market,
     Monitor,
     Plugins,
+    AiStudio,
 }
 
 impl AppKind {
@@ -115,6 +117,7 @@ impl AppKind {
             13 => AppKind::Market,
             14 => AppKind::Monitor,
             15 => AppKind::Plugins,
+            16 => AppKind::AiStudio,
             _ => return None,
         })
     }
@@ -180,7 +183,7 @@ impl Layout {
             grid2: [
                 Slot::App(AppKind::Browser),
                 Slot::App(AppKind::Apk),
-                Slot::App(AppKind::Dvm),
+                Slot::App(AppKind::AiStudio),
                 Slot::App(AppKind::Market),
                 Slot::App(AppKind::Monitor),
                 Slot::App(AppKind::Plugins),
@@ -797,6 +800,12 @@ fn gui_run() -> ! {
             }
         }
 
+        if ui.scene == Scene::App(AppKind::AiStudio) && !ui.shade {
+            if apps::ai_frame(&mut ui.apps) {
+                dirty = true;
+            }
+        }
+
         if ui.press.is_some() && ui.gesture.active && ui.gesture.mode == GMode::None && !ui.gesture.long_tried {
             let dx = ui.touch.0 - ui.gesture.start_x;
             let dy = ui.touch.1 - ui.gesture.start_y;
@@ -1052,6 +1061,43 @@ pub extern "C" fn kimi_test_vt(script: u64, out: u64, cap: u64) -> u64 {
 pub extern "C" fn kimi_test_term(out: u64, cap: u64) -> u64 {
     let buf = unsafe { core::slice::from_raw_parts_mut(out as *mut u8, cap as usize) };
     apps::test_term(buf)
+}
+
+/// Host-only AI client test: build a sample chat request into out; returns len.
+#[no_mangle]
+#[cfg(not(target_os = "none"))]
+pub extern "C" fn kimi_test_ai_request(out: u64, cap: u64) -> u64 {
+    let buf = unsafe { core::slice::from_raw_parts_mut(out as *mut u8, cap as usize) };
+    ai::test_request(buf) as u64
+}
+
+/// Host-only AI client test: parse an SSE chunk; decoded text into out, returns
+/// (done<<32)|len.
+#[no_mangle]
+#[cfg(not(target_os = "none"))]
+pub extern "C" fn kimi_test_ai_sse(chunk: u64, out: u64, cap: u64) -> u64 {
+    unsafe fn cstr(p: *const u8) -> &'static str {
+        let mut n = 0;
+        while *p.add(n) != 0 { n += 1; }
+        core::str::from_utf8(core::slice::from_raw_parts(p, n)).unwrap_or("")
+    }
+    let s = unsafe { cstr(chunk as *const u8) };
+    let buf = unsafe { core::slice::from_raw_parts_mut(out as *mut u8, cap as usize) };
+    ai::test_sse(s, buf)
+}
+
+/// Host-only AI end-to-end: POST prompt to llama-server, stream reply into out.
+#[no_mangle]
+#[cfg(not(target_os = "none"))]
+pub extern "C" fn kimi_test_ai_chat(prompt: u64, out: u64, cap: u64) -> u64 {
+    unsafe fn cstr(p: *const u8) -> &'static str {
+        let mut n = 0;
+        while *p.add(n) != 0 { n += 1; }
+        core::str::from_utf8(core::slice::from_raw_parts(p, n)).unwrap_or("")
+    }
+    let s = unsafe { cstr(prompt as *const u8) };
+    let buf = unsafe { core::slice::from_raw_parts_mut(out as *mut u8, cap as usize) };
+    ai::test_chat(s, buf)
 }
 #[no_mangle]
 #[cfg(not(target_os = "none"))]
@@ -2092,7 +2138,7 @@ fn open_app(screen: &Screen, ui: &mut Ui, app: AppKind, clock: [u64; 7]) {
     ui.edit_mode = false;
     ui.drag = None;
     ui.osk = match app {
-        AppKind::Terminal => true,
+        AppKind::Terminal | AppKind::AiStudio => true,
         AppKind::Notes | AppKind::Browser | AppKind::Files | AppKind::Market => apps::text_focused(&ui.apps, app),
         _ => false,
     };
@@ -2921,6 +2967,13 @@ fn draw_glyph(screen: &Screen, app: AppKind, cx: i64, cy: i64, size: i64, color:
             screen.circle(cx + s / 3, cy + s / 12, s / 8, color);
             screen.circle(cx - s / 3, cy + s / 12, s / 8, SURFACE_HI());
         }
+        AppKind::AiStudio => {
+            screen.round_rect(cx - s / 3, cy - s / 3, s * 2 / 3, s / 2, s / 8, color);
+            screen.fill(cx - s / 8, cy + s / 6, s / 6, s / 8, color);
+            screen.line(cx, cy - s / 5, cx, cy + s / 12, 3, SURFACE_HI());
+            screen.line(cx - s / 6, cy - s / 12, cx + s / 6, cy - s / 12, 3, SURFACE_HI());
+            screen.circle(cx + s / 4, cy - s / 4, s / 14, RED());
+        }
     }
 }
 
@@ -3544,6 +3597,7 @@ impl AppKind {
             AppKind::Market => "Market",
             AppKind::Monitor => "Monitor",
             AppKind::Plugins => "Plugins",
+            AppKind::AiStudio => "AI Studio",
         }
     }
 }

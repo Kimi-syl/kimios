@@ -925,6 +925,7 @@ pub struct Apps {
     pub monitor: Monitor,
     pub plugins: Plugins,
     pub plugin_home: PluginLauncher,
+    pub ai: crate::ai::Ai,
 }
 
 fn slice_str(bytes: &[u8]) -> &str {
@@ -1570,6 +1571,196 @@ fn terminal_ctrl_tap(apps: &mut Apps, x: i64) -> bool {
     };
     terminal_send(apps, seq);
     true
+}
+
+// ---- AI Studio (guest llama-server + streaming chat) ----------------------
+
+fn ai_pick_model(apps: &mut Apps) {
+    let ai = &mut apps.ai;
+    ai.model_len = 0;
+    let mut buf = [0u8; 1024];
+    let Some(n) = k::listdir("/disk/models", &mut buf) else {
+        ai.set_status("No /disk/models - add a .gguf");
+        return;
+    };
+    let mut best = [0u8; 48];
+    let mut best_len = 0usize;
+    let mut have_small = false;
+    for name in buf[..n].split(|&b| b == 0) {
+        if !name.ends_with(b".gguf") || name.len() > 47 {
+            continue;
+        }
+        let small = name.windows(4).any(|w| w == b"230M");
+        if best_len == 0 || (small && !have_small) {
+            best[..name.len()].copy_from_slice(name);
+            best_len = name.len();
+            have_small = small;
+        }
+    }
+    if best_len > 0 {
+        ai.model[..best_len].copy_from_slice(&best[..best_len]);
+        ai.model_len = best_len;
+        ai.set_status("Model ready - tap Start");
+    } else {
+        ai.set_status("No .gguf in /disk/models");
+    }
+}
+
+fn ai_open(apps: &mut Apps) {
+    if apps.ai.msg_count == 0 && apps.ai.model_len == 0 {
+        ai_pick_model(apps);
+    }
+}
+
+fn ai_toggle_server(apps: &mut Apps) {
+    let ai = &mut apps.ai;
+    if ai.server_slot.is_some() {
+        if let Some(s) = ai.server_slot {
+            let _ = k::proc_kill(s);
+            let _ = k::proc_close(s);
+        }
+        ai.server_slot = None;
+        ai.server_started = false;
+        ai.set_status("Server stopped");
+        return;
+    }
+    if ai.model_len == 0 {
+        ai_pick_model(apps);
+        if apps.ai.model_len == 0 {
+            return;
+        }
+    }
+    let mut arg = [0u8; 220];
+    let mut an = 0usize;
+    push_str(&mut arg, &mut an, b"-m ../../models/");
+    push_str(&mut arg, &mut an, &apps.ai.model[..apps.ai.model_len]);
+    push_str(&mut arg, &mut an, b" --host 127.0.0.1 --port 8080 -c 2048 -t 4 --mmap -np 1");
+    match k::proc_spawn("llama-server", slice_str(&arg[..an]), 24, 80) {
+        Some(slot) => {
+            apps.ai.server_slot = Some(slot);
+            apps.ai.server_started = true;
+            apps.ai.server_log_len = 0;
+            apps.ai.set_status("Loading model (may take ~20s)...");
+        }
+        None => apps.ai.set_status("llama-server not installed"),
+    }
+}
+
+fn ai_send(apps: &mut Apps) {
+    let ai = &mut apps.ai;
+    if ai.input_len == 0 || ai.streaming {
+        return;
+    }
+    if ai.server_slot.is_none() {
+        ai.set_status("Tap Start to load the model first");
+        return;
+    }
+    let mut text = [0u8; 160];
+    let n = ai.input_len.min(160);
+    text[..n].copy_from_slice(&ai.input[..n]);
+    ai.input_len = 0;
+    ai.push_msg(0, &text[..n]);
+    ai.partial_len = 0;
+    match crate::ai::begin_chat(ai) {
+        Some(slot) => {
+            ai.net_slot = Some(slot);
+            ai.streaming = true;
+            ai.set_status("Thinking...");
+        }
+        None => ai.set_status("Server not ready yet - wait/retry"),
+    }
+}
+
+/// Per-frame pump: drain server log + stream SSE tokens. Returns true on change.
+pub fn ai_frame(apps: &mut Apps) -> bool {
+    let ai = &mut apps.ai;
+    let mut changed = false;
+    if let Some(slot) = ai.server_slot {
+        let mut buf = [0u8; 1024];
+        if let Some(n) = k::proc_read(slot, &mut buf) {
+            if n > 0 {
+                let room = ai.server_log.len() - ai.server_log_len;
+                if n > room {
+                    // keep the tail
+                    let keep = ai.server_log_len.saturating_sub(n);
+                    ai.server_log.copy_within(keep..ai.server_log_len, 0);
+                    ai.server_log_len = keep;
+                }
+                let take = n.min(ai.server_log.len() - ai.server_log_len);
+                ai.server_log[ai.server_log_len..ai.server_log_len + take].copy_from_slice(&buf[..take]);
+                ai.server_log_len += take;
+                changed = true;
+            }
+        }
+        if let Some(Some(_)) = k::proc_status(slot) {
+            ai.server_slot = None;
+            ai.server_started = false;
+            ai.set_status("Server exited");
+            changed = true;
+        }
+    }
+    if ai.streaming {
+        if let Some(slot) = ai.net_slot {
+            let mut buf = [0u8; 1024];
+            let n = k::net_tcp_recv(slot, &mut buf, 12);
+            if n > 0 {
+                let mut carry = [0u8; 512];
+                let mut cl = 0usize;
+                let mut pl = ai.partial_len;
+                let done = crate::ai::feed_chunk(&buf[..n], &mut carry, &mut cl, &mut ai.partial, &mut pl);
+                ai.partial_len = pl;
+                changed = true;
+                if done {
+                    let mut tmp = [0u8; 384];
+                    let pl = ai.partial_len.min(384);
+                    tmp[..pl].copy_from_slice(&ai.partial[..pl]);
+                    ai.push_msg(1, &tmp[..pl]);
+                    ai.partial_len = 0;
+                    ai.streaming = false;
+                    ai.net_slot = None;
+                    k::net_tcp_close(slot);
+                    ai.set_status("Done");
+                }
+            }
+        }
+    }
+    changed
+}
+
+fn ai_key(apps: &mut Apps, code: u16, shift: bool) -> bool {
+    let ai = &mut apps.ai;
+    match key_event(code, shift) {
+        Some((0, true)) => {
+            ai.input_len = ai.input_len.saturating_sub(1);
+            true
+        }
+        Some((b'\n', _)) => {
+            ai_send(apps);
+            true
+        }
+        Some((byte, _)) => {
+            if ai.input_len < ai.input.len() {
+                ai.input[ai.input_len] = byte;
+                ai.input_len += 1;
+            }
+            true
+        }
+        None => false,
+    }
+}
+
+fn ai_tap(apps: &mut Apps, point: (i64, i64)) {
+    if point.1 >= 150 && point.1 <= 186 {
+        if point.0 >= 20 && point.0 < 150 {
+            ai_toggle_server(apps);
+        } else if point.0 >= 160 && point.0 < 290 {
+            apps.ai.msg_count = 0;
+            apps.ai.partial_len = 0;
+            apps.ai.set_status("Cleared");
+        } else if point.0 >= 300 {
+            ai_pick_model(apps);
+        }
+    }
 }
 
 impl Files {
@@ -2377,6 +2568,7 @@ impl Apps {
                 items: [EMPTY_PLUGIN; 16],
                 count: 0,
             },
+            ai: crate::ai::Ai::new(),
         }
     }
 }
@@ -2394,6 +2586,7 @@ pub fn open(apps: &mut Apps, app: AppKind) {
         AppKind::Market => apps.market.refresh(),
         AppKind::Monitor => apps.monitor.refresh(),
         AppKind::Plugins => apps.plugins.refresh(),
+        AppKind::AiStudio => ai_open(apps),
         _ => {}
     }
 }
@@ -2562,6 +2755,7 @@ pub fn text_focused(apps: &Apps, app: AppKind) -> bool {
     match app {
         AppKind::Notes => apps.notes.editing.is_some(),
         AppKind::Terminal => true,
+        AppKind::AiStudio => true,
         AppKind::Browser => apps.browser.editing,
         AppKind::Files => apps.files.editor.is_some() || apps.files.prompt != 0,
         AppKind::Market => apps.market.searching,
@@ -2577,6 +2771,7 @@ pub fn field_hit(apps: &Apps, app: AppKind, point: (i64, i64), _osk: bool) -> bo
                 && point.0 >= 20 && point.0 <= 460 && point.1 >= 160 && point.1 <= 614
         }
         AppKind::Terminal => point.1 > 96 && point.1 < 770,
+        AppKind::AiStudio => point.1 > 420 && point.1 < 452,
         AppKind::Browser => point.0 >= 20 && point.0 < 390 && point.1 >= 104 && point.1 <= 148,
         AppKind::Files => {
             (apps.files.editor.is_some() && point.1 >= 160 && point.1 <= 614)
@@ -2599,6 +2794,7 @@ pub fn key(apps: &mut Apps, app: AppKind, code: u16, shift: bool) -> bool {
     match app {
         AppKind::Files => files_key(apps, code, shift),
         AppKind::Plugins => plugins_key(apps, code),
+        AppKind::AiStudio => ai_key(apps, code, shift),
         AppKind::Market => market_key(apps, code, shift),
         AppKind::Notes => {
             if apps.notes.editing.is_none() {
@@ -2748,6 +2944,7 @@ pub fn tap(screen: &Screen, apps: &mut Apps, app: AppKind, point: (i64, i64), os
         AppKind::Market => market_tap(screen, apps, point),
         AppKind::Monitor => monitor_tap(apps, point),
         AppKind::Plugins => plugins_tap(screen, apps, point),
+        AppKind::AiStudio => ai_tap(apps, point),
         AppKind::Terminal => {
             if point.1 >= 420 && point.1 <= 448 {
                 terminal_ctrl_tap(apps, point.0);
@@ -3209,6 +3406,7 @@ pub fn draw(screen: &Screen, apps: &mut Apps, app: AppKind, clock: [u64; 7], osk
         AppKind::Market => draw_market(screen, &apps.market, osk),
         AppKind::Monitor => draw_monitor(screen, &mut apps.monitor),
         AppKind::Plugins => draw_plugins(screen, &apps.plugins),
+        AppKind::AiStudio => draw_ai(screen, &apps.ai, osk),
         _ => {}
     }
 }
@@ -3938,6 +4136,88 @@ fn draw_terminal(screen: &Screen, terminal: &Terminal, osk: bool) {
         screen.text_mono(20, 460, "session ended - press Enter to restart", 1, MUTED());
     } else if !osk {
         screen.text_mono(20, 744, "interactive shell: try top, vi, htop, ls, cat", 1, MUTED());
+    }
+}
+
+fn ai_lines(len: usize, cols: usize) -> usize {
+    if len == 0 { 1 } else { (len + cols - 1) / cols }
+}
+
+fn ai_emit(screen: &Screen, y: &mut i64, no: &mut usize, skip: usize, max_y: i64, text: &[u8], color: u32) {
+    if *no >= skip && *y + 13 <= max_y {
+        screen.text_mono(20, *y, slice_str(text), 1, color);
+        *y += 13;
+    }
+    *no += 1;
+}
+
+fn draw_ai(screen: &Screen, ai: &crate::ai::Ai, osk: bool) {
+    let width = screen.width();
+    screen.fill(0, 93, width, screen.height() - 93, BLACK());
+    screen.text(20, 104, "AI Studio", 2, TEXT());
+    let model = slice_str(&ai.model[..ai.model_len]);
+    let ml = model.len().min(28);
+    screen.text(160, 112, &model[..ml], 1, MUTED());
+    let st = slice_str(&ai.status[..ai.status_len]);
+    let sl = st.len().min(46);
+    screen.text(20, 132, &st[..sl], 1, GREEN());
+    let start_label = if ai.server_started { "Stop" } else { "Start" };
+    button(screen, 20, 150, 120, 36, start_label, if ai.server_started { RED_DIM() } else { RED() }, TEXT());
+    button(screen, 160, 150, 120, 36, "Clear", SURFACE_HI(), TEXT());
+    button(screen, 300, 150, 156, 36, "Model", SURFACE_HI(), TEXT());
+
+    let cols = 60usize;
+    let top = 196i64;
+    let max_y = if osk { 420 } else { 640 };
+    let maxlines = ((max_y - top) / 13) as usize;
+    let mut total = 0usize;
+    for i in 0..ai.msg_count {
+        total += 1 + ai_lines(ai.msgs[i].len, cols);
+    }
+    if ai.streaming {
+        total += 1 + ai_lines(ai.partial_len, cols);
+    }
+    let skip = total.saturating_sub(maxlines);
+    let mut y = top;
+    let mut no = 0usize;
+    for i in 0..ai.msg_count {
+        let m = &ai.msgs[i];
+        let (tag, color) = if m.role == 0 { ("You", TEXT()) } else { ("AI", GREEN()) };
+        ai_emit(screen, &mut y, &mut no, skip, max_y, tag.as_bytes(), RED());
+        let mut off = 0usize;
+        loop {
+            let end = (off + cols).min(m.len);
+            ai_emit(screen, &mut y, &mut no, skip, max_y, &m.text[off..end], color);
+            off = end;
+            if off >= m.len {
+                break;
+            }
+        }
+    }
+    if ai.streaming {
+        ai_emit(screen, &mut y, &mut no, skip, max_y, b"AI", RED());
+        let mut off = 0usize;
+        loop {
+            let end = (off + cols).min(ai.partial_len);
+            ai_emit(screen, &mut y, &mut no, skip, max_y, &ai.partial[off..end], GREEN());
+            off = end;
+            if off >= ai.partial_len {
+                break;
+            }
+        }
+    }
+    if ai.msg_count == 0 && !ai.streaming {
+        screen.text_centered(width / 2, 300, "Local AI chat", 2, MUTED());
+        screen.text_centered(width / 2, 336, "Start the server, then type below", 1, MUTED());
+    }
+
+    let iy = if osk { 430 } else { 660 };
+    screen.fill(20, iy - 6, width - 40, 1, OUTLINE());
+    screen.text_mono(20, iy, ">", 2, RED());
+    let shown = ai.input_len.min(48);
+    screen.text_mono(44, iy, slice_str(&ai.input[..shown]), 2, TEXT());
+    if ai.input_len == 0 {
+        screen.text_mono(44, iy, "ask anything...", 2, 0x0050_505a);
     }
 }
 
