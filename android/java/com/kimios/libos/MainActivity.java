@@ -171,6 +171,15 @@ public class MainActivity extends Activity
             }, "kimi-mrun").start();
             return;
         }
+        if (intent.getStringExtra("term") != null) {
+            new Thread(new Runnable() {
+                @Override public void run() {
+                    long n = KimiBridge.nativeTermTest();
+                    android.util.Log.i("KimiOS-guest", "term-test result=" + n);
+                }
+            }, "kimi-term").start();
+            return;
+        }
         final String pl = intent.getStringExtra("plugin");
         if (pl != null) {
             final int bg = "1".equals(intent.getStringExtra("bg")) ? 1 : 0;

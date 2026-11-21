@@ -11,6 +11,7 @@ mod font_data;
 mod keyboard;
 mod theme;
 mod font_store;
+mod vt;
 
 use core::panic::PanicInfo;
 use core::sync::atomic::{AtomicU64, Ordering};
@@ -790,6 +791,12 @@ fn gui_run() -> ! {
             apps::browser_frame(&mut ui.apps, osk);
         }
 
+        if ui.scene == Scene::App(AppKind::Terminal) && !ui.shade {
+            if apps::terminal_frame(&mut ui.apps) {
+                dirty = true;
+            }
+        }
+
         if ui.press.is_some() && ui.gesture.active && ui.gesture.mode == GMode::None && !ui.gesture.long_tried {
             let dx = ui.touch.0 - ui.gesture.start_x;
             let dy = ui.touch.1 - ui.gesture.start_y;
@@ -1022,6 +1029,29 @@ pub extern "C" fn kimi_test_store_run(name: u64, src: u64, out: u64, cap: u64) -
     let nm = unsafe { cstr(name as *const u8) };
     let buf = unsafe { core::slice::from_raw_parts_mut(out as *mut u8, cap as usize) };
     apps::test_store_run(nm, src as u8, buf)
+}
+
+/// Host-only VT parser test: feed a NUL-terminated escape-script, render the
+/// plain-text grid into out, return (cy<<8)|cx.
+#[no_mangle]
+#[cfg(not(target_os = "none"))]
+pub extern "C" fn kimi_test_vt(script: u64, out: u64, cap: u64) -> u64 {
+    unsafe fn cstr(p: *const u8) -> &'static str {
+        let mut n = 0;
+        while *p.add(n) != 0 { n += 1; }
+        core::str::from_utf8(core::slice::from_raw_parts(p, n)).unwrap_or("")
+    }
+    let s = unsafe { cstr(script as *const u8) };
+    let buf = unsafe { core::slice::from_raw_parts_mut(out as *mut u8, cap as usize) };
+    apps::test_vt_render(s, buf)
+}
+
+/// Device test: interactive PTY shell round-trip; copies raw stream into out.
+#[no_mangle]
+#[cfg(not(target_os = "none"))]
+pub extern "C" fn kimi_test_term(out: u64, cap: u64) -> u64 {
+    let buf = unsafe { core::slice::from_raw_parts_mut(out as *mut u8, cap as usize) };
+    apps::test_term(buf)
 }
 #[no_mangle]
 #[cfg(not(target_os = "none"))]

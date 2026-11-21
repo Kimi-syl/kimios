@@ -697,6 +697,7 @@ pub const SYS_COPY: u64 = 52;
 pub const SYS_PLUGIN_API: u64 = 53;
 pub const SYS_PLUGIN_RUN: u64 = 54;
 pub const SYS_PLUGIN_RUN_OUT: u64 = 55;
+pub const SYS_PROC: u64 = 56;
 
 /// `[cpu_pct_x10, ram_total_kb, ram_used_kb, storage_total_kb, storage_used_kb,
 /// uptime_s, proc_count, battery_pct, battery_charging, reserved]`.
@@ -774,6 +775,64 @@ pub fn plugin_run_out(id: &str, out: &mut [u8]) -> Option<(u64, usize)> {
     };
     let r = syscall3(SYS_PLUGIN_RUN_OUT, &mut req as *mut _ as u64, 0, 0);
     if r == ERROR { None } else { Some((req.code, req.out_len as usize)) }
+}
+
+// ---- interactive PTY process sessions (SYS_PROC=56) -----------------------
+// Host-only (bare metal returns None/ERROR). A session is a guest child with a
+// real controlling terminal, so TUI apps (sh -i, top, vi, htop) work.
+
+/// Spawn an interactive session. `bin` is sysroot-relative or a bare name;
+/// `arg` is a tokenized argument string (empty + bin "sh" => interactive shell).
+/// Returns a session slot id.
+pub fn proc_spawn(bin: &str, arg: &str, rows: u64, cols: u64) -> Option<u64> {
+    #[repr(C)]
+    struct Req {
+        bin_ptr: u64, bin_len: u64,
+        arg_ptr: u64, arg_len: u64,
+        rows: u64, cols: u64,
+    }
+    let req = Req {
+        bin_ptr: bin.as_ptr() as u64, bin_len: bin.len() as u64,
+        arg_ptr: arg.as_ptr() as u64, arg_len: arg.len() as u64,
+        rows, cols,
+    };
+    let r = syscall3(SYS_PROC, 0, &req as *const _ as u64, 0);
+    if r == ERROR { None } else { Some(r) }
+}
+
+/// Non-blocking drain of the session's output into `buf`. Returns bytes read
+/// (0 when nothing is available yet).
+pub fn proc_read(slot: u64, buf: &mut [u8]) -> Option<usize> {
+    let r = syscall4(SYS_PROC, 1, slot, buf.as_mut_ptr() as u64, buf.len() as u64);
+    if r == ERROR { None } else { Some(r as usize) }
+}
+
+/// Write bytes to the session's stdin (keystrokes). Returns bytes written.
+pub fn proc_write(slot: u64, data: &[u8]) -> Option<usize> {
+    let r = syscall4(SYS_PROC, 2, slot, data.as_ptr() as u64, data.len() as u64);
+    if r == ERROR { None } else { Some(r as usize) }
+}
+
+/// Send SIGHUP to the session's child (hang up the terminal).
+pub fn proc_kill(slot: u64) -> bool {
+    syscall3(SYS_PROC, 3, slot, 0) != ERROR
+}
+
+/// Resize the session's PTY (notifies the child via SIGWINCH).
+pub fn proc_resize(slot: u64, rows: u64, cols: u64) -> bool {
+    syscall4(SYS_PROC, 4, slot, rows, cols) != ERROR
+}
+
+/// Session status: `None` = invalid slot, `Some(None)` = still running,
+/// `Some(Some(code))` = exited with `code`.
+pub fn proc_status(slot: u64) -> Option<Option<u64>> {
+    let r = syscall3(SYS_PROC, 5, slot, 0);
+    if r == ERROR { None } else if r == 0 { Some(None) } else { Some(Some(r - 1)) }
+}
+
+/// Close + reap a session, freeing its slot.
+pub fn proc_close(slot: u64) -> bool {
+    syscall3(SYS_PROC, 6, slot, 0) != ERROR
 }
 
 /// File metadata: `(kind, size)` where kind 0 is RamFS and 1 is a disk file.

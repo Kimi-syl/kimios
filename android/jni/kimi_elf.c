@@ -38,6 +38,8 @@
 #include <sys/random.h>
 #include <pthread.h>
 #include <stdlib.h>
+#include <sys/ioctl.h>
+#include <termios.h>
 
 #define LOG_TAG "KimiOS-elf"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
@@ -469,6 +471,61 @@ pid_t kimi_guest_spawn(const char *exe, const char *sysroot,
     k_sys(SYS_close, outpipe[1], 0, 0, 0, 0, 0);
     if (out_stdin) *out_stdin = inpipe[1];
     if (out_stdout) *out_stdout = outpipe[0];
+    return pid;
+}
+
+// Interactive variant: give the guest a real PTY (controlling terminal) so
+// isatty()/TIOCGWINSZ/line-discipline/job-control work — required for TUI apps
+// (sh -i, top, vi, htop). Returns the child pid; *out_master is the parent's
+// non-blocking master fd (write = child stdin, read = child stdout+stderr).
+pid_t kimi_guest_spawn_pty(const char *exe, const char *sysroot,
+                           char *const argv[], char *const envp[],
+                           int rows, int cols, int *out_master) {
+    g_hwcap = getauxval(AT_HWCAP);
+    g_hwcap2 = getauxval(AT_HWCAP2);
+    long ps = sysconf(_SC_PAGESIZE);
+    if (ps > 0) g_pagesz = (uint64_t)ps;
+    g_uid = getuid();
+    g_gid = getgid();
+    if (k_sys(SYS_getrandom, (long)g_random, sizeof g_random, 0, 0, 0, 0) != (long)sizeof g_random)
+        for (int i = 0; i < 16; i++) g_random[i] = (uint8_t)(i * 7 + 13);
+
+    int master = posix_openpt(O_RDWR | O_NOCTTY);
+    if (master < 0) return -1;
+    if (grantpt(master) != 0 || unlockpt(master) != 0) { close(master); return -1; }
+    const char *slave_name = ptsname(master);
+    if (!slave_name) { close(master); return -1; }
+    int slave = open(slave_name, O_RDWR);
+    if (slave < 0) { close(master); return -1; }
+    struct winsize ws;
+    memset(&ws, 0, sizeof ws);
+    ws.ws_row = (unsigned short)rows;
+    ws.ws_col = (unsigned short)cols;
+    ioctl(master, TIOCSWINSZ, &ws);
+
+    pid_t pid = fork();
+    if (pid == 0) {
+        // child: new session + controlling tty, then raw syscalls only
+        close(master);
+        setsid();
+        ioctl(slave, TIOCSCTTY, 0);
+        k_sys(SYS_dup3, slave, 0, 0, 0, 0, 0);
+        k_sys(SYS_dup3, slave, 1, 0, 0, 0, 0);
+        k_sys(SYS_dup3, slave, 2, 0, 0, 0, 0);
+        if (slave > 2) k_sys(SYS_close, slave, 0, 0, 0, 0, 0);
+        for (int fd = 3; fd < 1024; fd++) k_sys(SYS_close, fd, 0, 0, 0, 0, 0);
+        install_sigsys_shim();
+        k_sys(SYS_chdir, (long)sysroot, 0, 0, 0, 0, 0);
+        kimi_image img;
+        if (kimi_elf_load(exe, sysroot, argv, envp, &img) != 0)
+            k_sys(SYS_exit, 127, 0, 0, 0, 0, 0);
+        kimi_elf_enter(&img);
+        k_sys(SYS_exit, 127, 0, 0, 0, 0, 0);
+    }
+    close(slave);
+    int fl = fcntl(master, F_GETFL, 0);
+    if (fl >= 0) fcntl(master, F_SETFL, fl | O_NONBLOCK);
+    if (out_master) *out_master = master;
     return pid;
 }
 

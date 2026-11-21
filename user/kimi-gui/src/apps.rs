@@ -4,9 +4,6 @@ use libkimi as k;
 use crate::theme::{BLACK, SURFACE, SURFACE_HI, SURFACE_MAX, OUTLINE, TEXT, MUTED, RED, RED_DIM, GREEN};
 
 
-const TERM_WIDTH: usize = 50;
-const TERM_LINES: usize = 40;
-
 pub struct Music {
     track: usize,
     count: usize,
@@ -276,11 +273,11 @@ impl Weather {
 }
 
 pub struct Terminal {
-    lines: [[u8; TERM_WIDTH]; TERM_LINES],
-    line_len: [u8; TERM_LINES],
-    count: usize,
-    input: [u8; 64],
-    input_len: usize,
+    pub vt: crate::vt::Vt,
+    slot: Option<u64>,
+    started: bool,
+    pub exited: bool,
+    ctrl_next: bool,
 }
 
 const BROWSER_WIDTH: usize = 50;
@@ -1451,46 +1448,128 @@ impl Notes {
 }
 
 impl Terminal {
-    fn push(&mut self, text: &str) {
-        for raw in text.split('\n') {
-            if self.count == TERM_LINES {
-                for index in 1..TERM_LINES {
-                    self.lines[index - 1] = self.lines[index];
-                    self.line_len[index - 1] = self.line_len[index];
-                }
-                self.count -= 1;
-            }
-            let mut used = 0usize;
-            let bytes = raw.as_bytes();
-            if bytes.is_empty() {
-                self.line_len[self.count] = 0;
-                self.count += 1;
-                continue;
-            }
-            for &byte in bytes {
-                if used == TERM_WIDTH {
-                    self.line_len[self.count] = TERM_WIDTH as u8;
-                    self.count += 1;
-                    used = 0;
-                    if self.count == TERM_LINES {
-                        for index in 1..TERM_LINES {
-                            self.lines[index - 1] = self.lines[index];
-                            self.line_len[index - 1] = self.line_len[index];
-                        }
-                        self.count -= 1;
-                    }
-                }
-                self.lines[self.count][used] = byte;
-                used += 1;
-            }
-            self.line_len[self.count] = used as u8;
-            self.count += 1;
+    fn new() -> Self {
+        Self {
+            vt: crate::vt::Vt::new(),
+            slot: None,
+            started: false,
+            exited: false,
+            ctrl_next: false,
         }
     }
 
-    fn clear(&mut self) {
-        self.count = 0;
+    fn note(&mut self, text: &str) {
+        self.vt.feed(text.as_bytes());
+        self.vt.feed(b"\r\n");
     }
+}
+
+// ---- interactive TUI terminal (PTY guest session) -------------------------
+
+const TERM_CELL_W: i64 = 6;
+const TERM_CELL_H: i64 = 13;
+const TERM_X0: i64 = 12;
+const TERM_Y0: i64 = 104;
+
+fn terminal_start(apps: &mut Apps) {
+    let t = &mut apps.terminal;
+    if t.started {
+        return;
+    }
+    t.started = true;
+    t.vt.reset();
+    match k::proc_spawn("sh", "", crate::vt::ROWS as u64, crate::vt::COLS as u64) {
+        Some(slot) => {
+            t.slot = Some(slot);
+            t.exited = false;
+        }
+        None => {
+            t.note("KimiOS terminal");
+            t.note("PTY unavailable on this host.");
+            t.note("Use the CLI shell via adb instead.");
+        }
+    }
+}
+
+/// Per-frame pump: drain the session's output into the VT grid, send any
+/// emulator responses back, and detect exit. Returns true when the display
+/// changed (so the main loop repaints).
+pub fn terminal_frame(apps: &mut Apps) -> bool {
+    terminal_start(apps);
+    let t = &mut apps.terminal;
+    let Some(slot) = t.slot else { return t.vt.dirty };
+    let mut buf = [0u8; 4096];
+    let mut got = false;
+    // Drain a bounded amount per frame so a chatty child can't stall the GUI.
+    for _ in 0..8 {
+        match k::proc_read(slot, &mut buf) {
+            Some(0) | None => break,
+            Some(n) => {
+                t.vt.feed(&buf[..n]);
+                got = true;
+                if n < buf.len() {
+                    break;
+                }
+            }
+        }
+    }
+    if t.vt.resp_len > 0 {
+        let mut resp = [0u8; 64];
+        let n = t.vt.resp_len.min(64);
+        resp[..n].copy_from_slice(&t.vt.resp[..n]);
+        t.vt.resp_len = 0;
+        let _ = k::proc_write(slot, &resp[..n]);
+    }
+    if let Some(Some(code)) = k::proc_status(slot) {
+        if !t.exited {
+            t.exited = true;
+            let mut line = [0u8; 64];
+            let mut n = 0;
+            push_str(&mut line, &mut n, b"\r\n[process exited: ");
+            let mut num = [0u8; 20];
+            push_str(&mut line, &mut n, unsigned(code, &mut num).as_bytes());
+            push_str(&mut line, &mut n, b" - press Enter to restart]\r\n");
+            t.vt.feed(&line[..n]);
+            let _ = k::proc_close(slot);
+            t.slot = None;
+            got = true;
+        }
+    }
+    let changed = got || t.vt.dirty;
+    t.vt.dirty = false;
+    changed
+}
+
+fn terminal_send(apps: &mut Apps, bytes: &[u8]) {
+    if apps.terminal.exited || apps.terminal.slot.is_none() {
+        // Restart a fresh shell on the next keypress after exit.
+        apps.terminal.started = false;
+        apps.terminal.exited = false;
+        terminal_start(apps);
+    }
+    if let Some(slot) = apps.terminal.slot {
+        let _ = k::proc_write(slot, bytes);
+    }
+}
+
+/// Control-strip buttons (drawn above the OSK): ESC TAB ^C ^D < ^ v >.
+fn terminal_ctrl_tap(apps: &mut Apps, x: i64) -> bool {
+    if x < 12 || x >= 460 {
+        return false;
+    }
+    let idx = ((x - 12) / 56).min(7) as usize;
+    let seq: &[u8] = match idx {
+        0 => b"\x1b",
+        1 => b"\t",
+        2 => b"\x03",
+        3 => b"\x04",
+        4 => b"\x1b[D",
+        5 => b"\x1b[A",
+        6 => b"\x1b[B",
+        _ => b"\x1b[C",
+    };
+    terminal_send(apps, seq);
+    true
 }
 
 impl Files {
@@ -2194,15 +2273,7 @@ fn parse_fnd(weather: &mut Weather, data: &[u8]) {
 
 impl Apps {
     pub fn new() -> Self {
-        let mut terminal = Terminal {
-            lines: [[0u8; TERM_WIDTH]; TERM_LINES],
-            line_len: [0u8; TERM_LINES],
-            count: 0,
-            input: [0u8; 64],
-            input_len: 0,
-        };
-        terminal.push("KimiOS terminal 0.1");
-        terminal.push("Type help for commands.");
+        let terminal = Terminal::new();
         Self {
             music: Music {
                 track: 0,
@@ -2546,27 +2617,29 @@ pub fn key(apps: &mut Apps, app: AppKind, code: u16, shift: bool) -> bool {
             }
         }
         AppKind::Terminal => {
-            match key_event(code, shift) {
-                Some((0, true)) => {
-                    if apps.terminal.input_len > 0 {
-                        apps.terminal.input_len -= 1;
+            let seq: &[u8] = match code {
+                28 => b"\r",
+                14 => b"\x7f",
+                15 => b"\t",
+                1 => b"\x1b",
+                103 => b"\x1b[A",
+                108 => b"\x1b[B",
+                106 => b"\x1b[C",
+                105 => b"\x1b[D",
+                _ => match key_event(code, shift) {
+                    Some((0, true)) => b"\x7f",
+                    Some((b'\n', _)) => b"\r",
+                    Some((byte, _)) => {
+                        let b = if apps.terminal.ctrl_next { byte & 0x1f } else { byte };
+                        apps.terminal.ctrl_next = false;
+                        terminal_send(apps, &[b]);
+                        return true;
                     }
-                    true
-                }
-                Some((b'\n', _)) => {
-                    terminal_execute(apps);
-                    true
-                }
-                Some((byte, _)) => {
-                    if apps.terminal.input_len < apps.terminal.input.len() {
-                        let index = apps.terminal.input_len;
-                        apps.terminal.input[index] = byte;
-                        apps.terminal.input_len += 1;
-                    }
-                    true
-                }
-                None => false,
-            }
+                    None => return false,
+                },
+            };
+            terminal_send(apps, seq);
+            true
         }
         AppKind::Browser => {
             if !apps.browser.editing {
@@ -2607,62 +2680,6 @@ pub fn key(apps: &mut Apps, app: AppKind, code: u16, shift: bool) -> bool {
             }
         }
         _ => false,
-    }
-}
-
-fn terminal_execute(apps: &mut Apps) {
-    let mut command = [0u8; 64];
-    let length = apps.terminal.input_len.min(64);
-    command[..length].copy_from_slice(&apps.terminal.input[..length]);
-    apps.terminal.input_len = 0;
-    let mut start = 0;
-    let mut end = length;
-    while start < end && command[start] == b' ' {
-        start += 1;
-    }
-    while end > start && command[end - 1] == b' ' {
-        end -= 1;
-    }
-    let line = slice_str(&command[start..end]);
-    let mut echo = [0u8; 70];
-    echo[0] = b'$';
-    echo[1] = b' ';
-    let shown = (end - start).min(63);
-    echo[2..2 + shown].copy_from_slice(&command[start..start + shown]);
-    apps.terminal.push(slice_str(&echo[..2 + shown]));
-    if line.is_empty() {
-        return;
-    }
-    let mut split = 0;
-    while split < line.len() && line.as_bytes()[split] != b' ' {
-        split += 1;
-    }
-    let (name, _rest) = line.split_at(split);
-    match name {
-        "" => {}
-        "clear" => apps.terminal.clear(),
-        "exit" => apps.terminal.push("Close with the back arrow."),
-        "exec" => apps.terminal.push("exec: use 'run <file>' in the GUI terminal"),
-        _ => {
-            // Same command interpreter as the CLI shell; capture its console
-            // output and render it into the terminal display.
-            k::capture_begin();
-            k::shell::exec(line.as_bytes());
-            let mut out = [0u8; 8192];
-            let n = k::capture_take(&mut out);
-            k::capture_end();
-            for byte in &mut out[..n] {
-                if *byte == b'\n' || *byte == b'\t' {
-                    continue;
-                }
-                if *byte < 32 || *byte > 126 {
-                    *byte = b'.';
-                }
-            }
-            if n > 0 {
-                apps.terminal.push(slice_str(&out[..n]));
-            }
-        }
     }
 }
 
@@ -2731,6 +2748,13 @@ pub fn tap(screen: &Screen, apps: &mut Apps, app: AppKind, point: (i64, i64), os
         AppKind::Market => market_tap(screen, apps, point),
         AppKind::Monitor => monitor_tap(apps, point),
         AppKind::Plugins => plugins_tap(screen, apps, point),
+        AppKind::Terminal => {
+            if point.1 >= 420 && point.1 <= 448 {
+                terminal_ctrl_tap(apps, point.0);
+            } else if apps.terminal.exited && point.1 < 420 {
+                terminal_send(apps, b"\r");
+            }
+        }
         _ => {}
     }
 }
@@ -3841,28 +3865,79 @@ fn draw_weather(screen: &Screen, weather: &Weather, clock: [u64; 7]) {
     screen.text(24, 730, slice_str(&weather.status[..weather.status_len]), 1, MUTED());
 }
 
+fn term_fg(idx: u16, flags: u8) -> u32 {
+    let mut i = idx;
+    if flags & 1 != 0 && i < 8 {
+        i += 8; // bold -> bright
+    }
+    if i == crate::vt::DEFAULT_FG { TEXT() } else { crate::vt::palette(i) }
+}
+fn term_bg(idx: u16) -> u32 {
+    if idx == crate::vt::DEFAULT_BG { BLACK() } else { crate::vt::palette(idx) }
+}
+
 fn draw_terminal(screen: &Screen, terminal: &Terminal, osk: bool) {
     let width = screen.width();
     screen.fill(0, 93, width, screen.height() - 93, BLACK());
-    let max_lines = if osk { 24 } else { TERM_LINES };
-    let separator_y = if osk { 416 } else { 684 };
-    let input_y = if osk { 430 } else { 700 };
-    let start = terminal.count.saturating_sub(max_lines);
-    let mut y = 108i64;
-    for index in start..terminal.count {
-        let length = terminal.line_len[index] as usize;
-        screen.text_mono(20, y, slice_str(&terminal.lines[index][..length]), 1, TEXT());
-        y += 13;
+    let vt = &terminal.vt;
+    let cw = TERM_CELL_W;
+    let chh = TERM_CELL_H;
+    for row in 0..crate::vt::ROWS {
+        let y = TERM_Y0 + row as i64 * chh;
+        let mut x = 0usize;
+        while x < crate::vt::COLS {
+            let c = vt.cells[row][x];
+            let mut e = x + 1;
+            while e < crate::vt::COLS {
+                let n = vt.cells[row][e];
+                if n.fg != c.fg || n.bg != c.bg || n.flags != c.flags {
+                    break;
+                }
+                e += 1;
+            }
+            let (mut fg, mut bg) = (term_fg(c.fg, c.flags), term_bg(c.bg));
+            if c.flags & 2 != 0 {
+                core::mem::swap(&mut fg, &mut bg);
+            }
+            let px = TERM_X0 + x as i64 * cw;
+            let pw = (e - x) as i64 * cw;
+            if bg != BLACK() {
+                screen.fill(px, y, pw, chh, bg);
+            }
+            let mut txt = [0u8; 80];
+            let mut tn = 0usize;
+            let mut any = false;
+            for i in x..e {
+                let b = vt.cells[row][i].ch;
+                let printable = (32..=126).contains(&b);
+                txt[tn] = if printable { b } else { b' ' };
+                if printable && b != b' ' {
+                    any = true;
+                }
+                tn += 1;
+            }
+            if any {
+                screen.text_mono(px, y, slice_str(&txt[..tn]), 1, fg);
+            }
+            x = e;
+        }
     }
-    screen.fill(20, separator_y, width - 40, 1, OUTLINE());
-    screen.text_mono(20, input_y, "$", 2, RED());
-    let shown = terminal.input_len.min(52);
-    screen.text_mono(44, input_y, slice_str(&terminal.input[..shown]), 2, TEXT());
-    if terminal.input_len == 0 {
-        screen.text_mono(44, input_y, "type a command", 2, 0x0050_505a);
+    // Cursor (underline block).
+    if vt.cursor_visible && vt.cy < crate::vt::ROWS && vt.cx < crate::vt::COLS {
+        let cx = TERM_X0 + vt.cx as i64 * cw;
+        let cy = TERM_Y0 + vt.cy as i64 * chh;
+        screen.fill(cx, cy + chh - 2, cw, 2, GREEN());
     }
-    if !osk {
-        screen.text_mono(20, 744, "help  ls  cat  date  df  mem  ps  uptime  clear", 1, MUTED());
+    // Control-key strip (always visible, just above the OSK).
+    let labels = ["ESC", "TAB", "^C", "^D", "<", "^", "v", ">"];
+    for i in 0..8 {
+        let bx = 12 + i as i64 * 56;
+        button(screen, bx, 420, 52, 28, labels[i], SURFACE_HI(), TEXT());
+    }
+    if terminal.exited {
+        screen.text_mono(20, 460, "session ended - press Enter to restart", 1, MUTED());
+    } else if !osk {
+        screen.text_mono(20, 744, "interactive shell: try top, vi, htop, ls, cat", 1, MUTED());
     }
 }
 
@@ -6270,6 +6345,64 @@ pub fn test_store_run(name: &str, src: u8, out: &mut [u8]) -> u64 {
     let n = apps.market.run_len.min(out.len());
     out[..n].copy_from_slice(&apps.market.run_out[..n]);
     apps.market.run_len as u64 + 1
+}
+
+/// Host-only VT parser test: feed `script`, render the plain-text grid into
+/// `out` (ROWS lines of COLS chars), and return (cy<<8)|cx. Also writes the
+/// fg palette index of cell (0,0) into out[ROWS*(COLS+1)] if room.
+#[cfg(not(target_os = "none"))]
+pub fn test_vt_render(script: &str, out: &mut [u8]) -> u64 {
+    let mut vt = crate::vt::Vt::new();
+    vt.feed(script.as_bytes());
+    let mut n = 0usize;
+    for r in 0..crate::vt::ROWS {
+        for c in 0..crate::vt::COLS {
+            let ch = vt.cells[r][c].ch;
+            let b = if (32..=126).contains(&ch) { ch } else { b' ' };
+            if n < out.len() {
+                out[n] = b;
+                n += 1;
+            }
+        }
+        if n < out.len() {
+            out[n] = b'\n';
+            n += 1;
+        }
+    }
+    if n < out.len() {
+        out[n] = vt.cells[0][0].fg as u8;
+    }
+    ((vt.cy as u64) << 8) | (vt.cx as u64)
+}
+
+/// Device test: spawn an interactive PTY shell, type `echo HELLO_TUI`, capture
+/// the echoed command + output, then exit. Copies the raw stream into `out`
+/// and returns the byte count (0 = PTY unavailable).
+#[cfg(not(target_os = "none"))]
+pub fn test_term(out: &mut [u8]) -> u64 {
+    let Some(slot) = k::proc_spawn("sh", "", 24, 76) else { return 0 };
+    let mut total = 0usize;
+    let mut buf = [0u8; 2048];
+    let mut pump = |total: &mut usize, out: &mut [u8]| {
+        for _ in 0..12 {
+            k::sleep_ms(40);
+            if let Some(n) = k::proc_read(slot, &mut buf) {
+                if n > 0 {
+                    let take = n.min(out.len().saturating_sub(*total));
+                    out[*total..*total + take].copy_from_slice(&buf[..take]);
+                    *total += take;
+                }
+            }
+        }
+    };
+    pump(&mut total, out);
+    let _ = k::proc_write(slot, b"echo HELLO_TUI\r");
+    pump(&mut total, out);
+    let _ = k::proc_write(slot, b"exit\r");
+    k::sleep_ms(120);
+    pump(&mut total, out);
+    let _ = k::proc_close(slot);
+    total as u64
 }
 
 #[cfg(not(target_os = "none"))]

@@ -45,6 +45,9 @@ public final class KimiBridge {
      *  (0 = not found) and logs the captured output. */
     public static native long nativeStoreRun(String name, int src);
 
+    /** Test hook: interactive PTY shell round-trip; returns captured bytes. */
+    public static native long nativeTermTest();
+
     /** Test hook: exercise sysinfo/proclist/copy syscalls (logs real values). */
     public static native int nativeSysTest();
 
