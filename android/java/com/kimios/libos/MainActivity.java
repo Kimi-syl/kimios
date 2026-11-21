@@ -46,6 +46,9 @@ public class MainActivity extends Activity
         KimiBridge.setActivity(this);
         requestLocationPermissions();
         KimiBridge.nativeInit(getFilesDir().getAbsolutePath());
+        new Thread(new Runnable() {
+            @Override public void run() { Toolbox.ensure(MainActivity.this); }
+        }, "kimi-toolbox").start();
         maybeRunGuest(getIntent());
     }
 

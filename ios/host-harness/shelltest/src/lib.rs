@@ -54,13 +54,18 @@ pub extern "C" fn kimi_gz_test(src: u64, dst: u64) -> u64 {
 
 #[no_mangle]
 pub extern "C" fn kimi_apkg_only() {
-    k::print("=== apkg: python3 + nodejs (live Alpine) ===\n");
+    k::print("=== apkg: python3 + nodejs + dash + coreutils (live Alpine) ===\n");
     k::shell::exec(b"apkg update");
     k::shell::exec(b"apkg info python3");
     k::shell::exec(b"apkg info nodejs");
     k::shell::exec(b"apkg install python3");
     k::shell::exec(b"apkg install nodejs");
     k::shell::exec(b"apkg install npm");
+    // Real-ELF shell + coreutils (relative-symlink applets) for the TUI
+    // terminal — busybox applets die under Android's app seccomp, dash/coreutils
+    // are ordinary musl ELFs that run like python/node.
+    k::shell::exec(b"apkg install dash");
+    k::shell::exec(b"apkg install coreutils");
     k::shell::exec(b"ls /disk/alpine/root/usr/bin");
     k::shell::exec(b"ls /disk/alpine/root/lib");
     k::print("=== apkg done ===\n");

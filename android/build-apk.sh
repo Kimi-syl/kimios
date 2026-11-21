@@ -64,8 +64,10 @@ rm -rf "$OUT/classes" "$OUT/dex"; mkdir -p "$OUT/classes" "$OUT/dex"
 
 echo "[4/7] aapt2 compile + link"
 "$AAPT2" compile --dir "$ANDROID_DIR/res" -o "$OUT/res.zip"
+ASSETS_ARG=""
+[ -d "$ANDROID_DIR/assets" ] && ASSETS_ARG="-A $ANDROID_DIR/assets"
 "$AAPT2" link -o "$OUT/base.apk" -I "$ANDROID_JAR" \
-  --manifest "$ANDROID_DIR/AndroidManifest.xml" "$OUT/res.zip" --auto-add-overlay
+  --manifest "$ANDROID_DIR/AndroidManifest.xml" "$OUT/res.zip" --auto-add-overlay $ASSETS_ARG
 
 echo "[5/7] package classes.dex + native lib"
 cp "$OUT/base.apk" "$OUT/unsigned.apk"
