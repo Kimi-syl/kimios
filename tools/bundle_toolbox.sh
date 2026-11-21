@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
-# Prebundle a real-ELF shell toolbox (dash + coreutils + their libs) into
-# android/assets/toolbox.tar.gz. Extracted into the sysroot on first run so the
-# TUI terminal has a working shell without a runtime apk install. Uses real
-# musl ELFs because busybox *applets* die under Android's app seccomp
-# (SECCOMP_RET_KILL/SIGSYS); dash/coreutils run like any other guest binary.
+# Prebundle a STATIC busybox toolbox into android/assets/toolbox.tar.gz.
+#
+# Why static: the guest loader only maps the interpreter for the *initial* exec;
+# when the shell execve()s a child, the Android kernel looks for the musl
+# loader at /lib/ld-musl-aarch64.so.1 (absent on the host root) -> ENOENT.
+# Statically-linked binaries have no interpreter, so the kernel runs them
+# directly. A static busybox provides sh + ls/cat/cp/... in one binary; applets
+# are relative symlinks to it (resolved inside sysroot/bin).
 set -euo pipefail
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 OUT="$REPO/android/assets/toolbox.tar.gz"
@@ -17,25 +20,28 @@ MR=$(curl -s "$BASE/releases/aarch64/" | grep -oE 'alpine-minirootfs-[0-9.]+-aar
 curl -s -o "$WORK/mr.tgz" "$BASE/releases/aarch64/$MR"
 tar -xzf "$WORK/mr.tgz" -C "$ROOT"
 
-echo "[2/3] installing dash + coreutils into temp rootfs..."
+echo "[2/3] installing busybox-static..."
 LD="$ROOT/lib/ld-musl-aarch64.so.1"
 V=$(cat "$ROOT/etc/alpine-release" | cut -d. -f1,2)
 "$LD" --library-path "$ROOT/lib:$ROOT/usr/lib" "$ROOT/sbin/apk" --root "$ROOT" --arch aarch64 \
   --repositories-file /dev/null \
   --repository "http://dl-cdn.alpinelinux.org/alpine/v$V/main" \
-  --allow-untrusted --no-progress add dash coreutils >/dev/null
+  --allow-untrusted --no-progress add busybox-static >/dev/null
+
+BBS="$ROOT/bin/busybox.static"
+[ -e "$BBS" ] || BBS=$(find "$ROOT" -name 'busybox.static' | head -1)
+[ -e "$BBS" ] || { echo "busybox.static not found"; exit 1; }
 
 echo "[3/3] assembling toolbox -> $OUT"
-TB="$WORK/tb"; mkdir -p "$TB/bin" "$TB/usr/bin" "$TB/usr/lib"
-cp "$ROOT/bin/coreutils" "$TB/bin/coreutils"
-for f in $(ls "$ROOT/bin"); do
-  if [ -L "$ROOT/bin/$f" ] && [ "$(readlink "$ROOT/bin/$f")" = "coreutils" ]; then
-    cp -P "$ROOT/bin/$f" "$TB/bin/$f"
-  fi
+TB="$WORK/tb"; mkdir -p "$TB/bin" "$TB/usr/bin"
+cp "$BBS" "$TB/bin/busybox"
+# applet symlinks (relative -> busybox) so PATH lookups work inside the guest
+for a in $("$BBS" --list); do
+  [ "$a" = "busybox" ] && continue
+  ln -sf busybox "$TB/bin/$a" 2>/dev/null || true
 done
-cp "$ROOT/usr/bin/dash" "$TB/usr/bin/dash"
-for l in libacl libattr libskarnet libutmps libcrypto; do
-  for f in "$ROOT"/usr/lib/$l.so*; do [ -e "$f" ] && cp -P "$f" "$TB/usr/lib/"; done
-done
+# ensure a shell name exists
+ln -sf busybox "$TB/bin/sh"
+ln -sf busybox "$TB/bin/ash"
 tar -czf "$OUT" -C "$TB" .
-echo "wrote $OUT ($(stat -c%s "$OUT") B)"
+echo "wrote $OUT ($(stat -c%s "$OUT") B), $(ls "$TB/bin" | wc -l) applets"

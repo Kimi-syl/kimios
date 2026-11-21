@@ -16,7 +16,7 @@ import java.util.zip.GZIPInputStream;
 public final class Toolbox {
     public static void ensure(Context ctx) {
         File root = new File(ctx.getFilesDir(), "disk/alpine/root");
-        File marker = new File(ctx.getFilesDir(), "disk/.toolbox.v1");
+        File marker = new File(ctx.getFilesDir(), "disk/.toolbox.v2");
         if (marker.exists()) return;
         try {
             InputStream raw = ctx.getAssets().open("toolbox.tar.gz");
@@ -62,6 +62,7 @@ public final class Toolbox {
                 dest.mkdirs();
             } else if (type == '2') {
                 dest.getParentFile().mkdirs();
+                dest.delete();
                 try { android.system.Os.symlink(link, dest.getAbsolutePath()); } catch (Throwable e) {}
             } else if (type == '0' || type == 0 || type == '7') {
                 dest.getParentFile().mkdirs();

@@ -1483,7 +1483,7 @@ fn terminal_start(apps: &mut Apps) {
     }
     t.started = true;
     t.vt.reset();
-    match k::proc_spawn("dash", "", crate::vt::ROWS as u64, crate::vt::COLS as u64) {
+    match k::proc_spawn("sh", "", crate::vt::ROWS as u64, crate::vt::COLS as u64) {
         Some(slot) => {
             t.slot = Some(slot);
             t.exited = false;
@@ -6694,7 +6694,7 @@ pub fn test_vt_render(script: &str, out: &mut [u8]) -> u64 {
 /// and returns the byte count (0 = PTY unavailable).
 #[cfg(not(target_os = "none"))]
 pub fn test_term(out: &mut [u8]) -> u64 {
-    let Some(slot) = k::proc_spawn("dash", "", 24, 76) else { return 0 };
+    let Some(slot) = k::proc_spawn("sh", "", 24, 76) else { return 0 };
     let mut total = 0usize;
     let mut buf = [0u8; 2048];
     for _ in 0..18 {
@@ -6707,7 +6707,7 @@ pub fn test_term(out: &mut [u8]) -> u64 {
             }
         }
     }
-    let _ = k::proc_write(slot, b"echo OK999\n");
+    let _ = k::proc_write(slot, b"echo OK999; cat etc/alpine-release; echo $((6*7)); ls bin | head -3 2>/dev/null || ls bin\n");
     for _ in 0..18 {
         k::sleep_ms(40);
         if let Some(n) = k::proc_read(slot, &mut buf) {
