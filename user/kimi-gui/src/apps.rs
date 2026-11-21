@@ -5976,7 +5976,11 @@ impl Market {
                     Self::show_progress(screen, "npm install (downloading)...");
                     let mut arg = [0u8; 220];
                     let mut an = 0usize;
-                    push_str(&mut arg, &mut an, b"install --no-audit --no-fund --prefix /disk/import/npm-");
+                    // The guest (node/npm) uses REAL Android paths, not the
+                    // virtual /disk prefix; its cwd is the sysroot, so a
+                    // relative prefix lands in the same dir import_npm reads
+                    // via /disk/import/npm-<pkg>.
+                    push_str(&mut arg, &mut an, b"install --no-audit --no-fund --prefix ../../import/npm-");
                     push_str(&mut arg, &mut an, pkg.as_bytes());
                     push_str(&mut arg, &mut an, b" ");
                     push_str(&mut arg, &mut an, pkg.as_bytes());
