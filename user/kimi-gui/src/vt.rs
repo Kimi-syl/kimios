@@ -3,7 +3,7 @@
 //! colors, erase/scroll, alternate screen). Enough for sh/top/vi/htop.
 
 pub const COLS: usize = 76;
-pub const ROWS: usize = 22;
+pub const ROWS: usize = 24;
 
 pub const DEFAULT_FG: u16 = 256;
 pub const DEFAULT_BG: u16 = 257;

@@ -278,6 +278,8 @@ pub struct Terminal {
     started: bool,
     pub exited: bool,
     ctrl_next: bool,
+    input: [u8; 200],
+    input_len: usize,
 }
 
 const BROWSER_WIDTH: usize = 50;
@@ -1456,6 +1458,8 @@ impl Terminal {
             started: false,
             exited: false,
             ctrl_next: false,
+            input: [0; 200],
+            input_len: 0,
         }
     }
 
@@ -1479,98 +1483,53 @@ fn terminal_start(apps: &mut Apps) {
     }
     t.started = true;
     t.vt.reset();
-    match k::proc_spawn("sh", "", crate::vt::ROWS as u64, crate::vt::COLS as u64) {
-        Some(slot) => {
-            t.slot = Some(slot);
-            t.exited = false;
-        }
-        None => {
-            t.note("KimiOS terminal");
-            t.note("PTY unavailable on this host.");
-            t.note("Use the CLI shell via adb instead.");
-        }
-    }
+    t.note("KimiOS shell - commands run natively on the device.");
+    t.note("  ls  cat  npm install <pkg>  node ...  python3 ...  busybox ...");
+    t.note("");
 }
 
-/// Per-frame pump: drain the session's output into the VT grid, send any
-/// emulator responses back, and detect exit. Returns true when the display
-/// changed (so the main loop repaints).
-pub fn terminal_frame(apps: &mut Apps) -> bool {
-    terminal_start(apps);
+/// Command-runner terminal: no child shell (its execve of dynamic musl binaries
+/// fails, since the kernel can't find the interpreter). Each line is executed
+/// through the guest loader via the libkimi shell, which runs node/python/npm
+/// and resolves PATH - and, because the loader maps the interpreter for this
+/// exec, dynamic binaries work.
+pub fn terminal_frame(_apps: &mut Apps) -> bool {
+    false
+}
+
+/// Submit the current line: echo it, run it via the loader, render its output.
+fn terminal_run(apps: &mut Apps) {
     let t = &mut apps.terminal;
-    let Some(slot) = t.slot else { return t.vt.dirty };
-    let mut buf = [0u8; 4096];
-    let mut got = false;
-    // Drain a bounded amount per frame so a chatty child can't stall the GUI.
-    for _ in 0..8 {
-        match k::proc_read(slot, &mut buf) {
-            Some(0) | None => break,
-            Some(n) => {
-                t.vt.feed(&buf[..n]);
-                got = true;
-                if n < buf.len() {
-                    break;
-                }
-            }
-        }
+    let n = t.input_len.min(t.input.len());
+    let mut line = [0u8; 200];
+    line[..n].copy_from_slice(&t.input[..n]);
+    t.input_len = 0;
+    t.vt.feed(b"$ ");
+    t.vt.feed(&line[..n]);
+    t.vt.feed(b"\r\n");
+    let cmd = slice_str(&line[..n]).trim();
+    if cmd.is_empty() {
+        return;
     }
-    if t.vt.resp_len > 0 {
-        let mut resp = [0u8; 64];
-        let n = t.vt.resp_len.min(64);
-        resp[..n].copy_from_slice(&t.vt.resp[..n]);
-        t.vt.resp_len = 0;
-        let _ = k::proc_write(slot, &resp[..n]);
+    if cmd == "clear" {
+        t.vt.reset();
+        return;
     }
-    if let Some(Some(code)) = k::proc_status(slot) {
-        if !t.exited {
-            t.exited = true;
-            let mut line = [0u8; 64];
-            let mut n = 0;
-            push_str(&mut line, &mut n, b"\r\n[process exited: ");
-            let mut num = [0u8; 20];
-            push_str(&mut line, &mut n, unsigned(code, &mut num).as_bytes());
-            push_str(&mut line, &mut n, b" - press Enter to restart]\r\n");
-            t.vt.feed(&line[..n]);
-            let _ = k::proc_close(slot);
-            t.slot = None;
-            got = true;
-        }
+    if cmd == "exit" {
+        t.note("Close with the back arrow.");
+        return;
     }
-    let changed = got || t.vt.dirty;
-    t.vt.dirty = false;
-    changed
-}
-
-fn terminal_send(apps: &mut Apps, bytes: &[u8]) {
-    if apps.terminal.exited || apps.terminal.slot.is_none() {
-        // Restart a fresh shell on the next keypress after exit.
-        apps.terminal.started = false;
-        apps.terminal.exited = false;
-        terminal_start(apps);
+    let mut buf = [0u8; 8192];
+    k::capture_begin();
+    k::shell::exec(cmd.as_bytes());
+    let cnt = k::capture_take(&mut buf);
+    k::capture_end();
+    if cnt > 0 {
+        t.vt.feed(&buf[..cnt]);
     }
-    if let Some(slot) = apps.terminal.slot {
-        let _ = k::proc_write(slot, bytes);
+    if cnt == 0 || buf[cnt - 1] != b'\n' {
+        t.vt.feed(b"\r\n");
     }
-}
-
-/// Control-strip buttons (drawn above the OSK): ESC TAB ^C ^D < ^ v >.
-fn terminal_ctrl_tap(apps: &mut Apps, x: i64) -> bool {
-    if x < 12 || x >= 460 {
-        return false;
-    }
-    let idx = ((x - 12) / 56).min(7) as usize;
-    let seq: &[u8] = match idx {
-        0 => b"\x1b",
-        1 => b"\t",
-        2 => b"\x03",
-        3 => b"\x04",
-        4 => b"\x1b[D",
-        5 => b"\x1b[A",
-        6 => b"\x1b[B",
-        _ => b"\x1b[C",
-    };
-    terminal_send(apps, seq);
-    true
 }
 
 // ---- AI Studio (guest llama-server + streaming chat) ----------------------
@@ -2813,30 +2772,26 @@ pub fn key(apps: &mut Apps, app: AppKind, code: u16, shift: bool) -> bool {
             }
         }
         AppKind::Terminal => {
-            // Raw keys to the PTY (the interactive shell echoes/edits/prompts).
-            let seq: &[u8] = match code {
-                28 => b"\r",
-                14 => b"\x7f",
-                15 => b"\t",
-                1 => b"\x1b",
-                103 => b"\x1b[A",
-                108 => b"\x1b[B",
-                106 => b"\x1b[C",
-                105 => b"\x1b[D",
+            // Line editor: type a command, Enter executes it via the loader.
+            match code {
+                28 => { terminal_run(apps); true }
                 _ => match key_event(code, shift) {
-                    Some((0, true)) => b"\x7f",
-                    Some((b'\n', _)) => b"\r",
-                    Some((byte, _)) => {
-                        let b = if apps.terminal.ctrl_next { byte & 0x1f } else { byte };
-                        apps.terminal.ctrl_next = false;
-                        terminal_send(apps, &[b]);
-                        return true;
+                    Some((0, true)) => {
+                        if apps.terminal.input_len > 0 { apps.terminal.input_len -= 1; }
+                        true
                     }
-                    None => return false,
+                    Some((b'\n', _)) => { terminal_run(apps); true }
+                    Some((byte, _)) => {
+                        let t = &mut apps.terminal;
+                        if t.input_len < t.input.len() {
+                            t.input[t.input_len] = byte;
+                            t.input_len += 1;
+                        }
+                        true
+                    }
+                    None => false,
                 },
-            };
-            terminal_send(apps, seq);
-            true
+            }
         }
         AppKind::Browser => {
             if !apps.browser.editing {
@@ -2946,13 +2901,6 @@ pub fn tap(screen: &Screen, apps: &mut Apps, app: AppKind, point: (i64, i64), os
         AppKind::Monitor => monitor_tap(apps, point),
         AppKind::Plugins => plugins_tap(screen, apps, point),
         AppKind::AiStudio => ai_tap(apps, point),
-        AppKind::Terminal => {
-            if point.1 >= 420 && point.1 <= 448 {
-                terminal_ctrl_tap(apps, point.0);
-            } else if apps.terminal.exited && point.1 < 420 {
-                terminal_send(apps, b"\r");
-            }
-        }
         _ => {}
     }
 }
@@ -4127,16 +4075,17 @@ fn draw_terminal(screen: &Screen, terminal: &Terminal, osk: bool) {
         let cy = TERM_Y0 + vt.cy as i64 * chh;
         screen.fill(cx, cy + chh - 2, cw, 2, GREEN());
     }
-    // Control-key strip (always visible, just above the OSK).
-    let labels = ["ESC", "TAB", "^C", "^D", "<", "^", "v", ">"];
-    for i in 0..8 {
-        let bx = 12 + i as i64 * 56;
-        button(screen, bx, 420, 52, 28, labels[i], SURFACE_HI(), TEXT());
-    }
-    if terminal.exited {
-        screen.text_mono(20, 460, "session ended - press Enter to restart", 1, MUTED());
-    } else if !osk {
-        screen.text_mono(20, 744, "interactive shell: try top, vi, htop, ls, cat", 1, MUTED());
+    // Input line.
+    let iy = TERM_Y0 + crate::vt::ROWS as i64 * chh;
+    screen.fill(12, iy - 2, width - 24, 1, OUTLINE());
+    let mut line = [0u8; 210];
+    let mut ln = 0usize;
+    push_str(&mut line, &mut ln, b"$ ");
+    let n = terminal.input_len.min(terminal.input.len());
+    push_str(&mut line, &mut ln, &terminal.input[..n]);
+    screen.text_mono(12, iy, slice_str(&line[..ln]), 1, TEXT());
+    if !osk && terminal.input_len == 0 {
+        screen.text_mono(12, iy + 16, "try: ls   cat etc/alpine-release   npm install cowsay   node -e 1   python3", 1, MUTED());
     }
 }
 
