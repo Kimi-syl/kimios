@@ -98,6 +98,50 @@ public final class KimiBridge {
         }
     }
 
+    // ---- async download with real progress (for installers) ----
+    private static volatile long dlDone, dlTotal;
+    private static volatile int dlState; // 0 idle, 1 running, 2 done, 3 error
+
+    /** Start a background HTTP(S) GET -> file, updating dlDone/dlTotal. */
+    public static long nativeFetchAsync(String url, String dest) {
+        dlDone = 0; dlTotal = 0; dlState = 1;
+        final String u = url, d = dest;
+        new Thread(new Runnable() {
+            @Override public void run() {
+                try {
+                    java.io.File f = new java.io.File(d);
+                    java.io.File parent = f.getParentFile();
+                    if (parent != null) parent.mkdirs();
+                    java.net.HttpURLConnection c = (java.net.HttpURLConnection) new java.net.URL(u).openConnection();
+                    c.setInstanceFollowRedirects(true);
+                    c.setConnectTimeout(30000);
+                    c.setReadTimeout(60000);
+                    c.setRequestProperty("User-Agent", "KimiOS-libos");
+                    int code = c.getResponseCode();
+                    if (code != 200) { dlState = 3; c.disconnect(); return; }
+                    long total = c.getContentLengthLong();
+                    dlTotal = total > 0 ? total : 0;
+                    java.io.InputStream in = c.getInputStream();
+                    java.io.FileOutputStream out = new java.io.FileOutputStream(f);
+                    byte[] buf = new byte[65536];
+                    int n; long tot = 0;
+                    while ((n = in.read(buf)) > 0) { out.write(buf, 0, n); tot += n; dlDone = tot; }
+                    out.close(); in.close(); c.disconnect();
+                    dlState = 2;
+                } catch (Throwable e) {
+                    android.util.Log.e("KimiOS", "asyncFetch: " + e);
+                    dlState = 3;
+                }
+            }
+        }, "kimi-dl").start();
+        return 0;
+    }
+
+    /** [done, total, state] for the async download. */
+    public static long[] fetchProgress() {
+        return new long[] { dlDone, dlTotal, dlState };
+    }
+
     /** Called from C (SYS_LOCAL_TIME): local device time as
      *  [epoch_s, year, month(1-12), day, hour, minute, second,
      *   weekday(0=Sunday..6), tz_offset_minutes]. */

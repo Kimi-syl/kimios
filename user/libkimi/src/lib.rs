@@ -612,6 +612,23 @@ pub fn fetch_url(url: &str, dest: &str) -> Option<u64> {
     if r == ERROR { None } else { Some(r) }
 }
 
+/// Start an async HTTP(S) GET to a `/disk/...` file (progress via
+/// `fetch_progress`). Non-blocking; returns true on accept.
+pub fn fetch_async(url: &str, dest: &str) -> bool {
+    syscall4(
+        SYS_FETCH_ASYNC,
+        url.as_ptr() as u64,
+        url.len() as u64,
+        dest.as_ptr() as u64,
+        dest.len() as u64,
+    ) != ERROR
+}
+
+/// `[done, total, state]` for the async fetch (state: 0 idle,1 run,2 done,3 err).
+pub fn fetch_progress(out: &mut [u64; 3]) -> bool {
+    syscall3(SYS_FETCH_PROGRESS, out.as_mut_ptr() as u64, 0, 0) != ERROR
+}
+
 /// Local device time: `[epoch, year, month, day, hour, minute, second,
 /// weekday (0=Sunday), tz_offset_minutes]`. Host-only (None on bare metal).
 pub fn local_time() -> Option<[u64; 9]> {
@@ -698,6 +715,8 @@ pub const SYS_PLUGIN_API: u64 = 53;
 pub const SYS_PLUGIN_RUN: u64 = 54;
 pub const SYS_PLUGIN_RUN_OUT: u64 = 55;
 pub const SYS_PROC: u64 = 56;
+pub const SYS_FETCH_ASYNC: u64 = 57;
+pub const SYS_FETCH_PROGRESS: u64 = 58;
 
 /// `[cpu_pct_x10, ram_total_kb, ram_used_kb, storage_total_kb, storage_used_kb,
 /// uptime_s, proc_count, battery_pct, battery_charging, reserved]`.

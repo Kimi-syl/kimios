@@ -1161,6 +1161,18 @@ pub extern "C" fn kimi_test_opencode(pw: u64, prompt: u64, out: u64, cap: u64) -
     let buf = unsafe { core::slice::from_raw_parts_mut(out as *mut u8, cap as usize) };
     opencode::test_opencode(password, pr, buf)
 }
+/// Host-only: list opencode models (GET /api/model) into out.
+#[no_mangle]
+#[cfg(not(target_os = "none"))]
+pub extern "C" fn kimi_test_oc_models(pw: u64, out: u64, cap: u64) -> u64 {
+    unsafe fn cstr(p: *const u8) -> &'static str {
+        let mut n = 0; while *p.add(n) != 0 { n += 1; }
+        core::str::from_utf8(core::slice::from_raw_parts(p, n)).unwrap_or("")
+    }
+    let s = unsafe { cstr(pw as *const u8) };
+    let buf = unsafe { core::slice::from_raw_parts_mut(out as *mut u8, cap as usize) };
+    opencode::test_models(s, buf)
+}
 #[no_mangle]
 #[cfg(not(target_os = "none"))]
 pub extern "C" fn kimi_test_plugin_list(out: u64) -> u64 {

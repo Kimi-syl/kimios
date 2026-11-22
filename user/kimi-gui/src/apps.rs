@@ -1759,6 +1759,14 @@ fn oc_open(apps: &mut Apps) {
 /// Per-frame pump for OpenCode: server log (password) + throttled session poll.
 pub fn oc_frame(apps: &mut Apps) -> bool {
     let mut changed = apps.oc.pump_log();
+    if apps.oc.pump_install() {
+        changed = true;
+    }
+    if apps.oc.ready && !apps.oc.auto_fetched {
+        apps.oc.auto_fetched = true;
+        apps.oc.fetch_models();
+        changed = true;
+    }
     apps.oc.last_poll = apps.oc.last_poll.wrapping_add(1);
     if apps.oc.pending && apps.oc.last_poll % 200 == 0 {
         if apps.oc.poll() {
@@ -1776,29 +1784,46 @@ fn oc_key(apps: &mut Apps, code: u16, shift: bool) -> bool {
 }
 
 fn oc_tap(screen: &Screen, apps: &mut Apps, point: (i64, i64)) {
+    let _ = screen;
+    let oc = &mut apps.oc;
     if point.1 >= 150 && point.1 <= 186 {
-        if point.0 >= 20 && point.0 < 140 {
-            let oc = &mut apps.oc;
+        if point.0 >= 12 && point.0 < 116 {
             if !oc.installed {
-                busy_overlay(screen, "Installing OpenCode (large)...");
-                oc.install();
+                oc.start_install();
             } else if oc.started {
                 oc.stop_server();
             } else {
                 oc.start_server();
             }
-        } else if point.0 >= 150 && point.0 < 270 {
-            let oc = &mut apps.oc;
+        } else if point.0 >= 124 && point.0 < 228 {
+            if oc.picker {
+                oc.picker = false;
+            } else {
+                oc.fetch_models();
+                oc.picker = true;
+            }
+        } else if point.0 >= 236 && point.0 < 340 {
             oc.chat.msg_count = 0;
             oc.chat.partial_len = 0;
             oc.session_len = 0;
             oc.pending = false;
             oc.chat.set_status("New session");
-        } else if point.0 >= 280 {
-            apps.oc.chat.msg_count = 0;
-            apps.oc.chat.partial_len = 0;
-            apps.oc.chat.set_status("Cleared");
+        } else if point.0 >= 348 {
+            oc.chat.msg_count = 0;
+            oc.chat.partial_len = 0;
+            oc.chat.set_status("Cleared");
         }
+        return;
+    }
+    if oc.picker {
+        if point.1 >= 196 {
+            let idx = ((point.1 - 196) / 40) as usize;
+            if idx < oc.model_count.min(8) {
+                oc.select_model(idx);
+                oc.picker = false;
+            }
+        }
+        return;
     }
 }
 
@@ -1806,9 +1831,17 @@ fn draw_oc(screen: &Screen, oc: &crate::opencode::Oc, osk: bool) {
     let width = screen.width();
     screen.fill(0, 93, width, screen.height() - 93, BLACK());
     screen.text(20, 104, "OpenCode", 2, TEXT());
+    // current model
+    let cur = if oc.model_count > 0 && oc.sel_model < oc.model_count {
+        oc.models[oc.sel_model].name_str()
+    } else {
+        "no model"
+    };
+    let cl = cur.len().min(26);
+    screen.text(150, 112, &cur[..cl], 1, MUTED());
     let st = slice_str(&oc.status[..oc.status_len]);
-    let sl = st.len().min(38);
-    screen.text(150, 112, &st[..sl], 1, GREEN());
+    let sl = st.len().min(40);
+    screen.text(20, 132, &st[..sl], 1, GREEN());
     let (l0, bg0) = if !oc.installed {
         ("Install", RED())
     } else if oc.started {
@@ -1816,14 +1849,67 @@ fn draw_oc(screen: &Screen, oc: &crate::opencode::Oc, osk: bool) {
     } else {
         ("Start", RED())
     };
-    button(screen, 20, 150, 120, 36, l0, bg0, TEXT());
-    button(screen, 150, 150, 120, 36, "New", SURFACE_HI(), TEXT());
-    button(screen, 280, 150, 176, 36, "Clear", SURFACE_HI(), TEXT());
+    button(screen, 12, 150, 104, 36, l0, bg0, TEXT());
+    button(screen, 124, 150, 104, 36, "Model", if oc.picker { RED_DIM() } else { SURFACE_HI() }, TEXT());
+    button(screen, 236, 150, 104, 36, "New", SURFACE_HI(), TEXT());
+    button(screen, 348, 150, 108, 36, "Clear", SURFACE_HI(), TEXT());
+
+    if oc.installing {
+        let bar_w = 360i64;
+        let bx = (width - bar_w) / 2;
+        let by = 340i64;
+        screen.text_centered(width / 2, 280, "Installing OpenCode", 2, TEXT());
+        screen.round_rect(bx, by, bar_w, 20, 10, SURFACE_HI());
+        let (fill, label): (i64, &str) = if oc.stage == 1 {
+            if oc.dltotal > 0 {
+                ((oc.dldone * bar_w as u64 / oc.dltotal) as i64, "downloading")
+            } else {
+                (bar_w / 40, "connecting")
+            }
+        } else {
+            (bar_w, "extracting + libs")
+        };
+        screen.round_rect(bx, by, fill.clamp(0, bar_w), 20, 10, RED());
+        let mut line = [0u8; 48];
+        let mut ln = 0usize;
+        if oc.dltotal > 0 && oc.stage == 1 {
+            let pct = oc.dldone * 100 / oc.dltotal;
+            let mut num = [0u8; 20];
+            push_str(&mut line, &mut ln, unsigned(pct, &mut num).as_bytes());
+            push_str(&mut line, &mut ln, b"%  ");
+        }
+        push_str(&mut line, &mut ln, label.as_bytes());
+        screen.text_centered(width / 2, by + 34, slice_str(&line[..ln]), 1, MUTED());
+        return;
+    }
+
+    if oc.picker {
+        let n = oc.model_count.min(8);
+        if n == 0 {
+            screen.text_centered(width / 2, 300, "No models", 2, MUTED());
+            screen.text_centered(width / 2, 336, "Start the server; add a provider/key if empty", 1, MUTED());
+            return;
+        }
+        for i in 0..n {
+            let y = 196 + i as i64 * 40;
+            screen.round_rect(20, y, width - 40, 36, 12, if i == oc.sel_model { RED_DIM() } else { SURFACE_HI() });
+            let e = oc.models[i];
+            let nm = e.name_str();
+            let nl = nm.len().min(30);
+            screen.text(32, y + 10, &nm[..nl], 1, TEXT());
+            let pr = e.provider_str();
+            let pl = pr.len().min(14);
+            screen.text(width - 130, y + 10, &pr[..pl], 1, MUTED());
+        }
+        return;
+    }
     let max_y = if osk { 420 } else { 640 };
-    let hint = if oc.installed {
-        "Start the server, then type a prompt"
-    } else {
+    let hint = if !oc.installed {
         "Tap Install to download OpenCode (~200MB)"
+    } else if oc.model_count == 0 {
+        "Start, tap Model to choose, then type"
+    } else {
+        "type a prompt"
     };
     crate::chat::draw_body(screen, &oc.chat, 196, max_y, osk, hint);
 }
@@ -1836,12 +1922,7 @@ pub fn busy_overlay(screen: &Screen, label: &str) {
     let height = screen.height();
     screen.fill(0, 93, width, height - 93, BLACK());
     screen.text_centered(width / 2, 300, label, 2, TEXT());
-    let bar_w = 320i64;
-    let bx = (width - bar_w) / 2;
-    let by = 384i64;
-    screen.round_rect(bx, by, bar_w, 18, 9, SURFACE_HI());
-    screen.round_rect(bx, by, bar_w * 2 / 3, 18, 9, RED());
-    screen.text_centered(width / 2, by + 34, "working... please wait", 1, MUTED());
+    screen.text_centered(width / 2, 360, "working... please wait", 1, MUTED());
     if let Some(d) = screen.dirty_rect() {
         k::fb_present(d[0] as u64, d[1] as u64, d[2] as u64, d[3] as u64);
     }

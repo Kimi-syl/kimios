@@ -431,6 +431,16 @@ pub struct Oc {
     pub pending: bool,
     pub last_poll: u64,
     pub ready: bool,
+    pub models: [ModelEntry; 32],
+    pub model_count: usize,
+    pub sel_model: usize,
+    pub picker: bool,
+    pub installing: bool,
+    pub stage: u8,
+    pub dldone: u64,
+    pub dltotal: u64,
+    pub auto_fetched: bool,
+    pub has_model: bool,
 }
 
 impl Oc {
@@ -451,6 +461,16 @@ impl Oc {
             pending: false,
             last_poll: 0,
             ready: false,
+            models: [EMPTY_MODEL; 32],
+            model_count: 0,
+            sel_model: 0,
+            picker: false,
+            installing: false,
+            stage: 0,
+            dldone: 0,
+            dltotal: 0,
+            auto_fetched: false,
+            has_model: false,
         }
     }
 
@@ -519,6 +539,19 @@ impl Oc {
         self.installed
     }
 
+    /// Write an opencode config so providers initialize (local llama-server
+    /// provider; the built-in free provider also appears) into the guest HOME.
+    fn write_config() {
+        let _ = k::mkdir("/disk/home");
+        let _ = k::mkdir("/disk/home/.config");
+        let _ = k::mkdir("/disk/home/.config/opencode");
+        let cfg: &[u8] = b"{\"$schema\":\"https://opencode.ai/config.json\",\"providers\":{\"local\":{\"name\":\"Local\",\"package\":\"@opencode/ai/providers/openai-compatible\",\"settings\":{\"baseURL\":\"http://127.0.0.1:8080/v1\",\"apiKey\":\"x\"},\"models\":{\"local\":{\"modelID\":\"local\",\"name\":\"Local llama-server\"}}}}}";
+        if let Some(h) = k::create("/disk/home/.config/opencode/opencode.json") {
+            let _ = k::write_file(h, 0, cfg);
+            k::close(h);
+        }
+    }
+
     pub fn start_server(&mut self) {
         if !self.installed {
             self.refresh_installed();
@@ -527,6 +560,7 @@ impl Oc {
                 return;
             }
         }
+        Self::write_config();
         match k::proc_spawn("opencode", "serve --port 4199", 0, 0) {
             Some(slot) => {
                 self.server_slot = Some(slot);
@@ -534,6 +568,7 @@ impl Oc {
                 self.pw_len = 0;
                 self.logscan = 0;
                 self.ready = false;
+                self.auto_fetched = false;
                 self.set_status("Starting server...");
             }
             None => self.set_status("opencode not runnable yet"),
@@ -637,6 +672,10 @@ impl Oc {
             self.set_status("Start the server first");
             return;
         }
+        if !self.has_model {
+            self.set_status("Tap Model to choose one first");
+            return;
+        }
         let mut text = [0u8; 200];
         let n = self.chat.take_input(&mut text);
         if n == 0 {
@@ -707,4 +746,226 @@ fn http_transport(req: &[u8], body: &mut [u8]) -> usize {
         body.copy_within(s..s + l, 0);
     }
     l
+}
+
+impl Oc {
+    /// Begin an on-demand download (non-blocking). Progress is polled in
+    /// pump_install()/drawn each frame, so the bar reflects REAL bytes.
+    pub fn start_install(&mut self) {
+        if self.installing { return; }
+        let _ = k::mkdir("/disk/opencode");
+        let _ = k::mkdir("/disk/alpine/root/usr/bin");
+        self.dldone = 0;
+        self.dltotal = 0;
+        if k::fetch_async(OC_URL, "/disk/opencode/oc.tar.gz") {
+            self.installing = true;
+            self.stage = 1;
+            self.set_status("Downloading...");
+        } else {
+            self.set_status("Download start failed");
+        }
+    }
+
+    /// Advance the install state machine. Returns true when the display changed.
+    pub fn pump_install(&mut self) -> bool {
+        if !self.installing {
+            return false;
+        }
+        if self.stage == 1 {
+            let mut p = [0u64; 3];
+            if k::fetch_progress(&mut p) {
+                self.dldone = p[0];
+                self.dltotal = p[1];
+                match p[2] {
+                    2 => self.stage = 2,
+                    3 => {
+                        self.set_status("Download failed");
+                        self.installing = false;
+                        self.stage = 5;
+                        return true;
+                    }
+                    _ => {}
+                }
+            }
+            if self.stage == 1 {
+                return true;
+            }
+        }
+        if self.stage == 2 {
+            self.set_status("Extracting...");
+            let mut ok = false;
+            if let Some((_, size)) = k::stat("/disk/opencode/oc.tar.gz") {
+                if size > 40_000_000 {
+                    if let Some(h) = k::open("/disk/opencode/oc.tar.gz") {
+                        let mut m = [0u8; 2];
+                        let n = k::read_file(h, 0, &mut m);
+                        k::close(h);
+                        ok = n == 2 && m[0] == 0x1f && m[1] == 0x8b;
+                    }
+                }
+            }
+            if !ok {
+                self.set_status("Download incomplete - retry");
+                self.installing = false;
+                self.stage = 5;
+                return true;
+            }
+            let mut sink = [0u8; 256];
+            let _ = k::linux_run("busybox", "tar xzf ../../opencode/oc.tar.gz -C ../../alpine/root/usr/bin", &mut sink);
+            self.set_status("Installing runtime libs...");
+            let _ = k::alpine::update("");
+            let _ = k::alpine::install("libstdc++");
+            let _ = k::alpine::install("libgcc");
+            self.refresh_installed();
+            self.installing = false;
+            self.stage = 4;
+            self.set_status(if self.installed { "Installed - tap Start" } else { "Extract failed" });
+            return true;
+        }
+        false
+    }
+}
+
+// ===================== model list / selection ==============================
+
+#[derive(Clone, Copy)]
+pub struct ModelEntry {
+    pub name: [u8; 40],
+    pub name_len: usize,
+    pub provider: [u8; 24],
+    pub provider_len: usize,
+    pub model: [u8; 40],
+    pub model_len: usize,
+}
+pub const EMPTY_MODEL: ModelEntry = ModelEntry {
+    name: [0; 40], name_len: 0, provider: [0; 24], provider_len: 0, model: [0; 40], model_len: 0,
+};
+impl ModelEntry {
+    pub fn name_str(&self) -> &str { core::str::from_utf8(&self.name[..self.name_len]).unwrap_or("") }
+    pub fn provider_str(&self) -> &str { core::str::from_utf8(&self.provider[..self.provider_len]).unwrap_or("") }
+    pub fn model_str(&self) -> &str { core::str::from_utf8(&self.model[..self.model_len]).unwrap_or("") }
+}
+
+pub fn build_models_req(password: &str, out: &mut [u8]) -> usize {
+    let mut n = 0usize;
+    append(out, &mut n, b"GET /api/model HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n");
+    if !password.is_empty() { auth_header(out, &mut n, password); }
+    append(out, &mut n, b"\r\n");
+    n
+}
+
+pub fn build_set_model_req(password: &str, sid: &str, provider: &str, model: &str, out: &mut [u8]) -> usize {
+    let mut n = 0usize;
+    append(out, &mut n, b"POST /api/session/");
+    append(out, &mut n, sid.as_bytes());
+    append(out, &mut n, b"/model HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nConnection: close\r\n");
+    if !password.is_empty() { auth_header(out, &mut n, password); }
+    let mut body = [0u8; 256];
+    let mut bn = 0usize;
+    append(&mut body, &mut bn, b"{\"model\":{\"id\":\"");
+    json_escape(&mut body, &mut bn, model.as_bytes());
+    append(&mut body, &mut bn, b"\",\"providerID\":\"");
+    json_escape(&mut body, &mut bn, provider.as_bytes());
+    append(&mut body, &mut bn, b"\"}}");
+    let mut cl = [0u8; 24]; let mut cln = 0usize;
+    append(&mut cl, &mut cln, b"Content-Length: ");
+    append_num(&mut cl, &mut cln, bn as u64);
+    append(&mut cl, &mut cln, b"\r\n\r\n");
+    append(out, &mut n, &cl[..cln]);
+    append(out, &mut n, &body[..bn]);
+    n
+}
+
+/// Parse GET /api/model -> entries (name, providerID, modelID).
+pub fn parse_models(data: &[u8], out: &mut [ModelEntry]) -> usize {
+    let Some(dp) = find_from(data, b"\"data\":[", 0) else { return 0 };
+    let arr = dp + 7;
+    let end = match_bracket(data, arr);
+    let mut count = 0usize;
+    let mut i = arr + 1;
+    while i < end && count < out.len() {
+        while i < end && data[i] != b'{' { i += 1; }
+        if i >= end { break; }
+        let oe = match_bracket(data, i);
+        let obj = &data[i..oe.min(end)];
+        i = oe;
+        let model = find_str(obj, b"modelID").or_else(|| find_str(obj, b"id"));
+        let provider = find_str(obj, b"providerID");
+        let name = find_str(obj, b"name").or(model);
+        let (Some(m), Some(p), Some(nm)) = (model, provider, name) else { continue };
+        let mut e = EMPTY_MODEL;
+        e.model_len = m.len().min(40); e.model[..e.model_len].copy_from_slice(&m[..e.model_len]);
+        e.provider_len = p.len().min(24); e.provider[..e.provider_len].copy_from_slice(&p[..e.provider_len]);
+        e.name_len = nm.len().min(40); e.name[..e.name_len].copy_from_slice(&nm[..e.name_len]);
+        out[count] = e;
+        count += 1;
+    }
+    count
+}
+
+impl Oc {
+    /// Fetch the model list (requires a running server).
+    pub fn fetch_models(&mut self) -> usize {
+        if self.server_slot.is_none() || !self.ready {
+            self.set_status("Start the server first");
+            return 0;
+        }
+        let pw = self.pw_str();
+        let mut req = [0u8; 256];
+        let rl = build_models_req(pw, &mut req);
+        let mut body = [0u8; 24576];
+        let bl = http_transport(&req[..rl], &mut body);
+        if bl == 0 { self.set_status("Model list failed"); return 0; }
+        self.model_count = parse_models(&body[..bl], &mut self.models);
+        if self.model_count == 0 {
+            self.set_status("No models - add a provider/key");
+        } else {
+            self.set_status("Pick a model");
+        }
+        self.model_count
+    }
+
+    /// Set the current session's model (creates a session if needed).
+    pub fn select_model(&mut self, idx: usize) {
+        if idx >= self.model_count { return; }
+        self.sel_model = idx;
+        self.has_model = true;
+        if !self.ensure_session() { return; }
+        let e = self.models[idx];
+        let pw = self.pw_str();
+        let sid = core::str::from_utf8(&self.session[..self.session_len]).unwrap_or("");
+        let mut req = [0u8; 512];
+        let rl = build_set_model_req(pw, sid, e.provider_str(), e.model_str(), &mut req);
+        let mut body = [0u8; 1024];
+        let l = http_transport(&req[..rl], &mut body);
+        if l > 0 {
+            self.set_status("Model set");
+        } else {
+            self.set_status("Set model failed");
+        }
+    }
+}
+
+#[cfg(not(target_os = "none"))]
+pub fn test_models(password: &str, out: &mut [u8]) -> u64 {
+    let mut req = [0u8; 256];
+    let rl = build_models_req(password, &mut req);
+    let mut body = [0u8; 65536];
+    let bl = http_transport(&req[..rl], &mut body);
+    let mut models = [EMPTY_MODEL; 32];
+    let n = parse_models(&body[..bl], &mut models);
+    let mut o = 0usize;
+    append(out, &mut o, b"[models=");
+    append_num(out, &mut o, n as u64);
+    append(out, &mut o, b"]\n");
+    for i in 0..n.min(10) {
+        let e = models[i];
+        append(out, &mut o, e.provider_str().as_bytes());
+        append(out, &mut o, b"/");
+        append(out, &mut o, e.model_str().as_bytes());
+        append(out, &mut o, b"  ");
+        append(out, &mut o, e.name_str().as_bytes());
+        append(out, &mut o, b"\n");
+    }
+    o as u64
 }

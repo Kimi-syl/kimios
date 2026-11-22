@@ -60,6 +60,7 @@ JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *reserved) {
 // (attached via AttachCurrentThread) resolves against the SYSTEM classloader
 // and cannot see app classes, so every GUI-thread JNI call must use these.
 static jclass g_bridge;
+static jmethodID g_fetch_async_mid, g_fetch_progress_mid;
 static jmethodID g_fetch_mid, g_local_time_mid, g_location_mid, g_open_url_mid,
                  g_audio_mid, g_audio_query_mid, g_import_mid,
                  g_sysinfo_mid, g_proclist_mid;
@@ -576,6 +577,43 @@ static uint64_t fs_linux_run(uint64_t a0) {
     rq->out_len = olen; rq->code = (uint64_t)code;
     return (uint64_t)code;
 }
+// SYS 57: start async download to /disk/<dest> (progress via SYS 58).
+static uint64_t fs_fetch_async(const char *url, const char *dest) {
+    if (strncmp(dest, "/disk/", 6)) return ERROR;
+    const char *rel = dest + 6;
+    if (!safe_rel(rel)) return ERROR;
+    char p[512]; disk_path(rel, p, sizeof p);
+    if (!g_bridge || !g_fetch_async_mid) return ERROR;
+    int attached = 0; JNIEnv *env = gui_env(&attached);
+    if (!env) return ERROR;
+    jstring ju = (*env)->NewStringUTF(env, url);
+    jstring jd = (*env)->NewStringUTF(env, p);
+    if (!(*env)->ExceptionCheck(env))
+        (*env)->CallStaticLongMethod(env, g_bridge, g_fetch_async_mid, ju, jd);
+    if (ju) (*env)->DeleteLocalRef(env, ju);
+    if (jd) (*env)->DeleteLocalRef(env, jd);
+    gui_done(env, attached);
+    return 0;
+}
+// SYS 58: write [done,total,state] into u64[3] at a0.
+static uint64_t fs_fetch_progress(uint64_t a0) {
+    if (!g_bridge || !g_fetch_progress_mid) return ERROR;
+    int attached = 0; JNIEnv *env = gui_env(&attached);
+    if (!env) return ERROR;
+    uint64_t *o = (uint64_t *)a0;
+    jobject arr = (*env)->CallStaticObjectMethod(env, g_bridge, g_fetch_progress_mid);
+    if (arr && !(*env)->ExceptionCheck(env)) {
+        jlong *v = (*env)->GetLongArrayElements(env, (jlongArray)arr, NULL);
+        if (v) {
+            o[0] = (uint64_t)v[0]; o[1] = (uint64_t)v[1]; o[2] = (uint64_t)v[2];
+            (*env)->ReleaseLongArrayElements(env, (jlongArray)arr, v, JNI_ABORT);
+        }
+        (*env)->DeleteLocalRef(env, arr);
+    }
+    gui_done(env, attached);
+    return 0;
+}
+
 // SYS_RUN_PATH: execute an absolute /disk/... program via the guest loader.
 // argv = [abspath, arg] (arg omitted when empty); same sysroot env as
 // SYS_LINUX_RUN. Returns the guest exit code, ERROR when spawn fails.
@@ -1032,6 +1070,8 @@ uint64_t kimi_host_syscall(uint64_t n, uint64_t a0, uint64_t a1, uint64_t a2, ui
     case 40: { char target[256]; str_arg(a0, a1, target, sizeof target); str_arg(a2, a3, path, sizeof path); return fs_symlink(target, path); }
     case 41: return fs_linux_run(a0);
     case 42: { char url[512]; str_arg(a0, a1, url, sizeof url); str_arg(a2, a3, path, sizeof path); return fs_fetch_url(url, path); }
+    case 57: { char url[512]; str_arg(a0, a1, url, sizeof url); str_arg(a2, a3, path, sizeof path); return fs_fetch_async(url, path); }
+    case 58: return fs_fetch_progress(a0);
     case 43: return call_longs(g_local_time_mid, (uint64_t *)a0, 9); // SYS_LOCAL_TIME
     case 44: return call_longs(g_location_mid, (uint64_t *)a0, 4);   // SYS_LOCATION
     case 45: { char url[512]; str_arg(a0, a1, url, sizeof url); return call_str_long(g_open_url_mid, url); } // SYS_OPEN_URL
@@ -1185,6 +1225,8 @@ Java_com_kimios_libos_KimiBridge_nativeInit(JNIEnv *env, jclass cls, jstring fil
         if (!local) { if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env); local = cls; }
         g_bridge = (jclass)(*env)->NewGlobalRef(env, local);
         g_fetch_mid       = (*env)->GetStaticMethodID(env, g_bridge, "nativeFetchUrl",  "(Ljava/lang/String;Ljava/lang/String;)J");
+        g_fetch_async_mid = (*env)->GetStaticMethodID(env, g_bridge, "nativeFetchAsync","(Ljava/lang/String;Ljava/lang/String;)J");
+        g_fetch_progress_mid = (*env)->GetStaticMethodID(env, g_bridge, "fetchProgress", "()[J");
         g_local_time_mid  = (*env)->GetStaticMethodID(env, g_bridge, "nativeLocalTime", "()[J");
         g_location_mid    = (*env)->GetStaticMethodID(env, g_bridge, "nativeLocation",   "()[J");
         g_open_url_mid    = (*env)->GetStaticMethodID(env, g_bridge, "nativeOpenUrl",    "(Ljava/lang/String;)J");
