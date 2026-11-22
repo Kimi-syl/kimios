@@ -1775,11 +1775,12 @@ fn oc_key(apps: &mut Apps, code: u16, shift: bool) -> bool {
     true
 }
 
-fn oc_tap(apps: &mut Apps, point: (i64, i64)) {
+fn oc_tap(screen: &Screen, apps: &mut Apps, point: (i64, i64)) {
     if point.1 >= 150 && point.1 <= 186 {
         if point.0 >= 20 && point.0 < 140 {
             let oc = &mut apps.oc;
             if !oc.installed {
+                busy_overlay(screen, "Installing OpenCode (large)...");
                 oc.install();
             } else if oc.started {
                 oc.stop_server();
@@ -1825,6 +1826,25 @@ fn draw_oc(screen: &Screen, oc: &crate::opencode::Oc, osk: bool) {
         "Tap Install to download OpenCode (~200MB)"
     };
     crate::chat::draw_body(screen, &oc.chat, 196, max_y, osk, hint);
+}
+
+/// Modal busy screen shown while a blocking install runs (the guest userland
+/// has no threads to animate a live bar, so this presents a clear progress
+/// indicator before the blocking work starts).
+pub fn busy_overlay(screen: &Screen, label: &str) {
+    let width = screen.width();
+    let height = screen.height();
+    screen.fill(0, 93, width, height - 93, BLACK());
+    screen.text_centered(width / 2, 300, label, 2, TEXT());
+    let bar_w = 320i64;
+    let bx = (width - bar_w) / 2;
+    let by = 384i64;
+    screen.round_rect(bx, by, bar_w, 18, 9, SURFACE_HI());
+    screen.round_rect(bx, by, bar_w * 2 / 3, 18, 9, RED());
+    screen.text_centered(width / 2, by + 34, "working... please wait", 1, MUTED());
+    if let Some(d) = screen.dirty_rect() {
+        k::fb_present(d[0] as u64, d[1] as u64, d[2] as u64, d[3] as u64);
+    }
 }
 
 impl Files {
@@ -3035,7 +3055,7 @@ pub fn tap(screen: &Screen, apps: &mut Apps, app: AppKind, point: (i64, i64), os
         AppKind::Monitor => monitor_tap(apps, point),
         AppKind::Plugins => plugins_tap(screen, apps, point),
         AppKind::AiStudio => ai_tap(apps, point),
-        AppKind::OpenCode => oc_tap(apps, point),
+        AppKind::OpenCode => oc_tap(screen, apps, point),
         AppKind::Terminal => {
             if apps.terminal.tui && point.1 >= 416 && point.1 <= 448 && point.0 >= 12 && point.0 < 460 {
                 let idx = ((point.0 - 12) / 64).min(6) as usize;
@@ -5421,6 +5441,7 @@ fn plugins_tap(screen: &Screen, apps: &mut Apps, point: (i64, i64)) {
         if point.1 >= PLG_LIST_Y && point.0 >= 20 && point.0 < 460 {
             let row = ((point.1 - PLG_LIST_Y) / PLG_ROW_H) as usize;
             if row < PLUGIN_ROWS && row < plugins.import_count {
+                busy_overlay(screen, "Installing plugin...");
                 plugins.install_import(row);
             }
         }
@@ -5998,7 +6019,7 @@ impl Market {
                     self.append_out_str("> install alpine package: ");
                     self.append_out_str(name);
                     self.append_out_str("\n");
-                    Self::show_progress(screen, "Installing from Alpine...");
+                    busy_overlay(screen, "Installing from Alpine...");
                     let ok = k::kimport::import_alpine(name);
                     if ok {
                         self.append_out_str("imported -> plugin ");
@@ -6025,7 +6046,7 @@ impl Market {
                     self.append_out_str("> npm install ");
                     self.append_out_str(pkg);
                     self.append_out_str("\n");
-                    Self::show_progress(screen, "npm install (downloading)...");
+                    busy_overlay(screen, "npm install (downloading)...");
                     let mut arg = [0u8; 220];
                     let mut an = 0usize;
                     // The guest (node/npm) uses REAL Android paths, not the

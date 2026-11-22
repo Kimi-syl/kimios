@@ -80,8 +80,8 @@ public final class KimiBridge {
             java.net.HttpURLConnection c =
                     (java.net.HttpURLConnection) new java.net.URL(url).openConnection();
             c.setInstanceFollowRedirects(true);
-            c.setConnectTimeout(15000);
-            c.setReadTimeout(20000);
+            c.setConnectTimeout(30000);
+            c.setReadTimeout(60000);
             c.setRequestProperty("User-Agent", "KimiOS-libos");
             int code = c.getResponseCode();
             if (code != 200) { c.disconnect(); return -1; }

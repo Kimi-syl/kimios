@@ -1826,6 +1826,7 @@ fn tapped(screen: &Screen, ui: &mut Ui, point: (i64, i64), clock: [u64; 7]) {
                         render(screen, ui, clock);
                     } else if !folder_panel_hit(screen, point) {
                         ui.folder_view = None;
+                        ui.paint_bg = true;
                         render(screen, ui, clock);
                     }
                 }
@@ -1841,6 +1842,7 @@ fn tapped(screen: &Screen, ui: &mut Ui, point: (i64, i64), clock: [u64; 7]) {
                     render(screen, ui, clock);
                 } else if !folder_panel_hit(screen, point) {
                     ui.folder_view = None;
+                    ui.paint_bg = true;
                     render(screen, ui, clock);
                 }
                 return;

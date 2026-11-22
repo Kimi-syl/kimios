@@ -62,7 +62,7 @@ pub fn build_session_req(password: &str, out: &mut [u8]) -> usize {
     let body = b"{\"title\":\"kimi\"}";
     let mut n = 0usize;
     append(out, &mut n, b"POST /api/session HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nConnection: close\r\n");
-    auth_header(out, &mut n, password);
+    if !password.is_empty() { auth_header(out, &mut n, password); }
     let mut cl = [0u8; 24];
     let mut cln = 0usize;
     append(&mut cl, &mut cln, b"Content-Length: ");
@@ -85,7 +85,7 @@ pub fn build_prompt_req(password: &str, sid: &str, text: &str, out: &mut [u8]) -
     append(out, &mut n, b"POST /api/session/");
     append(out, &mut n, sid.as_bytes());
     append(out, &mut n, b"/prompt HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nConnection: close\r\n");
-    auth_header(out, &mut n, password);
+    if !password.is_empty() { auth_header(out, &mut n, password); }
     let mut cl = [0u8; 24];
     let mut cln = 0usize;
     append(&mut cl, &mut cln, b"Content-Length: ");
@@ -102,7 +102,7 @@ pub fn build_messages_req(password: &str, sid: &str, out: &mut [u8]) -> usize {
     append(out, &mut n, b"GET /api/session/");
     append(out, &mut n, sid.as_bytes());
     append(out, &mut n, b"/message HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n");
-    auth_header(out, &mut n, password);
+    if !password.is_empty() { auth_header(out, &mut n, password); }
     append(out, &mut n, b"\r\n");
     n
 }
@@ -330,6 +330,11 @@ pub fn parse_messages(data: &[u8], chat: &mut Chat) {
     }
 }
 
+fn contains(hay: &[u8], needle: &[u8]) -> bool {
+    if needle.is_empty() || needle.len() > hay.len() { return false; }
+    hay.windows(needle.len()).any(|w| w == needle)
+}
+
 fn find_from(data: &[u8], pat: &[u8], from: usize) -> Option<usize> {
     if from >= data.len() || pat.len() > data.len() { return None; }
     let mut i = from;
@@ -425,6 +430,7 @@ pub struct Oc {
     pub status_len: usize,
     pub pending: bool,
     pub last_poll: u64,
+    pub ready: bool,
 }
 
 impl Oc {
@@ -444,6 +450,7 @@ impl Oc {
             status_len: 0,
             pending: false,
             last_poll: 0,
+            ready: false,
         }
     }
 
@@ -465,9 +472,26 @@ impl Oc {
     /// the sysroot's usr/bin (blocking; large). Returns installed.
     pub fn install(&mut self) -> bool {
         let _ = k::mkdir("/disk/opencode");
+        let _ = k::mkdir("/disk/alpine/root/usr/bin");
         self.set_status("Downloading OpenCode (large)...");
         if k::fetch_url(OC_URL, "/disk/opencode/oc.tar.gz").is_none() {
             self.set_status("Download failed (network?)");
+            return false;
+        }
+        // Validate: gzip magic + plausible size (compressed ~78 MB).
+        let mut ok = false;
+        if let Some((_, size)) = k::stat("/disk/opencode/oc.tar.gz") {
+            if size > 40_000_000 {
+                if let Some(h) = k::open("/disk/opencode/oc.tar.gz") {
+                    let mut m = [0u8; 2];
+                    let n = k::read_file(h, 0, &mut m);
+                    k::close(h);
+                    ok = n == 2 && m[0] == 0x1f && m[1] == 0x8b;
+                }
+            }
+        }
+        if !ok {
+            self.set_status("Download incomplete - retry");
             return false;
         }
         self.set_status("Extracting...");
@@ -509,6 +533,7 @@ impl Oc {
                 self.started = true;
                 self.pw_len = 0;
                 self.logscan = 0;
+                self.ready = false;
                 self.set_status("Starting server...");
             }
             None => self.set_status("opencode not runnable yet"),
@@ -541,6 +566,13 @@ impl Oc {
             }
             changed = true;
             if n < tmp.len() { break; }
+        }
+        // Detect readiness: either a printed password (secured) or "listening"/"unsecured".
+        {
+            let buf = &self.logbuf[..self.logscan];
+            if contains(buf, b"listening on") || contains(buf, b"unsecured") || self.pw_len > 0 {
+                self.ready = true;
+            }
         }
         // scan for "server password "
         if self.pw_len == 0 {
@@ -601,7 +633,7 @@ impl Oc {
 
     /// Send a prompt (creating the session first). Pushes the user msg locally.
     pub fn send(&mut self) {
-        if self.server_slot.is_none() || self.pw_len == 0 {
+        if self.server_slot.is_none() || !self.ready {
             self.set_status("Start the server first");
             return;
         }
@@ -633,7 +665,7 @@ impl Oc {
 
     /// Poll the session messages and rebuild the chat. Returns true on change.
     pub fn poll(&mut self) -> bool {
-        if !self.pending || self.session_len == 0 || self.pw_len == 0 {
+        if !self.pending || self.session_len == 0 {
             return false;
         }
         let pw = self.pw_str();
