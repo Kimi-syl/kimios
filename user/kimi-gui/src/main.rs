@@ -1546,10 +1546,6 @@ fn handle(screen: &Screen, ui: &mut Ui, event: k::InputEvent, clock: [u64; 7]) -
                         return false;
                     }
                 }
-                // Instant press feedback: draw just the touch ring over the
-                // existing frame and present only its small bounding box,
-                // instead of redrawing the whole scene (keeps clicks snappy).
-                press_feedback(screen, ui);
                 false
             }
         }
@@ -1739,16 +1735,6 @@ fn browser_drag_move(screen: &Screen, ui: &mut Ui) {
     }
     let point = app_point(screen, ui.touch);
     apps::browser_touch_move(&mut ui.apps, point);
-}
-
-fn press_feedback(screen: &Screen, ui: &Ui) {
-    if let Some(point) = ui.press {
-        screen.reset_dirty();
-        screen.ring(point.0, point.1, 18, 3, 0x00a0_a8b8);
-        screen.circle(point.0, point.1, 3, TEXT());
-        istamp(k::IBOX_DRAWN, k::cntpct());
-        present_dirty(screen);
-    }
 }
 
 fn tapped(screen: &Screen, ui: &mut Ui, point: (i64, i64), clock: [u64; 7]) {
@@ -1952,6 +1938,7 @@ fn osk_key(screen: &Screen, ui: &mut Ui, app: AppKind, key: keyboard::Key, clock
             ui.osk = false;
             ui.shift = false;
             ui.symbols = false;
+            ui.paint_bg = true;
             901
         }
         keyboard::Key::Shift => {
@@ -1992,6 +1979,7 @@ fn osk_key_home(screen: &Screen, ui: &mut Ui, key: keyboard::Key, clock: [u64; 7
             ui.osk = false;
             ui.shift = false;
             ui.symbols = false;
+            ui.paint_bg = true;
         }
         keyboard::Key::Shift => {
             ui.shift = !ui.shift;
@@ -2310,10 +2298,6 @@ fn render(screen: &Screen, ui: &mut Ui, clock: [u64; 7]) {
         draw_shade(screen, ui, clock, 0);
     } else {
         draw_status_bar(screen, clock, ui);
-    }
-    if let Some(point) = ui.press.filter(|_| ui.drag.is_none()) {
-        screen.ring(point.0, point.1, 18, 3, 0x00a0_a8b8);
-        screen.circle(point.0, point.1, 3, TEXT());
     }
     ui.paint_bg = false;
     present_dirty(screen);
