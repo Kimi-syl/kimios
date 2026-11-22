@@ -545,7 +545,7 @@ impl Oc {
         let _ = k::mkdir("/disk/home");
         let _ = k::mkdir("/disk/home/.config");
         let _ = k::mkdir("/disk/home/.config/opencode");
-        let cfg: &[u8] = b"{\"$schema\":\"https://opencode.ai/config.json\",\"providers\":{\"local\":{\"name\":\"Local\",\"package\":\"@opencode/ai/providers/openai-compatible\",\"settings\":{\"baseURL\":\"http://127.0.0.1:8080/v1\",\"apiKey\":\"x\"},\"models\":{\"local\":{\"modelID\":\"local\",\"name\":\"Local llama-server\"}}}}}";
+        let cfg: &[u8] = b"{\"$schema\":\"https://opencode.ai/config.json\",\"providers\":{\"local\":{\"name\":\"Local\",\"package\":\"@ai-sdk/openai-compatible\",\"settings\":{\"baseURL\":\"http://127.0.0.1:8080/v1\",\"apiKey\":\"x\"},\"models\":{\"local\":{\"modelID\":\"local\",\"name\":\"Local llama-server\"}}}}}";
         if let Some(h) = k::create("/disk/home/.config/opencode/opencode.json") {
             let _ = k::write_file(h, 0, cfg);
             k::close(h);
