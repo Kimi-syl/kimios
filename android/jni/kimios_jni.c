@@ -877,23 +877,31 @@ static uint64_t proc_spawn(uint64_t a1) {
     envp[e++] = "TERM=xterm-256color";
     envp[e++] = "PS1=kimios$ ";
     envp[e] = NULL;
-    int rows = rq->rows ? (int)rq->rows : 24;
-    int cols = rq->cols ? (int)rq->cols : 80;
+    // rows>0 => interactive: give the guest a real PTY (isatty, prompt, echo,
+    // job control, full-screen TUI). rows==0 => headless programs (servers):
+    // use plain pipes (the PTY path tripped the emulator's seccomp for some
+    // guests; pipes are the proven path).
+    int rows = (int)rq->rows;
+    int cols = (int)rq->cols;
+    int want_pty = rows > 0;
+    if (cols <= 0) cols = 100;
     pthread_mutex_lock(&proc_lock);
     int slot = -1;
     for (int i = 0; i < PROC_MAX; i++) if (!procs[i].used) { slot = i; break; }
     if (slot < 0) { pthread_mutex_unlock(&proc_lock); return ERROR; }
-    // Prefer a real PTY (interactive shell: isatty, prompt, echo, job control,
-    // full-screen TUI). Fall back to pipes if the PTY path fails.
-    int master = -1;
-    pid_t pid = kimi_guest_spawn_pty(exe, sysroot, argv, envp, rows, cols, &master);
-    int in = -1, of = -1;
-    int is_pty = 0;
-    if (pid >= 0 && master >= 0) {
-        is_pty = 1;
-        int fl = fcntl(master, F_GETFL, 0);
-        if (fl >= 0) fcntl(master, F_SETFL, fl | O_NONBLOCK);
-    } else {
+    int master = -1, in = -1, of = -1, is_pty = 0;
+    pid_t pid = -1;
+    if (want_pty) {
+        pid = kimi_guest_spawn_pty(exe, sysroot, argv, envp, rows, cols, &master);
+        if (pid >= 0 && master >= 0) {
+            is_pty = 1;
+            int fl = fcntl(master, F_GETFL, 0);
+            if (fl >= 0) fcntl(master, F_SETFL, fl | O_NONBLOCK);
+        } else {
+            pid = -1;
+        }
+    }
+    if (!is_pty) {
         pid = kimi_guest_spawn(exe, sysroot, argv, envp, &in, &of);
         if (pid < 0 || in < 0 || of < 0) { pthread_mutex_unlock(&proc_lock); return ERROR; }
         int fl = fcntl(of, F_GETFL, 0);

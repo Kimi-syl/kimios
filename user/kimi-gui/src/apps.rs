@@ -1665,7 +1665,7 @@ fn ai_toggle_server(apps: &mut Apps) {
     push_str(&mut arg, &mut an, b"-m ../../models/");
     push_str(&mut arg, &mut an, &apps.ai.model[..apps.ai.model_len]);
     push_str(&mut arg, &mut an, b" --host 127.0.0.1 --port 8080 -c 2048 -t 4 --mmap -np 1");
-    match k::proc_spawn("llama-server", slice_str(&arg[..an]), 24, 80) {
+    match k::proc_spawn("llama-server", slice_str(&arg[..an]), 0, 0) {
         Some(slot) => {
             apps.ai.server_slot = Some(slot);
             apps.ai.server_started = true;

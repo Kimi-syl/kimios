@@ -478,6 +478,14 @@ impl Oc {
             "tar xzf ../../opencode/oc.tar.gz -C ../../alpine/root/usr/bin",
             &mut sink,
         );
+        // The engine is a normal dynamic musl ELF but needs libstdc++/libgcc;
+        // resolve+install them (with their deps) from the Alpine index so they
+        // are guaranteed present regardless of what else is installed.
+        self.set_status("Installing runtime libs...");
+        let _ = k::alpine::update("");
+        let _ = k::alpine::install("libstdc++");
+        let _ = k::alpine::install("libgcc");
+        self.set_status("Finishing...");
         self.refresh_installed();
         if self.installed {
             self.set_status("Installed - tap Start");
@@ -495,7 +503,7 @@ impl Oc {
                 return;
             }
         }
-        match k::proc_spawn("opencode", "serve --port 4199", 24, 100) {
+        match k::proc_spawn("opencode", "serve --port 4199", 0, 0) {
             Some(slot) => {
                 self.server_slot = Some(slot);
                 self.started = true;
