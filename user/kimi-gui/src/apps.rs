@@ -4363,6 +4363,23 @@ fn term_bg(idx: u16) -> u32 {
     if idx == crate::vt::DEFAULT_BG { BLACK() } else { crate::vt::palette(idx) }
 }
 
+/// Map a Unicode codepoint to an ASCII glyph the mono font has. Box-drawing /
+/// blocks get readable approximations so TUI output isn't a wall of '?'.
+fn cell_glyph(cp: u32) -> u8 {
+    match cp {
+        32..=126 => cp as u8,
+        0x2500 | 0x2501 | 0x2550 => b'-',
+        0x2502 | 0x2503 | 0x2551 => b'|',
+        0x250c..=0x254b | 0x2552..=0x256c => b'+',
+        0x2580..=0x259f => b'#',
+        0x2022 | 0x25cf | 0x25aa => b'*',
+        0x2190..=0x2193 => b'-',
+        0x2713 | 0x2714 => b'v',
+        0x2717 | 0x2718 => b'x',
+        _ => b'?',
+    }
+}
+
 fn draw_terminal(screen: &Screen, terminal: &Terminal, osk: bool) {
     let width = screen.width();
     screen.fill(0, 93, width, screen.height() - 93, BLACK());
@@ -4383,7 +4400,7 @@ fn draw_terminal(screen: &Screen, terminal: &Terminal, osk: bool) {
                 e += 1;
             }
             let (mut fg, mut bg) = (term_fg(c.fg, c.flags), term_bg(c.bg));
-            if c.flags & 2 != 0 {
+            if c.flags & crate::vt::F_REVERSE != 0 {
                 core::mem::swap(&mut fg, &mut bg);
             }
             let px = TERM_X0 + x as i64 * cw;
@@ -4395,10 +4412,9 @@ fn draw_terminal(screen: &Screen, terminal: &Terminal, osk: bool) {
             let mut tn = 0usize;
             let mut any = false;
             for i in x..e {
-                let b = vt.cells[row][i].ch;
-                let printable = (32..=126).contains(&b);
-                txt[tn] = if printable { b } else { b' ' };
-                if printable && b != b' ' {
+                let g = cell_glyph(vt.cells[row][i].ch);
+                txt[tn] = g;
+                if g != b' ' {
                     any = true;
                 }
                 tn += 1;
@@ -6890,7 +6906,7 @@ pub fn test_vt_render(script: &str, out: &mut [u8]) -> u64 {
     for r in 0..crate::vt::ROWS {
         for c in 0..crate::vt::COLS {
             let ch = vt.cells[r][c].ch;
-            let b = if (32..=126).contains(&ch) { ch } else { b' ' };
+            let b = if (32..=126).contains(&ch) { ch as u8 } else { b' ' };
             if n < out.len() {
                 out[n] = b;
                 n += 1;
