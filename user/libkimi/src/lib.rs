@@ -629,6 +629,22 @@ pub fn fetch_progress(out: &mut [u64; 3]) -> bool {
     syscall3(SYS_FETCH_PROGRESS, out.as_mut_ptr() as u64, 0, 0) != ERROR
 }
 
+/// Authenticated HTTPS GET of `url` -> `/disk/...` dest with a Bearer token.
+/// Returns bytes written or None. Host-only (Java does the TLS + header).
+pub fn fetch_auth(url: &str, dest: &str, key: &str) -> Option<u64> {
+    #[repr(C)]
+    struct Req {
+        up: u64, ul: u64, dp: u64, dl: u64, kp: u64, kl: u64,
+    }
+    let req = Req {
+        up: url.as_ptr() as u64, ul: url.len() as u64,
+        dp: dest.as_ptr() as u64, dl: dest.len() as u64,
+        kp: key.as_ptr() as u64, kl: key.len() as u64,
+    };
+    let r = syscall3(SYS_FETCH_AUTH, &req as *const _ as u64, 0, 0);
+    if r == ERROR { None } else { Some(r) }
+}
+
 /// Local device time: `[epoch, year, month, day, hour, minute, second,
 /// weekday (0=Sunday), tz_offset_minutes]`. Host-only (None on bare metal).
 pub fn local_time() -> Option<[u64; 9]> {
@@ -717,6 +733,7 @@ pub const SYS_PLUGIN_RUN_OUT: u64 = 55;
 pub const SYS_PROC: u64 = 56;
 pub const SYS_FETCH_ASYNC: u64 = 57;
 pub const SYS_FETCH_PROGRESS: u64 = 58;
+pub const SYS_FETCH_AUTH: u64 = 59;
 
 /// `[cpu_pct_x10, ram_total_kb, ram_used_kb, storage_total_kb, storage_used_kb,
 /// uptime_s, proc_count, battery_pct, battery_charging, reserved]`.

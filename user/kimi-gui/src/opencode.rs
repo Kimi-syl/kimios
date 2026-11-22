@@ -441,6 +441,13 @@ pub struct Oc {
     pub dltotal: u64,
     pub auto_fetched: bool,
     pub has_model: bool,
+    pub mode: u8,
+    pub base: [u8; 128],
+    pub base_len: usize,
+    pub key: [u8; 160],
+    pub key_len: usize,
+    pub edit: u8,
+    pub setup: bool,
 }
 
 impl Oc {
@@ -471,6 +478,13 @@ impl Oc {
             dltotal: 0,
             auto_fetched: false,
             has_model: false,
+            mode: MODE_FREE,
+            base: [0; 128],
+            base_len: 0,
+            key: [0; 160],
+            key_len: 0,
+            edit: 0,
+            setup: false,
         }
     }
 
@@ -539,19 +553,6 @@ impl Oc {
         self.installed
     }
 
-    /// Write an opencode config so providers initialize (local llama-server
-    /// provider; the built-in free provider also appears) into the guest HOME.
-    fn write_config() {
-        let _ = k::mkdir("/disk/home");
-        let _ = k::mkdir("/disk/home/.config");
-        let _ = k::mkdir("/disk/home/.config/opencode");
-        let cfg: &[u8] = b"{\"$schema\":\"https://opencode.ai/config.json\",\"providers\":{\"local\":{\"name\":\"Local\",\"package\":\"@ai-sdk/openai-compatible\",\"settings\":{\"baseURL\":\"http://127.0.0.1:8080/v1\",\"apiKey\":\"x\"},\"models\":{\"local\":{\"modelID\":\"local\",\"name\":\"Local llama-server\"}}}}}";
-        if let Some(h) = k::create("/disk/home/.config/opencode/opencode.json") {
-            let _ = k::write_file(h, 0, cfg);
-            k::close(h);
-        }
-    }
-
     pub fn start_server(&mut self) {
         if !self.installed {
             self.refresh_installed();
@@ -560,7 +561,7 @@ impl Oc {
                 return;
             }
         }
-        Self::write_config();
+        self.write_config();
         match k::proc_spawn("opencode", "serve --port 4199", 0, 0) {
             Some(slot) => {
                 self.server_slot = Some(slot);
@@ -968,4 +969,150 @@ pub fn test_models(password: &str, out: &mut [u8]) -> u64 {
         append(out, &mut o, b"\n");
     }
     o as u64
+}
+
+// ===================== mode / cloud config =================================
+// Modes: 0 = free (opencode built-in online models), 1 = local (llama-server),
+// 2 = cloud (user baseURL + api key). We rewrite the config file and restart.
+
+pub const MODE_FREE: u8 = 0;
+pub const MODE_LOCAL: u8 = 1;
+pub const MODE_CLOUD: u8 = 2;
+
+impl Oc {
+    fn config_bytes(&self) -> ([u8; 4096], usize) {
+        let mut b = [0u8; 4096];
+        let mut n = 0usize;
+        append(&mut b, &mut n, b"{\"$schema\":\"https://opencode.ai/config.json\"");
+        match self.mode {
+            MODE_LOCAL => {
+                append(&mut b, &mut n, b",\"model\":\"local/local\",\"provider\":{\"local\":{\"npm\":\"@ai-sdk/openai-compatible\",\"name\":\"Local\",\"options\":{\"baseURL\":\"http://127.0.0.1:8080/v1\",\"apiKey\":\"x\"},\"models\":{\"local\":{\"name\":\"Local llama-server\"}}}}");
+            }
+            MODE_CLOUD => {
+                append(&mut b, &mut n, b",\"provider\":{\"cloud\":{\"npm\":\"@ai-sdk/openai-compatible\",\"name\":\"Cloud\",\"options\":{\"baseURL\":\"");
+                json_escape(&mut b, &mut n, &self.base[..self.base_len]);
+                append(&mut b, &mut n, b"\",\"apiKey\":\"");
+                json_escape(&mut b, &mut n, &self.key[..self.key_len]);
+                append(&mut b, &mut n, b"\"},\"models\":{");
+                if self.model_count > 0 {
+                    for i in 0..self.model_count {
+                        if i > 0 { append(&mut b, &mut n, b","); }
+                        append(&mut b, &mut n, b"\"");
+                        let id = self.models[i].model_str();
+                        json_escape(&mut b, &mut n, id.as_bytes());
+                        append(&mut b, &mut n, b"\":{\"name\":\"");
+                        json_escape(&mut b, &mut n, id.as_bytes());
+                        append(&mut b, &mut n, b"\"}");
+                    }
+                    // default to first
+                    append(&mut b, &mut n, b"}},\"model\":\"cloud/");
+                    json_escape(&mut b, &mut n, self.models[0].model_str().as_bytes());
+                    append(&mut b, &mut n, b"\"}");
+                } else {
+                    // no models fetched: still save provider (user can retry)
+                    append(&mut b, &mut n, b"}}}");
+                }
+            }
+            _ => {} // free: bare config
+        }
+        append(&mut b, &mut n, b"}");
+        (b, n)
+    }
+
+    pub fn write_config(&self) {
+        let _ = k::mkdir("/disk/home");
+        let _ = k::mkdir("/disk/home/.config");
+        let _ = k::mkdir("/disk/home/.config/opencode");
+        let (b, n) = self.config_bytes();
+        if let Some(h) = k::create("/disk/home/.config/opencode/opencode.json") {
+            let _ = k::write_file(h, 0, &b[..n]);
+            k::close(h);
+        }
+    }
+
+    pub fn set_mode(&mut self, mode: u8) {
+        self.mode = mode;
+        self.write_config();
+        self.restart();
+    }
+
+    fn restart(&mut self) {
+        self.stop_server();
+        self.model_count = 0;
+        self.sel_model = 0;
+        self.has_model = false;
+        self.auto_fetched = false;
+        self.start_server();
+    }
+
+    /// Fetch the model list from a cloud baseURL (HTTPS + Bearer) and cache it.
+    pub fn fetch_cloud(&mut self) {
+        if self.base_len == 0 {
+            self.set_status("Enter base URL first");
+            return;
+        }
+        let bn = self.base_len.min(128);
+        let mut baseb = [0u8; 128];
+        baseb[..bn].copy_from_slice(&self.base[..bn]);
+        let kn = self.key_len.min(160);
+        let mut keyb = [0u8; 160];
+        keyb[..kn].copy_from_slice(&self.key[..kn]);
+        let base = core::str::from_utf8(&baseb[..bn]).unwrap_or("");
+        let key = core::str::from_utf8(&keyb[..kn]).unwrap_or("");
+        let mut url = [0u8; 256];
+        let mut un = 0usize;
+        append(&mut url, &mut un, base.as_bytes());
+        // strip trailing '/'
+        while un > 0 && url[un - 1] == b'/' { un -= 1; }
+        append(&mut url, &mut un, b"/models");
+        self.set_status("Fetching models...");
+        if k::fetch_auth(core::str::from_utf8(&url[..un]).unwrap_or(""), "/disk/ocm.json", key).is_none() {
+            self.set_status("Fetch failed (url/key?)");
+            return;
+        }
+        let mut body = [0u8; 32768];
+        let mut bl = 0usize;
+        if let Some(h) = k::open("/disk/ocm.json") {
+            bl = k::read_file(h, 0, &mut body);
+            k::close(h);
+        }
+        let n = parse_openai_models(&body[..bl], &mut self.models);
+        self.model_count = n;
+        if n == 0 {
+            self.set_status("No models at that URL");
+        } else {
+            self.set_status("Fetched models - tap Save & use");
+        }
+    }
+
+    pub fn save_cloud(&mut self) {
+        self.mode = MODE_CLOUD;
+        self.write_config();
+        self.restart();
+    }
+}
+
+/// Parse OpenAI /models style: data[].id -> ModelEntry(provider "cloud").
+pub fn parse_openai_models(data: &[u8], out: &mut [ModelEntry]) -> usize {
+    let Some(dp) = find_from(data, b"\"data\":[", 0) else { return 0 };
+    let arr = dp + 7;
+    let end = match_bracket(data, arr);
+    let mut count = 0usize;
+    let mut i = arr + 1;
+    while i < end && count < out.len() {
+        while i < end && data[i] != b'{' { i += 1; }
+        if i >= end { break; }
+        let oe = match_bracket(data, i);
+        let obj = &data[i..oe.min(end)];
+        i = oe;
+        if let Some(id) = find_str(obj, b"id") {
+            let mut e = EMPTY_MODEL;
+            e.model_len = id.len().min(40); e.model[..e.model_len].copy_from_slice(&id[..e.model_len]);
+            e.name_len = e.model_len; e.name[..e.name_len].copy_from_slice(&id[..e.model_len]);
+            let p = b"cloud"; e.provider_len = p.len(); e.provider[..p.len()].copy_from_slice(p);
+            out[count] = e;
+            count += 1;
+        }
+    }
+    count
 }

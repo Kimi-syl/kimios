@@ -98,6 +98,29 @@ public final class KimiBridge {
         }
     }
 
+    /** GET url -> dest with Authorization: Bearer <bearer>. Returns bytes or -1. */
+    public static long nativeFetchAuth(String url, String dest, String bearer) {
+        try {
+            java.io.File f = new java.io.File(dest);
+            java.io.File parent = f.getParentFile();
+            if (parent != null) parent.mkdirs();
+            java.net.HttpURLConnection c = (java.net.HttpURLConnection) new java.net.URL(url).openConnection();
+            c.setInstanceFollowRedirects(true);
+            c.setConnectTimeout(15000);
+            c.setReadTimeout(20000);
+            c.setRequestProperty("User-Agent", "KimiOS-libos");
+            if (bearer != null && bearer.length() > 0) c.setRequestProperty("Authorization", "Bearer " + bearer);
+            int code = c.getResponseCode();
+            if (code != 200) { c.disconnect(); return -1; }
+            java.io.InputStream in = c.getInputStream();
+            java.io.FileOutputStream out = new java.io.FileOutputStream(f);
+            byte[] buf = new byte[8192]; long total = 0; int n;
+            while ((n = in.read(buf)) > 0) { out.write(buf, 0, n); total += n; }
+            out.close(); in.close(); c.disconnect();
+            return total;
+        } catch (Exception e) { android.util.Log.e("KimiOS", "fetchAuth: " + e); return -1; }
+    }
+
     // ---- async download with real progress (for installers) ----
     private static volatile long dlDone, dlTotal;
     private static volatile int dlState; // 0 idle, 1 running, 2 done, 3 error

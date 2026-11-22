@@ -1777,8 +1777,34 @@ pub fn oc_frame(apps: &mut Apps) -> bool {
 }
 
 fn oc_key(apps: &mut Apps, code: u16, shift: bool) -> bool {
-    if crate::chat::key(&mut apps.oc.chat, code, shift) {
-        apps.oc.send();
+    let oc = &mut apps.oc;
+    if oc.setup {
+        if oc.edit == 0 {
+            return false;
+        }
+        match key_event(code, shift) {
+            Some((0, true)) => {
+                if oc.edit == 1 && oc.base_len > 0 { oc.base_len -= 1; }
+                else if oc.edit == 2 && oc.key_len > 0 { oc.key_len -= 1; }
+            }
+            Some((b'\n', _)) => {
+                oc.fetch_cloud();
+            }
+            Some((byte, _)) => {
+                if oc.edit == 1 && oc.base_len < oc.base.len() {
+                    oc.base[oc.base_len] = byte;
+                    oc.base_len += 1;
+                } else if oc.edit == 2 && oc.key_len < oc.key.len() {
+                    oc.key[oc.key_len] = byte;
+                    oc.key_len += 1;
+                }
+            }
+            None => return false,
+        }
+        return true;
+    }
+    if crate::chat::key(&mut oc.chat, code, shift) {
+        oc.send();
     }
     true
 }
@@ -1786,6 +1812,45 @@ fn oc_key(apps: &mut Apps, code: u16, shift: bool) -> bool {
 fn oc_tap(screen: &Screen, apps: &mut Apps, point: (i64, i64)) {
     let _ = screen;
     let oc = &mut apps.oc;
+    if oc.setup {
+        if point.1 >= 104 && point.1 <= 144 && point.0 <= 120 {
+            oc.setup = false;
+            oc.edit = 0;
+            return;
+        }
+        if point.1 >= 150 && point.1 <= 186 {
+            if point.0 >= 20 && point.0 < 140 {
+                oc.set_mode(crate::opencode::MODE_FREE);
+            } else if point.0 >= 150 && point.0 < 270 {
+                oc.set_mode(crate::opencode::MODE_LOCAL);
+            } else if point.0 >= 280 {
+                oc.mode = crate::opencode::MODE_CLOUD;
+                oc.edit = 1;
+            }
+            return;
+        }
+        if oc.mode == crate::opencode::MODE_CLOUD {
+            if point.1 >= 196 && point.1 <= 232 {
+                oc.edit = 1;
+                return;
+            }
+            if point.1 >= 240 && point.1 <= 276 {
+                oc.edit = 2;
+                return;
+            }
+            if point.1 >= 292 && point.1 <= 332 {
+                if point.0 < 240 {
+                    oc.fetch_cloud();
+                } else {
+                    oc.save_cloud();
+                    oc.setup = false;
+                    oc.edit = 0;
+                }
+                return;
+            }
+        }
+        return;
+    }
     if point.1 >= 150 && point.1 <= 186 {
         if point.0 >= 12 && point.0 < 116 {
             if !oc.installed {
@@ -1803,11 +1868,8 @@ fn oc_tap(screen: &Screen, apps: &mut Apps, point: (i64, i64)) {
                 oc.picker = true;
             }
         } else if point.0 >= 236 && point.0 < 340 {
-            oc.chat.msg_count = 0;
-            oc.chat.partial_len = 0;
-            oc.session_len = 0;
-            oc.pending = false;
-            oc.chat.set_status("New session");
+            oc.setup = true;
+            oc.edit = if oc.mode == crate::opencode::MODE_CLOUD { 1 } else { 0 };
         } else if point.0 >= 348 {
             oc.chat.msg_count = 0;
             oc.chat.partial_len = 0;
@@ -1831,6 +1893,37 @@ fn draw_oc(screen: &Screen, oc: &crate::opencode::Oc, osk: bool) {
     let width = screen.width();
     screen.fill(0, 93, width, screen.height() - 93, BLACK());
     screen.text(20, 104, "OpenCode", 2, TEXT());
+    if oc.setup {
+        button(screen, 20, 104, 100, 40, "Back", SURFACE_HI(), TEXT());
+        screen.text(140, 116, "Model setup", 1, MUTED());
+        let modes = [("Free", crate::opencode::MODE_FREE, 20i64, 120i64),
+                     ("Local", crate::opencode::MODE_LOCAL, 150, 120),
+                     ("Cloud", crate::opencode::MODE_CLOUD, 280, 176)];
+        for (label, m, x, w) in modes {
+            screen.round_rect(x, 150, w, 36, 18, if oc.mode == m { RED_DIM() } else { SURFACE_HI() });
+            screen.text_centered(x + w / 2, 160, label, 2, TEXT());
+        }
+        if oc.mode == crate::opencode::MODE_CLOUD {
+            screen.text(20, 200, "Base URL (https://.../v1)", 1, MUTED());
+            screen.round_rect(20, 216, width - 40, 32, 12, if oc.edit == 1 { SURFACE_MAX() } else { SURFACE_HI() });
+            let b = slice_str(&oc.base[..oc.base_len]);
+            let bl = b.len().min(52);
+            screen.text(28, 224, if oc.base_len > 0 { &b[..bl] } else { "tap to type" }, 1, TEXT());
+            screen.text(20, 254, "API Key", 1, MUTED());
+            screen.round_rect(20, 268, width - 40, 32, 12, if oc.edit == 2 { SURFACE_MAX() } else { SURFACE_HI() });
+            // masked key
+            let mut kbuf = [b'*'; 52];
+            let kl = oc.key_len.min(52);
+            for c in &mut kbuf[..kl] { *c = b'*'; }
+            screen.text(28, 276, if oc.key_len > 0 { slice_str(&kbuf[..kl]) } else { "tap to type" }, 1, TEXT());
+            button(screen, 20, 306, 200, 34, "Fetch models", SURFACE_HI(), TEXT());
+            button(screen, 240, 306, 200, 34, "Save & use", RED(), TEXT());
+            let st = slice_str(&oc.status[..oc.status_len]);
+            let sl = st.len().min(50);
+            screen.text(20, 350, &st[..sl], 1, GREEN());
+        }
+        return;
+    }
     // current model
     let cur = if oc.model_count > 0 && oc.sel_model < oc.model_count {
         oc.models[oc.sel_model].name_str()
@@ -1851,7 +1944,7 @@ fn draw_oc(screen: &Screen, oc: &crate::opencode::Oc, osk: bool) {
     };
     button(screen, 12, 150, 104, 36, l0, bg0, TEXT());
     button(screen, 124, 150, 104, 36, "Model", if oc.picker { RED_DIM() } else { SURFACE_HI() }, TEXT());
-    button(screen, 236, 150, 104, 36, "New", SURFACE_HI(), TEXT());
+    button(screen, 236, 150, 104, 36, "Setup", SURFACE_HI(), TEXT());
     button(screen, 348, 150, 108, 36, "Clear", SURFACE_HI(), TEXT());
 
     if oc.installing {
