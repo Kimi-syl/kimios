@@ -72,6 +72,9 @@
 #define SYS_mmap 222
 #define SYS_mprotect 226
 #define SYS_getrandom 278
+#ifndef MAP_FIXED_NOREPLACE
+#define MAP_FIXED_NOREPLACE 0x100000
+#endif
 #ifndef AT_FDCWD
 #define AT_FDCWD (-100)
 #endif
@@ -151,10 +154,23 @@ static int load_one(const char *path, uint64_t *base_out, uint64_t *entry_out,
         if (e > hi) hi = e;
     }
     if (lo == ~0ull) { k_sys(SYS_close, fd, 0, 0, 0, 0, 0); return -1; }
-    void *res = (void *)k_sys(SYS_mmap, 0, (long)(hi - lo), PROT_NONE,
-                              MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    if ((long)res < 0) { k_sys(SYS_close, fd, 0, 0, 0, 0, 0); LOGE("reserve mmap failed"); return -1; }
-    uint64_t base = (uint64_t)res - lo;
+    uint64_t base;
+    if (eh.e_type == ET_EXEC) {
+        // Non-PIE image linked at a fixed address: map it exactly there so the
+        // interpreter applies its absolute relocations correctly.
+        void *res = (void *)k_sys(SYS_mmap, (long)lo, (long)(hi - lo), PROT_NONE,
+                                  MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0);
+        if ((long)res < 0)
+            res = (void *)k_sys(SYS_mmap, (long)lo, (long)(hi - lo), PROT_NONE,
+                                MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+        if ((long)res < 0) { k_sys(SYS_close, fd, 0, 0, 0, 0, 0); LOGE("ET_EXEC reserve failed lo=%#lx", (unsigned long)lo); return -1; }
+        base = 0;
+    } else {
+        void *res = (void *)k_sys(SYS_mmap, 0, (long)(hi - lo), PROT_NONE,
+                                  MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if ((long)res < 0) { k_sys(SYS_close, fd, 0, 0, 0, 0, 0); LOGE("reserve mmap failed"); return -1; }
+        base = (uint64_t)res - lo;
+    }
 
     uint64_t phdr_va = 0;
     int found_phdr = 0;
@@ -208,7 +224,7 @@ static int load_one(const char *path, uint64_t *base_out, uint64_t *entry_out,
 }
 
 // ---------------- SysV aarch64 startup stack + auxv ----------------
-#define STACK_SZ (8u * 1024u * 1024u)
+#define STACK_SZ (16u * 1024u * 1024u)
 #define FRAME_BUF 16384
 
 static uint64_t build_stack(uint64_t stack_top, uint64_t phdr, uint64_t phent,
