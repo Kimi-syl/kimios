@@ -381,6 +381,40 @@ fn parse_dec(token: &[u8]) -> Option<usize> {
     Some(v)
 }
 
+/// One-time layout migration: the old default launcher used the dead APK
+/// installer (Apk) and the DEX demo (Dvm). Swap them in-place for the new
+/// native apps so existing saved layouts surface OpenCode + AI Studio without
+/// wiping the user's arrangement. Returns true if anything changed.
+fn migrate_layout(layout: &mut Layout) -> bool {
+    fn fix(k: AppKind) -> AppKind {
+        match k {
+            AppKind::Apk => AppKind::OpenCode,
+            AppKind::Dvm => AppKind::AiStudio,
+            other => other,
+        }
+    }
+    let mut changed = false;
+    for s in layout.grid.iter_mut().chain(layout.grid2.iter_mut()).chain(layout.dock.iter_mut()) {
+        if let Slot::App(k) = *s {
+            let n = fix(k);
+            if n as u8 as usize != k as u8 as usize {
+                *s = Slot::App(n);
+                changed = true;
+            }
+        }
+    }
+    for f in layout.folders.iter_mut() {
+        for i in 0..f.count {
+            let n = fix(f.members[i]);
+            if n as u8 as usize != f.members[i] as u8 as usize {
+                f.members[i] = n;
+                changed = true;
+            }
+        }
+    }
+    changed
+}
+
 fn load_layout() -> Layout {
     let mut layout = Layout::default();
     let Some((_, size)) = k::stat(LAUNCHER_CFG) else {
@@ -481,6 +515,9 @@ fn load_layout() -> Layout {
                 }
             }
         }
+    }
+    if migrate_layout(&mut layout) {
+        save_layout(&layout);
     }
     layout
 }
