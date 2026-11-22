@@ -13,6 +13,7 @@ mod theme;
 mod font_store;
 mod vt;
 mod ai;
+mod chat;
 
 use core::panic::PanicInfo;
 use core::sync::atomic::{AtomicU64, Ordering};
