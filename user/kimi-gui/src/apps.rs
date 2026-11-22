@@ -280,6 +280,7 @@ pub struct Terminal {
     ctrl_next: bool,
     input: [u8; 200],
     input_len: usize,
+    tui: bool,
 }
 
 const BROWSER_WIDTH: usize = 50;
@@ -1460,6 +1461,7 @@ impl Terminal {
             ctrl_next: false,
             input: [0; 200],
             input_len: 0,
+            tui: false,
         }
     }
 
@@ -1493,11 +1495,56 @@ fn terminal_start(apps: &mut Apps) {
 /// through the guest loader via the libkimi shell, which runs node/python/npm
 /// and resolves PATH - and, because the loader maps the interpreter for this
 /// exec, dynamic binaries work.
-pub fn terminal_frame(_apps: &mut Apps) -> bool {
-    false
+pub fn terminal_frame(apps: &mut Apps) -> bool {
+    let t = &mut apps.terminal;
+    if !t.tui {
+        return false;
+    }
+    let Some(slot) = t.slot else { t.tui = false; return true };
+    let mut buf = [0u8; 4096];
+    let mut changed = false;
+    for _ in 0..8 {
+        match k::proc_read(slot, &mut buf) {
+            Some(0) | None => break,
+            Some(n) => {
+                t.vt.feed(&buf[..n]);
+                changed = true;
+                if n < buf.len() { break; }
+            }
+        }
+    }
+    if t.vt.resp_len > 0 {
+        let mut resp = [0u8; 64];
+        let n = t.vt.resp_len.min(64);
+        resp[..n].copy_from_slice(&t.vt.resp[..n]);
+        t.vt.resp_len = 0;
+        let _ = k::proc_write(slot, &resp[..n]);
+    }
+    if let Some(Some(code)) = k::proc_status(slot) {
+        let _ = k::proc_close(slot);
+        t.slot = None;
+        t.tui = false;
+        let mut line = [0u8; 48];
+        let mut n = 0;
+        push_str(&mut line, &mut n, b"\r\n[exited ");
+        let mut num = [0u8; 20];
+        push_str(&mut line, &mut n, unsigned(code, &mut num).as_bytes());
+        push_str(&mut line, &mut n, b"]\r\n");
+        t.vt.feed(&line[..n]);
+        changed = true;
+    }
+    t.vt.dirty = false;
+    changed
 }
 
 /// Submit the current line: echo it, run it via the loader, render its output.
+fn is_tui_cmd(name: &str) -> bool {
+    matches!(name,
+        "top" | "htop" | "btop" | "vi" | "vim" | "nvim" | "less" | "more" | "most"
+        | "nano" | "watch" | "tmux" | "screen" | "mc" | "man" | "fzf" | "dialog"
+        | "ctop" | "ncdu" | "atop")
+}
+
 fn terminal_run(apps: &mut Apps) {
     let t = &mut apps.terminal;
     let n = t.input_len.min(t.input.len());
@@ -1519,6 +1566,29 @@ fn terminal_run(apps: &mut Apps) {
         t.note("Close with the back arrow.");
         return;
     }
+    // Split into program + args.
+    let mut split = 0usize;
+    while split < cmd.len() && !cmd.as_bytes()[split].is_ascii_whitespace() { split += 1; }
+    let (prog, rest) = cmd.split_at(split);
+    let rest = rest.trim();
+
+    // Full-screen TUI -> run under a REAL PTY so it gets a tty and can draw.
+    if is_tui_cmd(prog) {
+        t.vt.reset();
+        match k::proc_spawn(prog, rest, crate::vt::ROWS as u64, crate::vt::COLS as u64) {
+            Some(slot) => {
+                t.slot = Some(slot);
+                t.tui = true;
+                t.exited = false;
+                return;
+            }
+            None => {
+                t.note("(PTY unavailable; running without a tty)");
+            }
+        }
+    }
+
+    // Normal command: run through the guest loader.
     let mut buf = [0u8; 8192];
     k::capture_begin();
     k::shell::exec(cmd.as_bytes());
@@ -2713,7 +2783,7 @@ pub fn key_glyph(code: u16, shift: bool) -> Option<u8> {
 pub fn text_focused(apps: &Apps, app: AppKind) -> bool {
     match app {
         AppKind::Notes => apps.notes.editing.is_some(),
-        AppKind::Terminal => true,
+        AppKind::Terminal => !apps.terminal.tui,
         AppKind::AiStudio => true,
         AppKind::Browser => apps.browser.editing,
         AppKind::Files => apps.files.editor.is_some() || apps.files.prompt != 0,
@@ -2729,7 +2799,7 @@ pub fn field_hit(apps: &Apps, app: AppKind, point: (i64, i64), _osk: bool) -> bo
             apps.notes.editing.is_some()
                 && point.0 >= 20 && point.0 <= 460 && point.1 >= 160 && point.1 <= 614
         }
-        AppKind::Terminal => point.1 > 96 && point.1 < 770,
+        AppKind::Terminal => !apps.terminal.tui && point.1 > 96 && point.1 < 770,
         AppKind::AiStudio => point.1 > 420 && point.1 < 452,
         AppKind::Browser => point.0 >= 20 && point.0 < 390 && point.1 >= 104 && point.1 <= 148,
         AppKind::Files => {
@@ -2772,6 +2842,30 @@ pub fn key(apps: &mut Apps, app: AppKind, code: u16, shift: bool) -> bool {
             }
         }
         AppKind::Terminal => {
+            // TUI mode: raw keys go to the PTY (shell/app handles them).
+            if apps.terminal.tui {
+                let seq: &[u8] = match code {
+                    28 => b"\r",
+                    14 => b"\x7f",
+                    15 => b"\t",
+                    1 => b"\x1b",
+                    103 => b"\x1b[A",
+                    108 => b"\x1b[B",
+                    106 => b"\x1b[C",
+                    105 => b"\x1b[D",
+                    _ => match key_event(code, shift) {
+                        Some((0, true)) => b"\x7f",
+                        Some((b'\n', _)) => b"\r",
+                        Some((byte, _)) => {
+                            if let Some(slot) = apps.terminal.slot { let _ = k::proc_write(slot, &[byte]); }
+                            return true;
+                        }
+                        None => return false,
+                    },
+                };
+                if let Some(slot) = apps.terminal.slot { let _ = k::proc_write(slot, seq); }
+                return true;
+            }
             // Line editor: type a command, Enter executes it via the loader.
             match code {
                 28 => { terminal_run(apps); true }
@@ -2901,6 +2995,16 @@ pub fn tap(screen: &Screen, apps: &mut Apps, app: AppKind, point: (i64, i64), os
         AppKind::Monitor => monitor_tap(apps, point),
         AppKind::Plugins => plugins_tap(screen, apps, point),
         AppKind::AiStudio => ai_tap(apps, point),
+        AppKind::Terminal => {
+            if apps.terminal.tui && point.1 >= 416 && point.1 <= 448 && point.0 >= 12 && point.0 < 460 {
+                let idx = ((point.0 - 12) / 64).min(6) as usize;
+                let seq: &[u8] = match idx {
+                    0 => b"\x1b", 1 => b"\t", 2 => b"\x03",
+                    3 => b"\x1b[D", 4 => b"\x1b[A", 5 => b"\x1b[B", _ => b"\x1b[C",
+                };
+                if let Some(slot) = apps.terminal.slot { let _ = k::proc_write(slot, seq); }
+            }
+        }
         _ => {}
     }
 }
@@ -4075,8 +4179,17 @@ fn draw_terminal(screen: &Screen, terminal: &Terminal, osk: bool) {
         let cy = TERM_Y0 + vt.cy as i64 * chh;
         screen.fill(cx, cy + chh - 2, cw, 2, GREEN());
     }
-    // Input line.
     let iy = TERM_Y0 + crate::vt::ROWS as i64 * chh;
+    if terminal.tui {
+        // TUI running under the PTY: control strip instead of an input line.
+        let labels = ["ESC", "TAB", "^C", "<", "^", "v", ">"];
+        for i in 0..7 {
+            let bx = 12 + i as i64 * 64;
+            button(screen, bx, iy + 2, 60, 28, labels[i], SURFACE_HI(), TEXT());
+        }
+        return;
+    }
+    // Input line.
     screen.fill(12, iy - 2, width - 24, 1, OUTLINE());
     let mut line = [0u8; 210];
     let mut ln = 0usize;
