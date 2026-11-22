@@ -402,3 +402,269 @@ pub fn test_opencode(password: &str, prompt: &str, out: &mut [u8]) -> u64 {
     }
     n as u64
 }
+// ===================== optional OpenCode app (engine on demand) =============
+// The 219 MB engine is NOT bundled; the app downloads it into the sysroot on
+// demand (fetch_url) and extracts it with the static busybox `tar` through the
+// guest loader.
+
+pub const OC_URL: &str =
+    "https://github.com/anomalyco/opencode/releases/latest/download/opencode-linux-arm64-musl.tar.gz";
+
+pub struct Oc {
+    pub server_slot: Option<u64>,
+    pub started: bool,
+    pub installed: bool,
+    pub pw: [u8; 64],
+    pub pw_len: usize,
+    pub logscan: usize,
+    pub logbuf: [u8; 2048],
+    pub session: [u8; 48],
+    pub session_len: usize,
+    pub chat: Chat,
+    pub status: [u8; 64],
+    pub status_len: usize,
+    pub pending: bool,
+    pub last_poll: u64,
+}
+
+impl Oc {
+    pub fn new() -> Self {
+        Self {
+            server_slot: None,
+            started: false,
+            installed: false,
+            pw: [0; 64],
+            pw_len: 0,
+            logscan: 0,
+            logbuf: [0; 2048],
+            session: [0; 48],
+            session_len: 0,
+            chat: Chat::new(),
+            status: [0; 64],
+            status_len: 0,
+            pending: false,
+            last_poll: 0,
+        }
+    }
+
+    pub fn set_status(&mut self, s: &str) {
+        let b = s.as_bytes();
+        self.status_len = b.len().min(64);
+        self.status[..self.status_len].copy_from_slice(&b[..self.status_len]);
+    }
+
+    pub fn refresh_installed(&mut self) {
+        self.installed = k::stat("/disk/alpine/root/usr/bin/opencode").is_some()
+            || k::stat("/disk/alpine/root/bin/opencode").is_some();
+        if self.installed && self.status_len == 0 {
+            self.set_status("Tap Start to run opencode serve");
+        }
+    }
+
+    /// On-demand install: download the release tarball, extract the binary into
+    /// the sysroot's usr/bin (blocking; large). Returns installed.
+    pub fn install(&mut self) -> bool {
+        let _ = k::mkdir("/disk/opencode");
+        self.set_status("Downloading OpenCode (large)...");
+        if k::fetch_url(OC_URL, "/disk/opencode/oc.tar.gz").is_none() {
+            self.set_status("Download failed (network?)");
+            return false;
+        }
+        self.set_status("Extracting...");
+        let mut sink = [0u8; 256];
+        // relative to sysroot cwd: ../../opencode = <diskRoot>/opencode
+        let _ = k::linux_run(
+            "busybox",
+            "tar xzf ../../opencode/oc.tar.gz -C ../../alpine/root/usr/bin",
+            &mut sink,
+        );
+        self.refresh_installed();
+        if self.installed {
+            self.set_status("Installed - tap Start");
+        } else {
+            self.set_status("Extract failed");
+        }
+        self.installed
+    }
+
+    pub fn start_server(&mut self) {
+        if !self.installed {
+            self.refresh_installed();
+            if !self.installed {
+                self.set_status("Install OpenCode first");
+                return;
+            }
+        }
+        match k::proc_spawn("opencode", "serve --port 4199", 24, 100) {
+            Some(slot) => {
+                self.server_slot = Some(slot);
+                self.started = true;
+                self.pw_len = 0;
+                self.logscan = 0;
+                self.set_status("Starting server...");
+            }
+            None => self.set_status("opencode not runnable yet"),
+        }
+    }
+
+    pub fn stop_server(&mut self) {
+        if let Some(s) = self.server_slot {
+            let _ = k::proc_kill(s);
+            let _ = k::proc_close(s);
+        }
+        self.server_slot = None;
+        self.started = false;
+        self.set_status("Server stopped");
+    }
+
+    /// Drain the server log, extracting the auto-generated password.
+    pub fn pump_log(&mut self) -> bool {
+        let Some(slot) = self.server_slot else { return false };
+        let mut tmp = [0u8; 512];
+        let mut changed = false;
+        loop {
+            let Some(n) = k::proc_read(slot, &mut tmp) else { break };
+            if n == 0 { break; }
+            for &b in &tmp[..n] {
+                if self.logscan < self.logbuf.len() {
+                    self.logbuf[self.logscan] = b;
+                    self.logscan += 1;
+                }
+            }
+            changed = true;
+            if n < tmp.len() { break; }
+        }
+        // scan for "server password "
+        if self.pw_len == 0 {
+            let key = b"server password ";
+            let buf = &self.logbuf[..self.logscan];
+            let mut i = 0;
+            while i + key.len() <= buf.len() {
+                if &buf[i..i + key.len()] == key {
+                    let mut j = i + key.len();
+                    let mut pn = 0usize;
+                    while j < buf.len() && pn < 63 {
+                        let c = buf[j];
+                        if c == b'\n' || c == b'\r' || c == b' ' { break; }
+                        self.pw[pn] = c;
+                        pn += 1;
+                        j += 1;
+                    }
+                    self.pw_len = pn;
+                    if pn > 0 { self.set_status("Server ready"); }
+                    break;
+                }
+                i += 1;
+            }
+        }
+        if let Some(Some(_)) = k::proc_status(slot) {
+            self.server_slot = None;
+            self.started = false;
+            self.set_status("Server exited");
+            changed = true;
+        }
+        changed
+    }
+
+    fn pw_str(&self) -> &str {
+        core::str::from_utf8(&self.pw[..self.pw_len]).unwrap_or("")
+    }
+
+    /// Ensure a session exists; create one if needed. Returns true on success.
+    fn ensure_session(&mut self) -> bool {
+        if self.session_len > 0 {
+            return true;
+        }
+        let pw = self.pw_str();
+        let mut req = [0u8; 512];
+        let rl = build_session_req(pw, &mut req);
+        let mut body = [0u8; 4096];
+        let bl = http_transport(&req[..rl], &mut body);
+        let mut sid = [0u8; 48];
+        let sn = parse_session_id(&body[..bl], &mut sid);
+        if sn == 0 {
+            self.set_status("Session create failed");
+            return false;
+        }
+        self.session[..sn].copy_from_slice(&sid[..sn]);
+        self.session_len = sn;
+        true
+    }
+
+    /// Send a prompt (creating the session first). Pushes the user msg locally.
+    pub fn send(&mut self) {
+        if self.server_slot.is_none() || self.pw_len == 0 {
+            self.set_status("Start the server first");
+            return;
+        }
+        let mut text = [0u8; 200];
+        let n = self.chat.take_input(&mut text);
+        if n == 0 {
+            return;
+        }
+        if !self.ensure_session() {
+            return;
+        }
+        self.chat.push_msg(chat::ROLE_USER, &text[..n]);
+        let pw = self.pw_str();
+        let sid = core::str::from_utf8(&self.session[..self.session_len]).unwrap_or("");
+        let tstr = core::str::from_utf8(&text[..n]).unwrap_or("");
+        let mut req = [0u8; 768];
+        let rl = build_prompt_req(pw, sid, tstr, &mut req);
+        let mut body = [0u8; 512];
+        // retry a few times (server slow to accept on fresh connections)
+        for _ in 0..3 {
+            let l = http_transport(&req[..rl], &mut body);
+            if l > 0 { break; }
+            k::sleep_ms(150);
+        }
+        self.pending = true;
+        self.last_poll = 0;
+        self.chat.set_status("Thinking...");
+    }
+
+    /// Poll the session messages and rebuild the chat. Returns true on change.
+    pub fn poll(&mut self) -> bool {
+        if !self.pending || self.session_len == 0 || self.pw_len == 0 {
+            return false;
+        }
+        let pw = self.pw_str();
+        let sid = core::str::from_utf8(&self.session[..self.session_len]).unwrap_or("");
+        let mut req = [0u8; 256];
+        let rl = build_messages_req(pw, sid, &mut req);
+        let mut body = [0u8; 8192];
+        let bl = http_transport(&req[..rl], &mut body);
+        if bl == 0 {
+            return false;
+        }
+        self.chat.msg_count = 0;
+        self.chat.partial_len = 0;
+        parse_messages(&body[..bl], &mut self.chat);
+        // done when an assistant reply or a terminal idle shows up
+        let mut done = false;
+        for i in 0..self.chat.msg_count {
+            let r = self.chat.msgs[i].role;
+            if r == chat::ROLE_AI || r == chat::ROLE_SYSTEM { done = true; }
+        }
+        if done {
+            self.pending = false;
+            self.chat.set_status("Done");
+        }
+        true
+    }
+}
+
+/// Convenience: connect, send a prepared request, read the body. Returns body len.
+fn http_transport(req: &[u8], body: &mut [u8]) -> usize {
+    let Some(slot) = k::net_tcp_connect(0x7F00_0001, PORT as u16, 1500) else { return 0 };
+    if !send_all(slot, req) {
+        k::net_tcp_close(slot);
+        return 0;
+    }
+    let (s, l) = read_body(slot, body);
+    k::net_tcp_close(slot);
+    if s > 0 && l > 0 {
+        body.copy_within(s..s + l, 0);
+    }
+    l
+}

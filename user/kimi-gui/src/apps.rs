@@ -929,6 +929,7 @@ pub struct Apps {
     pub plugins: Plugins,
     pub plugin_home: PluginLauncher,
     pub ai: crate::ai::Ai,
+    pub oc: crate::opencode::Oc,
 }
 
 pub(crate) fn slice_str(bytes: &[u8]) -> &str {
@@ -1748,6 +1749,84 @@ fn ai_tap(apps: &mut Apps, point: (i64, i64)) {
     }
 }
 
+fn oc_open(apps: &mut Apps) {
+    apps.oc.refresh_installed();
+    if !apps.oc.installed && apps.oc.status_len == 0 {
+        apps.oc.set_status("Tap Install to download OpenCode");
+    }
+}
+
+/// Per-frame pump for OpenCode: server log (password) + throttled session poll.
+pub fn oc_frame(apps: &mut Apps) -> bool {
+    let mut changed = apps.oc.pump_log();
+    apps.oc.last_poll = apps.oc.last_poll.wrapping_add(1);
+    if apps.oc.pending && apps.oc.last_poll % 200 == 0 {
+        if apps.oc.poll() {
+            changed = true;
+        }
+    }
+    changed
+}
+
+fn oc_key(apps: &mut Apps, code: u16, shift: bool) -> bool {
+    if crate::chat::key(&mut apps.oc.chat, code, shift) {
+        apps.oc.send();
+    }
+    true
+}
+
+fn oc_tap(apps: &mut Apps, point: (i64, i64)) {
+    if point.1 >= 150 && point.1 <= 186 {
+        if point.0 >= 20 && point.0 < 140 {
+            let oc = &mut apps.oc;
+            if !oc.installed {
+                oc.install();
+            } else if oc.started {
+                oc.stop_server();
+            } else {
+                oc.start_server();
+            }
+        } else if point.0 >= 150 && point.0 < 270 {
+            let oc = &mut apps.oc;
+            oc.chat.msg_count = 0;
+            oc.chat.partial_len = 0;
+            oc.session_len = 0;
+            oc.pending = false;
+            oc.chat.set_status("New session");
+        } else if point.0 >= 280 {
+            apps.oc.chat.msg_count = 0;
+            apps.oc.chat.partial_len = 0;
+            apps.oc.chat.set_status("Cleared");
+        }
+    }
+}
+
+fn draw_oc(screen: &Screen, oc: &crate::opencode::Oc, osk: bool) {
+    let width = screen.width();
+    screen.fill(0, 93, width, screen.height() - 93, BLACK());
+    screen.text(20, 104, "OpenCode", 2, TEXT());
+    let st = slice_str(&oc.status[..oc.status_len]);
+    let sl = st.len().min(38);
+    screen.text(150, 112, &st[..sl], 1, GREEN());
+    let (l0, bg0) = if !oc.installed {
+        ("Install", RED())
+    } else if oc.started {
+        ("Stop", RED_DIM())
+    } else {
+        ("Start", RED())
+    };
+    button(screen, 20, 150, 120, 36, l0, bg0, TEXT());
+    button(screen, 150, 150, 120, 36, "New", SURFACE_HI(), TEXT());
+    button(screen, 280, 150, 176, 36, "Clear", SURFACE_HI(), TEXT());
+    let max_y = if osk { 420 } else { 640 };
+    let hint = if oc.installed {
+        "Start the server, then type a prompt"
+    } else {
+        "Tap Install to download OpenCode (~200MB)"
+    };
+    crate::chat::draw_body(screen, &oc.chat, 196, max_y, osk, hint);
+}
+
 impl Files {
     fn set_status(&mut self, text: &str) {
         self.status_len = text.len().min(self.status.len());
@@ -2554,6 +2633,7 @@ impl Apps {
                 count: 0,
             },
             ai: crate::ai::Ai::new(),
+            oc: crate::opencode::Oc::new(),
         }
     }
 }
@@ -2572,6 +2652,7 @@ pub fn open(apps: &mut Apps, app: AppKind) {
         AppKind::Monitor => apps.monitor.refresh(),
         AppKind::Plugins => apps.plugins.refresh(),
         AppKind::AiStudio => ai_open(apps),
+        AppKind::OpenCode => oc_open(apps),
         _ => {}
     }
 }
@@ -2741,6 +2822,7 @@ pub fn text_focused(apps: &Apps, app: AppKind) -> bool {
         AppKind::Notes => apps.notes.editing.is_some(),
         AppKind::Terminal => !apps.terminal.tui,
         AppKind::AiStudio => true,
+        AppKind::OpenCode => true,
         AppKind::Browser => apps.browser.editing,
         AppKind::Files => apps.files.editor.is_some() || apps.files.prompt != 0,
         AppKind::Market => apps.market.searching,
@@ -2757,6 +2839,7 @@ pub fn field_hit(apps: &Apps, app: AppKind, point: (i64, i64), _osk: bool) -> bo
         }
         AppKind::Terminal => !apps.terminal.tui && point.1 > 96 && point.1 < 770,
         AppKind::AiStudio => point.1 > 420 && point.1 < 452,
+        AppKind::OpenCode => point.1 > 420 && point.1 < 452,
         AppKind::Browser => point.0 >= 20 && point.0 < 390 && point.1 >= 104 && point.1 <= 148,
         AppKind::Files => {
             (apps.files.editor.is_some() && point.1 >= 160 && point.1 <= 614)
@@ -2780,6 +2863,7 @@ pub fn key(apps: &mut Apps, app: AppKind, code: u16, shift: bool) -> bool {
         AppKind::Files => files_key(apps, code, shift),
         AppKind::Plugins => plugins_key(apps, code),
         AppKind::AiStudio => ai_key(apps, code, shift),
+        AppKind::OpenCode => oc_key(apps, code, shift),
         AppKind::Market => market_key(apps, code, shift),
         AppKind::Notes => {
             if apps.notes.editing.is_none() {
@@ -2951,6 +3035,7 @@ pub fn tap(screen: &Screen, apps: &mut Apps, app: AppKind, point: (i64, i64), os
         AppKind::Monitor => monitor_tap(apps, point),
         AppKind::Plugins => plugins_tap(screen, apps, point),
         AppKind::AiStudio => ai_tap(apps, point),
+        AppKind::OpenCode => oc_tap(apps, point),
         AppKind::Terminal => {
             if apps.terminal.tui && point.1 >= 416 && point.1 <= 448 && point.0 >= 12 && point.0 < 460 {
                 let idx = ((point.0 - 12) / 64).min(6) as usize;
@@ -3416,6 +3501,7 @@ pub fn draw(screen: &Screen, apps: &mut Apps, app: AppKind, clock: [u64; 7], osk
         AppKind::Monitor => draw_monitor(screen, &mut apps.monitor),
         AppKind::Plugins => draw_plugins(screen, &apps.plugins),
         AppKind::AiStudio => draw_ai(screen, &apps.ai, osk),
+        AppKind::OpenCode => draw_oc(screen, &apps.oc, osk),
         _ => {}
     }
 }

@@ -35,7 +35,7 @@ fn appkind_from_u64(v: u64) -> Option<AppKind> {
         6 => AppKind::Photos, 7 => AppKind::Files, 8 => AppKind::Weather,
         9 => AppKind::Terminal, 10 => AppKind::Browser, 11 => AppKind::Apk,
         12 => AppKind::Dvm, 13 => AppKind::Market, 14 => AppKind::Monitor,
-        15 => AppKind::Plugins, 16 => AppKind::AiStudio,
+        15 => AppKind::Plugins, 16 => AppKind::AiStudio, 17 => AppKind::OpenCode,
         _ => return None,
     })
 }
@@ -94,6 +94,7 @@ enum AppKind {
     Monitor,
     Plugins,
     AiStudio,
+    OpenCode,
 }
 
 impl AppKind {
@@ -120,6 +121,7 @@ impl AppKind {
             14 => AppKind::Monitor,
             15 => AppKind::Plugins,
             16 => AppKind::AiStudio,
+            17 => AppKind::OpenCode,
             _ => return None,
         })
     }
@@ -184,7 +186,7 @@ impl Layout {
             ],
             grid2: [
                 Slot::App(AppKind::Browser),
-                Slot::App(AppKind::Apk),
+                Slot::App(AppKind::OpenCode),
                 Slot::App(AppKind::AiStudio),
                 Slot::App(AppKind::Market),
                 Slot::App(AppKind::Monitor),
@@ -804,6 +806,12 @@ fn gui_run() -> ! {
 
         if ui.scene == Scene::App(AppKind::AiStudio) && !ui.shade {
             if apps::ai_frame(&mut ui.apps) {
+                dirty = true;
+            }
+        }
+
+        if ui.scene == Scene::App(AppKind::OpenCode) && !ui.shade {
+            if apps::oc_frame(&mut ui.apps) {
                 dirty = true;
             }
         }
@@ -2155,7 +2163,7 @@ fn open_app(screen: &Screen, ui: &mut Ui, app: AppKind, clock: [u64; 7]) {
     ui.edit_mode = false;
     ui.drag = None;
     ui.osk = match app {
-        AppKind::Terminal | AppKind::AiStudio => true,
+        AppKind::Terminal | AppKind::AiStudio | AppKind::OpenCode => true,
         AppKind::Notes | AppKind::Browser | AppKind::Files | AppKind::Market => apps::text_focused(&ui.apps, app),
         _ => false,
     };
@@ -2991,6 +2999,14 @@ fn draw_glyph(screen: &Screen, app: AppKind, cx: i64, cy: i64, size: i64, color:
             screen.line(cx - s / 6, cy - s / 12, cx + s / 6, cy - s / 12, 3, SURFACE_HI());
             screen.circle(cx + s / 4, cy - s / 4, s / 14, RED());
         }
+        AppKind::OpenCode => {
+            screen.round_rect(cx - s / 3, cy - s / 3, s * 2 / 3, s * 2 / 3, s / 10, color);
+            screen.round_rect(cx - s / 3 + 2, cy - s / 3 + 2, s * 2 / 3 - 4, s * 2 / 3 - 4, s / 12, SURFACE_HI());
+            screen.line(cx - s / 6, cy, cx + s / 6, cy, 3, color);
+            screen.line(cx, cy - s / 6, cx, cy + s / 6, 3, color);
+            screen.circle(cx, cy, s / 6, color);
+            screen.circle(cx, cy, s / 12, SURFACE_HI());
+        }
     }
 }
 
@@ -3615,6 +3631,7 @@ impl AppKind {
             AppKind::Monitor => "Monitor",
             AppKind::Plugins => "Plugins",
             AppKind::AiStudio => "AI Studio",
+            AppKind::OpenCode => "OpenCode",
         }
     }
 }
