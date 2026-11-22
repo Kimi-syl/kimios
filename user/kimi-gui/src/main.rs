@@ -14,6 +14,7 @@ mod font_store;
 mod vt;
 mod ai;
 mod chat;
+mod opencode;
 
 use core::panic::PanicInfo;
 use core::sync::atomic::{AtomicU64, Ordering};
@@ -1099,6 +1100,21 @@ pub extern "C" fn kimi_test_ai_chat(prompt: u64, out: u64, cap: u64) -> u64 {
     let s = unsafe { cstr(prompt as *const u8) };
     let buf = unsafe { core::slice::from_raw_parts_mut(out as *mut u8, cap as usize) };
     ai::test_chat(s, buf)
+}
+
+/// Host-only OpenCode client test: drive a live `opencode serve` (Basic auth).
+#[no_mangle]
+#[cfg(not(target_os = "none"))]
+pub extern "C" fn kimi_test_opencode(pw: u64, prompt: u64, out: u64, cap: u64) -> u64 {
+    unsafe fn cstr(p: *const u8) -> &'static str {
+        let mut n = 0;
+        while *p.add(n) != 0 { n += 1; }
+        core::str::from_utf8(core::slice::from_raw_parts(p, n)).unwrap_or("")
+    }
+    let password = unsafe { cstr(pw as *const u8) };
+    let pr = unsafe { cstr(prompt as *const u8) };
+    let buf = unsafe { core::slice::from_raw_parts_mut(out as *mut u8, cap as usize) };
+    opencode::test_opencode(password, pr, buf)
 }
 #[no_mangle]
 #[cfg(not(target_os = "none"))]
