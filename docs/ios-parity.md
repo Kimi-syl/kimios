@@ -6,6 +6,19 @@ compiled into both the APK and the IPA. "Android host" means the feature needs
 the Android C dispatcher (JNI/guest loader); "iOS host" means the Swift
 dispatcher implements it with Apple frameworks.
 
+
+> **Update — iOS can now execute Linux binaries.** The IPA embeds **iSH**
+> (`OpenMinis/ish-arm64`), a userspace Linux ARM64 emulator (threaded-code
+> interpreter, no JIT), with an Alpine fakefs rootfs. `SYS_LINUX_RUN` /
+> `SYS_RUN_PATH` boot that guest headlessly and run `/bin/sh -c <cmd>`, so
+> terminal commands (`git`, `curl`, `apk`, `node`, …) execute on device without
+> `fork`/`exec` of guest ELF. See `ios/deps/build_ish.sh`,
+> `ios/deps/prepare_rootfs.sh`, `ios/app/Sources/KimiISH.{h,m}`.
+>
+> Consequence: iSH is **GPLv3**, so the distributed IPA is a GPLv3 combined
+> work. Build/packaging is CI-verified; runtime guest boot is not yet
+> device-verified. Interactive PTY TUIs still use the remote-PTY path.
+
 ## Implemented on both
 
 | Feature | Shared userland | Android host | iOS host |
