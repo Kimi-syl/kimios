@@ -3,7 +3,7 @@ name: NodeMobile smoke test
 on:
   workflow_dispatch:
   push:
-    branches: [main, master]
+    branches: [main, master, feat/opencode-tui-entry]
     paths:
       - "ios/node-smoke/**"
       - "tools/fetch-node-mobile.sh"
