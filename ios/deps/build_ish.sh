@@ -31,6 +31,8 @@ fi
 echo "[ish] initialising submodules"
 git -C "$ISH_DIR" submodule update --init --recursive --depth 1
 
+cd "$ISH_DIR"
+
 command -v meson >/dev/null || { echo "ERROR: pip3 install meson"; exit 1; }
 command -v ninja >/dev/null || { echo "ERROR: brew install ninja"; exit 1; }
 
