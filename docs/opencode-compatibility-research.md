@@ -1,6 +1,6 @@
 # OpenCode compatibility research (P6)
 
-**Status: Android libOS TUI path implemented.** The Terminal classifies `opencode` as a full-screen PTY program, and the host provides `TERM`/`COLORTERM` plus a controlling tty. Key finding: OpenCode is **TypeScript compiled to a single-file Bun 1.4.4 executable** (JavaScriptCore), *not* Go (the Go TUI was deleted 2025-11-02, commit `f68374ad`). Current release v1.19.6.
+**Status: Android libOS TUI path implemented.** The Terminal classifies `opencode` as a full-screen PTY program, and the Android host provides `TERM`/`COLORTERM` plus a controlling tty. The VT renderer/UI is shared with the `.ipa`, but iOS cannot fork/exec the guest binary, so OpenCode TUI is Android-only. Key finding: OpenCode is **TypeScript compiled to a single-file Bun 1.4.4 executable** (JavaScriptCore), *not* Go (the Go TUI was deleted 2025-11-02, commit `f68374ad`). Current release v1.19.6.
 
 ## Two paths, very different cost
 

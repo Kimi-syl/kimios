@@ -58,6 +58,15 @@ external ELF/PE images needs the JIT ELF loader (mode B, future work) and fails
 gracefully here; APKs are inspected and DEX runs on the built-in mini-Dalvik VM,
 exactly as on bare metal.
 
+The Terminal app's VT/ANSI emulator, 256-colour style, cursor handling, key
+strip and rendering are the shared Rust userland and are identical in the
+`.ipa`. PTY-backed full-screen guests — **opencode**, vim, htop, etc. — are
+Android-only: iOS app sandboxes do not permit `fork`/`exec` of downloaded
+binaries. On iPad the terminal therefore shows the built-in shell and reports
+the guest-execution limitation instead of attempting a broken PTY spawn. Use
+the OpenCode app's remote/cloud model or a remote `opencode serve` endpoint for
+OpenCode on iOS.
+
 ## Verified natively (no Mac required)
 
 `ios/host-harness/` implements the same dispatcher in C and runs the real GUI on

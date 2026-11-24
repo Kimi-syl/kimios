@@ -56,7 +56,9 @@ auxv/stack, and enters the interpreter. Three platform mitigations make it work
 3.14 and Node.js 24 execute on the real device** at native speed. Full design +
 the bionic-sigchain/TLS bug that blocked Node:
 [docs/desktop-lite-native.md](docs/desktop-lite-native.md). iOS guest execution
-is the remaining port (no `fork`, stricter JIT).
+is the remaining port (no `fork`, stricter JIT). The terminal's VT/ANSI renderer
+and key UI are shared with the `.ipa`; PTY-backed OpenCode/vim/htop sessions are
+Android-only until an iOS guest runner exists.
 
 **Alpine `apk` compatibility:** kpkg also speaks Alpine's package format via
 `apkg` (`apkg update / info / install <name>`): it parses APKINDEX repos and `.apk`

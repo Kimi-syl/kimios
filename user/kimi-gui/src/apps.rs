@@ -1575,7 +1575,18 @@ fn terminal_run(apps: &mut Apps) {
     let rest = rest.trim();
 
     // Full-screen TUI -> run under a REAL PTY so it gets a tty and can draw.
+    // The emulator/rendering is shared by Android and iOS; the guest runner is
+    // Android-only because iOS forbids fork/exec of downloaded binaries.
     if is_tui_cmd(prog) {
+        if !k::host_pty_supported() {
+            if prog == "opencode" {
+                t.note("OpenCode TUI needs Android guest execution.");
+                t.note("On iPad, use a remote OpenCode server from the OpenCode app.");
+            } else {
+                t.note("Full-screen TUIs need the Android libOS guest runner.");
+            }
+            return;
+        }
         t.vt.reset();
         match k::proc_spawn(prog, rest, crate::vt::ROWS as u64, crate::vt::COLS as u64) {
             Some(slot) => {
