@@ -57,11 +57,17 @@ if [ ! -f "$WORK/alpine/etc/os-release" ]; then
 fi
 
 echo "[smoke] running guest"
+OUTF="$WORK/guest.out"
+./build/ish -r "$WORK/alpine" /bin/sh -c \
+    'echo HELLO_ISH; cat /etc/os-release | head -1; echo "cwd=$(pwd)"; ls / | head -5; exit 7' \
+    > "$OUTF" 2>&1 &
+PID=$!
+( sleep 180; kill -9 "$PID" 2>/dev/null ) & WATCH=$!
 set +e
-OUT=$(timeout 180 ./build/ish -r "$WORK/alpine" /bin/sh -c \
-    'echo HELLO_ISH; cat /etc/os-release | head -1; echo "cwd=$(pwd)"; ls / | head -5; exit 7' 2>&1)
-RC=$?
+wait "$PID"; RC=$?
 set -e
+kill "$WATCH" 2>/dev/null || true
+OUT="$(cat "$OUTF")"
 printf '%s\n' "$OUT"
 echo "[smoke] guest exit status: $RC (expected 7)"
 
