@@ -1487,7 +1487,7 @@ fn terminal_start(apps: &mut Apps) {
     t.started = true;
     t.vt.reset();
     t.note("KimiOS shell - commands run natively on the device.");
-    t.note("  ls  cat  npm install <pkg>  node ...  python3 ...  busybox ...");
+    t.note("  ls  cat  npm install <pkg>  node ...  python3 ...  busybox ...  opencode");
     t.note("");
 }
 
@@ -1540,8 +1540,9 @@ pub fn terminal_frame(apps: &mut Apps) -> bool {
 
 /// Submit the current line: echo it, run it via the loader, render its output.
 fn is_tui_cmd(name: &str) -> bool {
+    let name = name.rsplit('/').next().unwrap_or(name);
     matches!(name,
-        "top" | "htop" | "btop" | "vi" | "vim" | "nvim" | "less" | "more" | "most"
+        "opencode" | "top" | "htop" | "btop" | "vi" | "vim" | "nvim" | "less" | "more" | "most"
         | "nano" | "watch" | "tmux" | "screen" | "mc" | "man" | "fzf" | "dialog"
         | "ctop" | "ncdu" | "atop")
 }

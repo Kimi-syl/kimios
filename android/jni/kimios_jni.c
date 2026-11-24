@@ -487,15 +487,16 @@ extern int kimi_guest_capture(const char *, const char *, char *const *, char *c
 
 // Shared guest environment (SYS_LINUX_RUN + SYS_RUN_PATH): point the dynamic
 // loader, PATH, HOME/TMPDIR, TLS certs and ICU data at the sysroot/sandbox.
-// envp needs room for 12 entries + NULL; buffers live in the caller's GuestEnv.
+// envp needs room for 16 entries + NULL; buffers live in the caller's GuestEnv.
 typedef struct {
     char lib[700], path[700], home[400], tmp[400];
     char sslfile[700], ssldir[600], icudata[700];
     char phome[500], ppath[900];
+    char npmprefix[700], nodepath[700];
 } GuestEnv;
 static int guest_env_build(const char *sysroot, GuestEnv *s, char **envp, int is_py) {
     snprintf(s->lib, sizeof s->lib, "LD_LIBRARY_PATH=%s/usr/lib:%s/lib", sysroot, sysroot);
-    snprintf(s->path, sizeof s->path, "PATH=%s/usr/bin:%s/bin", sysroot, sysroot);
+    snprintf(s->path, sizeof s->path, "PATH=%s/usr/local/bin:%s/usr/bin:%s/bin", sysroot, sysroot, sysroot);
     snprintf(s->home, sizeof s->home, "HOME=%s/home", diskRoot);
     snprintf(s->tmp, sizeof s->tmp, "TMPDIR=%s/tmp", diskRoot);
     char hd[520], td[520];
@@ -506,6 +507,13 @@ static int guest_env_build(const char *sysroot, GuestEnv *s, char **envp, int is
     snprintf(s->sslfile, sizeof s->sslfile, "SSL_CERT_FILE=%s/etc/ssl/certs/ca-certificates.crt", sysroot);
     snprintf(s->ssldir, sizeof s->ssldir, "SSL_CERT_DIR=%s/etc/ssl/certs", sysroot);
     envp[e++] = s->sslfile; envp[e++] = s->ssldir;
+    snprintf(s->npmprefix, sizeof s->npmprefix, "NPM_CONFIG_PREFIX=%s/usr/local", sysroot);
+    snprintf(s->nodepath, sizeof s->nodepath,
+             "NODE_PATH=%s/usr/lib/node_modules:%s/usr/local/lib/node_modules",
+             sysroot, sysroot);
+    envp[e++] = "COLORTERM=truecolor";
+    envp[e++] = s->npmprefix;
+    envp[e++] = s->nodepath;
     // ICU data (node Intl.Collator etc.): absolute /usr/share/icu path is absent
     // on Android; point ICU_DATA at the sysroot's versioned data dir.
     s->icudata[0] = 0;
@@ -569,7 +577,7 @@ static uint64_t fs_linux_run(uint64_t a0) {
     }
     argv[n] = NULL;
     GuestEnv ge;
-    char *envp[16];
+    char *envp[24];
     int e = guest_env_build(sysroot, &ge, envp, is_py);
     envp[e] = NULL;
     size_t olen = 0; int code = 0;
@@ -651,7 +659,7 @@ static uint64_t fs_run_path(const char *path, const char *arg) {
     char sysroot[512]; snprintf(sysroot, sizeof sysroot, "%s/alpine/root", diskRoot);
     const char *base = strrchr(rel, '/'); base = base ? base + 1 : rel;
     GuestEnv ge;
-    char *envp[16];
+    char *envp[24];
     int e = guest_env_build(sysroot, &ge, envp, strstr(base, "python") != NULL);
     envp[e] = NULL;
     char *argv[3]; int n = 0;
@@ -780,7 +788,7 @@ static uint64_t fs_plugin_run(const char *id, int background, char *outbuf, size
     const char *load_exe = (is_py || is_node) ? interp : exe;
     GuestEnv ge;
     char kport[48], kpid[300], kdir[600];
-    char *envp[16];
+    char *envp[24];
     int e = guest_env_build(sysroot, &ge, envp, is_py);
     uint64_t port = plugin_api_port();
     snprintf(kport, sizeof kport, "KIMI_API_PORT=%llu", (unsigned long long)port);
@@ -916,6 +924,7 @@ static uint64_t proc_spawn(uint64_t a1) {
         if (strchr(bin, '/')) snprintf(exe, sizeof exe, "%s/%s", sysroot, bin);
         else snprintf(exe, sizeof exe, "%s/usr/bin/%s", sysroot, bin);
         if (!file_exists(exe)) snprintf(exe, sizeof exe, "%s/bin/%s", sysroot, b0);
+        if (!file_exists(exe)) snprintf(exe, sizeof exe, "%s/usr/local/bin/%s", sysroot, b0);
         if (!file_exists(exe)) {
             // Bare name that is a busybox applet (top/vi/ls/…): run it via the
             // real busybox binary, avoiding the broken absolute symlinks.
@@ -934,7 +943,7 @@ static uint64_t proc_spawn(uint64_t a1) {
     }
     argv[n] = NULL;
     GuestEnv ge;
-    char *envp[20];
+    char *envp[24];
     int e = guest_env_build(sysroot, &ge, envp, strstr(base, "python") != NULL);
     envp[e++] = "TERM=xterm-256color";
     envp[e++] = "PS1=kimios$ ";
