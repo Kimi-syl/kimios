@@ -61,7 +61,7 @@ works on iPad without a local emulator.
 ## Protocol
 
 ```text
-KPTY/1 <cols> <rows> <token>\n  ->  OK\n
+KPTY/2 <cols> <rows> <token> <base64-cmd> <base64-arg>\n  ->  OK\n
 
 frame: type:u8, length:u32be, payload
   0 = output        server -> client

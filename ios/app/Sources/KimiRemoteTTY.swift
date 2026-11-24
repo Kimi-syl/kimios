@@ -5,6 +5,8 @@
 // host.  The bridge owns the real PTY and executes opencode/shell commands; the
 // iPad only transports bytes.  No emulator is involved.
 //
+// The bridge protocol is KPTY/2: the iPad asks the token-protected bridge to
+// run the requested command line, then exchanges raw terminal frames.
 // Configuration is read from Documents/disk/remote-tty.cfg:
 //
 //     host:port token
@@ -37,12 +39,17 @@ final class KimiRemoteTTY {
         let cols: UInt16
         let rows: UInt16
         let config: Config
+        let bin: String
+        let arg: String
 
-        init(id: UInt64, config: Config, cols: UInt64, rows: UInt64) {
+        init(id: UInt64, config: Config, cols: UInt64, rows: UInt64,
+             bin: String, arg: String) {
             self.id = id
             self.config = config
             self.cols = UInt16(clamping: cols)
             self.rows = UInt16(clamping: rows)
+            self.bin = bin
+            self.arg = arg
             self.queue = DispatchQueue(label: "kimios.remote.tty.\(id)")
         }
 
@@ -58,7 +65,9 @@ final class KimiRemoteTTY {
                 switch state {
                 case .ready:
                     let token = self.config.token
-                    let hello = "KPTY/1 \(self.cols) \(self.rows) \(token)\n"
+                    let cmd = Data(self.bin.utf8).base64EncodedString()
+                    let arg = Data(self.arg.utf8).base64EncodedString()
+                    let hello = "KPTY/2 \(self.cols) \(self.rows) \(token) \(cmd) \(arg)\n"
                     conn.send(content: Data(hello.utf8), completion: .contentProcessed { _ in })
                     self.receiveLoop()
                 case .failed, .cancelled:
@@ -220,7 +229,7 @@ final class KimiRemoteTTY {
         guard let cfg = config() else { return nil }
         lock.lock()
         let id = nextSlot; nextSlot += 1
-        let s = Session(id: id, config: cfg, cols: cols, rows: rows)
+        let s = Session(id: id, config: cfg, cols: cols, rows: rows, bin: bin, arg: arg)
         sessions[id] = s
         lock.unlock()
         s.start()

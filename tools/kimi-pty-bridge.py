@@ -30,11 +30,14 @@ LAN or through an SSH tunnel; token auth is not transport encryption.
 from __future__ import annotations
 
 import argparse
+import base64
 import fcntl
 import hmac
 import os
 import pty
 import select
+import shlex
+import shutil
 import signal
 import socket
 import struct
@@ -85,7 +88,7 @@ def handle(client: socket.socket, addr, command, token: str) -> None:
         return
     line, rest = hello.split(b"\n", 1)
     parts = line.decode("utf-8", "replace").strip().split()
-    if len(parts) < 3 or parts[0] != "KPTY/1":
+    if len(parts) < 3 or parts[0] not in ("KPTY/1", "KPTY/2"):
         client.sendall(b"ERR handshake\n")
         return
     try:
@@ -99,6 +102,24 @@ def handle(client: socket.socket, addr, command, token: str) -> None:
         client.sendall(b"ERR auth\n")
         return
 
+    client_command = command
+    if parts[0] == "KPTY/2" and len(parts) >= 6:
+        try:
+            req_bin = base64.b64decode(parts[4]).decode("utf-8")
+            req_arg = base64.b64decode(parts[5]).decode("utf-8")
+        except Exception:
+            client.sendall(b"ERR command\n")
+            return
+        if req_bin:
+            argv = [req_bin] + shlex.split(req_arg)
+            if "/" not in req_bin:
+                resolved = shutil.which(req_bin)
+                if not resolved:
+                    client.sendall(f"ERR command not found: {req_bin}\n".encode())
+                    return
+                argv[0] = resolved
+            client_command = argv
+
     env = os.environ.copy()
     env.setdefault("TERM", "xterm-256color")
     env.setdefault("COLORTERM", "truecolor")
@@ -106,9 +127,9 @@ def handle(client: socket.socket, addr, command, token: str) -> None:
     if pid == 0:
         # Child: own session + controlling tty is set up by forkpty.
         try:
-            os.execvpe(command[0], command, env)
+            os.execvpe(client_command[0], client_command, env)
         except Exception as exc:  # noqa: BLE001
-            os.write(2, f"kimi-pty-bridge: cannot exec {command[0]}: {exc}\n".encode())
+            os.write(2, f"kimi-pty-bridge: cannot exec {client_command[0]}: {exc}\n".encode())
             os._exit(127)
 
     try:
@@ -241,7 +262,8 @@ def main() -> int:
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     srv.bind((args.host, args.port))
     srv.listen(8)
-    print(f"[bridge] listening on {args.host}:{args.port}", flush=True)
+    actual_port = srv.getsockname()[1]
+    print(f"[bridge] listening on {args.host}:{actual_port}", flush=True)
     print(f"[bridge] command: {' '.join(command)}", flush=True)
     if not args.token:
         print("[bridge] WARNING: no --token; use only on a trusted network", flush=True)
