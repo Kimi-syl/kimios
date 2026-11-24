@@ -22,6 +22,12 @@ fi
 cd "$WORK/src"
 git submodule update --init --recursive --depth 1
 
+# Patch: macOS/CI hostnames can exceed the 65-byte guest uname field; truncate
+# to avoid a fortified strcpy abort in do_uname (kernel/uname.c). Idempotent.
+if [ -f kernel/uname.c ]; then
+    sed -i.bak 's|strcpy(uts->hostname, hostname);|snprintf(uts->hostname, sizeof(uts->hostname), "%s", hostname);|' kernel/uname.c || true
+fi
+
 case "$(uname -m)" in
     arm64|aarch64) ;;
     *) echo "ERROR: need an arm64 host for the arm64 guest (got $(uname -m))"; exit 1 ;;

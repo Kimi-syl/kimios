@@ -47,6 +47,12 @@ echo "[ish] initialising submodules"
 git -C "$ISH_DIR" submodule update --init --recursive --depth 1
 cd "$ISH_DIR"
 
+# Patch: macOS/CI hostnames can exceed the 65-byte guest uname field; truncate
+# to avoid a fortified strcpy abort in do_uname (kernel/uname.c). Idempotent.
+if [ -f kernel/uname.c ]; then
+    sed -i.bak 's|strcpy(uts->hostname, hostname);|snprintf(uts->hostname, sizeof(uts->hostname), "%s", hostname);|' kernel/uname.c || true
+fi
+
 command -v meson >/dev/null || { echo "ERROR: pip3 install meson"; exit 1; }
 command -v ninja >/dev/null || { echo "ERROR: brew install ninja"; exit 1; }
 
