@@ -1,5 +1,19 @@
 # Local OpenCode runtime on iOS — feasibility report
 
+## Implemented milestone (local, no emulator)
+
+The IPA now embeds **Node 24.5 (NodeMobile)** and a pinned OpenCode Node server
+bundle (`tools/build-opencode-node.sh`). `KimiNode` starts the server in-process
+on `127.0.0.1:4199`; the native OpenCode app talks to it through the existing
+`SYS_NET` client. The OpenCode screen also has a **Web UI** link that opens the
+official local web interface in an authenticated WKWebView. This is real local
+execution, not a remote bridge.
+
+Still missing for the terminal TUI: OpenTUI's native `libopentui.dylib` and the
+Node 26 `node:ffi` module. Those are required by the TUI renderer; the server,
+agent loop, file tools, model calls and web UI do not need them. The remaining
+work is therefore an OpenTUI/FFI port, not a kernel or emulator.
+
 **Question:** can the IPA run OpenCode locally, with no QEMU/UTM-style emulator,
 and reuse the existing Kimi VT terminal?
 

@@ -75,6 +75,15 @@ AVAudioPlayer, UIDocumentPicker import, symlinks, file copy, system/process
 info, local time and an offscreen WKWebView pixel bridge. See
 [docs/ios-parity.md](../docs/ios-parity.md) for the full matrix.
 
+## Local OpenCode runtime
+
+The IPA embeds Node 24.5 + an OpenCode Node server bundle. Tapping **Start** in
+the OpenCode app launches the server inside the app process at
+`127.0.0.1:4199`; the native client uses it locally, and the **Web UI** link
+opens the official OpenCode web interface in an authenticated WKWebView. No
+remote server and no emulator are involved. See
+[docs/ios-local-opencode-research.md](../docs/ios-local-opencode-research.md).
+
 ## Remote terminal / OpenCode TUI
 
 Because iOS cannot fork/exec Linux ELF binaries, the IPA includes a remote PTY
