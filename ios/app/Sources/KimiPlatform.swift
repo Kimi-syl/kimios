@@ -384,6 +384,11 @@ enum KimiSystem {
 
     static func openURL(_ text: String) -> Bool {
         guard let u = URL(string: text) else { return false }
+        if let host = u.host, (host == "127.0.0.1" || host == "localhost"),
+           KimiNode.shared.serverReady {
+            KimiWebSheet.present(url: u, password: KimiNode.shared.webPassword)
+            return true
+        }
         DispatchQueue.main.async { UIApplication.shared.open(u) }
         return true
     }

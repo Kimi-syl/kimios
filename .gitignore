@@ -8,6 +8,8 @@
 /ios/app/KimiOS.xcodeproj
 /ios/app/Vendor/
 /ios/app/Resources/opencode/
+/ios/node-smoke/build/
+/ios/node-smoke/KimiNodeSmoke.xcodeproj/
 /ios/host-harness/out
 
 # Android library-OS build artifacts

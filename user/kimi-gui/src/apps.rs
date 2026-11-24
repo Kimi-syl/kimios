@@ -1823,6 +1823,10 @@ fn oc_key(apps: &mut Apps, code: u16, shift: bool) -> bool {
 
 fn oc_tap(screen: &Screen, apps: &mut Apps, point: (i64, i64)) {
     let _ = screen;
+    if point.1 >= 120 && point.1 <= 148 && point.0 >= 330 && apps.oc.ready {
+        let _ = k::open_url("http://127.0.0.1:4199/");
+        return;
+    }
     let oc = &mut apps.oc;
     if oc.setup {
         if point.1 >= 104 && point.1 <= 144 && point.0 <= 120 {
@@ -1947,6 +1951,9 @@ fn draw_oc(screen: &Screen, oc: &crate::opencode::Oc, osk: bool) {
     let st = slice_str(&oc.status[..oc.status_len]);
     let sl = st.len().min(40);
     screen.text(20, 132, &st[..sl], 1, GREEN());
+    if oc.ready {
+        screen.text(width - 76, 132, "Web UI", 1, RED());
+    }
     let (l0, bg0) = if !oc.installed {
         ("Install", RED())
     } else if oc.started {

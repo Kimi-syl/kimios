@@ -1,0 +1,38 @@
+﻿name: KimiNodeSmoke
+options:
+  bundleIdPrefix: com.kimios
+  deploymentTarget:
+    iOS: "15.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    ENABLE_BITCODE: NO
+    CODE_SIGNING_ALLOWED: NO
+    CODE_SIGNING_REQUIRED: NO
+    CODE_SIGN_IDENTITY: ""
+targets:
+  KimiNodeSmoke:
+    type: application
+    platform: iOS
+    sources:
+      - path: Sources
+      - path: Resources/smoke.js
+    info:
+      path: Info.plist
+      properties:
+        CFBundleDisplayName: KimiNodeSmoke
+        UILaunchScreen: {}
+        MinimumOSVersion: "15.0"
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.kimios.nodesmoke
+        PRODUCT_NAME: KimiNodeSmoke
+        INFOPLIST_FILE: Info.plist
+        TARGETED_DEVICE_FAMILY: "1"
+        SUPPORTED_PLATFORMS: "iphonesimulator"
+        LD_RUNPATH_SEARCH_PATHS: "$(inherited) @executable_path/Frameworks"
+    dependencies:
+      - framework: ../app/Vendor/NodeMobile.xcframework
+        embed: true
+    scheme: {}

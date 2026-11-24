@@ -37,6 +37,18 @@ final class KimiNode {
         return base.appendingPathComponent("opencode", isDirectory: true)
     }
 
+    var webPassword: String {
+        lock.lock(); let p = password; lock.unlock(); return p
+    }
+
+    var localPort: UInt16 {
+        lock.lock(); let p = port; lock.unlock(); return p
+    }
+
+    var serverReady: Bool {
+        lock.lock(); let r = ready; lock.unlock(); return r
+    }
+
     var supported: Bool {
         guard let root = resourceRoot else { return false }
         return FileManager.default.fileExists(
