@@ -7,6 +7,12 @@ name: iOS iSH smoke
 
 on:
   workflow_dispatch:
+  push:
+    branches: [main, 'feat/**']
+    paths:
+      - 'ios/deps/**'
+      - 'ios/app/Sources/KimiISH.*'
+      - '.github/workflows/ios-ish-smoke.yml'
 
 jobs:
   ish-smoke:
