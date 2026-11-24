@@ -67,6 +67,14 @@ the guest-execution limitation instead of attempting a broken PTY spawn. Use
 the OpenCode app's remote/cloud model or a remote `opencode serve` endpoint for
 OpenCode on iOS.
 
+## Host service parity
+
+The Swift dispatcher now implements the same non-guest host services as Android:
+synchronous/async HTTPS fetch with progress and Bearer auth, CoreLocation,
+AVAudioPlayer, UIDocumentPicker import, symlinks, file copy, system/process
+info, local time and an offscreen WKWebView pixel bridge. See
+[docs/ios-parity.md](../docs/ios-parity.md) for the full matrix.
+
 ## Verified natively (no Mac required)
 
 `ios/host-harness/` implements the same dispatcher in C and runs the real GUI on
