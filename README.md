@@ -132,6 +132,12 @@ A Nothing-OS × Material-3 phone shell, all software-rendered in Rust at
 - A shared command interpreter (`libkimi::shell`) used by both the CLI and the
   in-GUI Terminal: `ls cat write rm mkdir rmdir mv stat df net dns fetch date
   time sleep uptime ps kpkg apk dvm …`.
+- **A real ANSI/VT terminal** in the GUI: 80×26 cell grid, 256-line scrollback,
+  SGR/256/truecolour, cursor movement, erase/scroll regions, alternate screen,
+  bracketed-paste mode, keyboard query replies, and a host **PTY** on Android.
+  Full-screen TUIs such as **opencode**, vim and htop get a genuine
+  `TERM=xterm-256color` terminal instead of a captured stdout pipe. Type
+  `opencode` after `apkg install nodejs npm` + `npm install -g opencode-ai`.
 - **kpkg** (apt-like package manager), an **APK inspector** (ZIP/DEFLATE/binary
   AXML/DEX), and a bounded **mini-Dalvik** DEX interpreter.
 

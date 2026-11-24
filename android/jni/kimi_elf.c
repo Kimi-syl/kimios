@@ -36,6 +36,9 @@
 #include <sys/mman.h>
 #include <sys/wait.h>
 #include <sys/random.h>
+#include <sys/ioctl.h>
+#include <termios.h>
+#include <errno.h>
 #include <pthread.h>
 #include <stdlib.h>
 
@@ -65,6 +68,8 @@
 #define SYS_exit_group 94
 #define SYS_rt_sigaction 134
 #define SYS_rt_sigprocmask 135
+#define SYS_ioctl 29
+#define SYS_setsid 157
 #define SYS_dup3 24
 #define SYS_chdir 49
 #define SYS_mmap 222
@@ -504,6 +509,79 @@ int kimi_guest_capture(const char *exe, const char *sysroot, char *const argv[],
     int c = WIFEXITED(st) ? WEXITSTATUS(st) : (128 + WTERMSIG(st));
     if (code) *code = c;
     return c;
+}
+
+// ---------------- pseudoterminal sessions ----------------
+//
+// Pipes are enough for `node -e`; they are not enough for a TUI.  opencode (and
+// vim/htop/lazygit) check isatty() and switch to the alternate screen only when
+// stdout is a terminal.  This spawns the same fork+mmap guest behind a pts so
+// the guest sees a real tty and can receive terminal resize events.
+
+int kimi_guest_spawn_pty(const char *exe, const char *sysroot,
+                         char *const argv[], char *const envp[],
+                         int cols, int rows, int *master_out) {
+    g_hwcap = getauxval(AT_HWCAP);
+    g_hwcap2 = getauxval(AT_HWCAP2);
+    long ps = sysconf(_SC_PAGESIZE);
+    if (ps > 0) g_pagesz = (uint64_t)ps;
+    g_uid = getuid();
+    g_gid = getgid();
+    if (k_sys(SYS_getrandom, (long)g_random, sizeof g_random, 0, 0, 0, 0) != (long)sizeof g_random)
+        for (int i = 0; i < 16; i++) g_random[i] = (uint8_t)(i * 7 + 13);
+
+    int master = posix_openpt(O_RDWR | O_NOCTTY);
+    if (master < 0) { LOGE("posix_openpt failed: %s", strerror(errno)); return -1; }
+    if (grantpt(master) != 0 || unlockpt(master) != 0) {
+        LOGE("grantpt/unlockpt failed: %s", strerror(errno));
+        close(master);
+        return -1;
+    }
+    const char *slave_name = ptsname(master);
+    if (!slave_name) { LOGE("ptsname failed"); close(master); return -1; }
+    int slave = open(slave_name, O_RDWR | O_NOCTTY);
+    if (slave < 0) { LOGE("open pty slave failed: %s", strerror(errno)); close(master); return -1; }
+
+    struct winsize ws;
+    memset(&ws, 0, sizeof ws);
+    ws.ws_col = (unsigned short)(cols > 0 ? cols : 80);
+    ws.ws_row = (unsigned short)(rows > 0 ? rows : 24);
+    ioctl(master, TIOCSWINSZ, &ws);
+
+    pid_t pid = fork();
+    if (pid == 0) {
+        // Child: raw syscalls only from here (multithreaded fork safety).
+        k_sys(SYS_close, master, 0, 0, 0, 0, 0);
+        k_sys(SYS_setsid, 0, 0, 0, 0, 0, 0);
+        k_sys(SYS_ioctl, slave, TIOCSCTTY, 0, 0, 0, 0);
+        k_sys(SYS_dup3, slave, 0, 0, 0, 0, 0);
+        k_sys(SYS_dup3, slave, 1, 0, 0, 0, 0);
+        k_sys(SYS_dup3, slave, 2, 0, 0, 0, 0);
+        k_sys(SYS_close, slave, 0, 0, 0, 0, 0);
+        for (int fd = 3; fd < 1024; fd++) k_sys(SYS_close, fd, 0, 0, 0, 0, 0);
+        install_sigsys_shim();
+        k_sys(SYS_chdir, (long)sysroot, 0, 0, 0, 0, 0);
+        kimi_image img;
+        if (kimi_elf_load(exe, sysroot, argv, envp, &img) != 0)
+            k_sys(SYS_exit, 127, 0, 0, 0, 0, 0);
+        kimi_elf_enter(&img);
+        k_sys(SYS_exit, 127, 0, 0, 0, 0, 0);
+    }
+
+    close(slave);
+    if (pid < 0) { close(master); return -1; }
+    int flags = fcntl(master, F_GETFL, 0);
+    if (flags >= 0) fcntl(master, F_SETFL, flags | O_NONBLOCK);
+    *master_out = master;
+    return pid;
+}
+
+int kimi_guest_set_winsize(int fd, int cols, int rows) {
+    struct winsize ws;
+    memset(&ws, 0, sizeof ws);
+    ws.ws_col = (unsigned short)(cols > 0 ? cols : 80);
+    ws.ws_row = (unsigned short)(rows > 0 ? rows : 24);
+    return ioctl(fd, TIOCSWINSZ, &ws);
 }
 
 // ---------------- JNI ----------------

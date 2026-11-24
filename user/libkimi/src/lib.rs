@@ -74,6 +74,7 @@ pub const SYS_LOCATION: u64 = 44;
 pub const SYS_OPEN_URL: u64 = 45;
 pub const SYS_AUDIO: u64 = 46;
 pub const SYS_IMPORT_FILE: u64 = 47;
+pub const SYS_TERM: u64 = 48;
 
 /// Latency-mailbox slot indices (shared with the kernel `instr` module and the
 /// Android shared-memory reader).
@@ -592,6 +593,84 @@ pub fn linux_run(bin: &str, arg: &str, out: &mut [u8]) -> Option<(u64, usize)> {
     } else {
         Some((req.code, req.out_len as usize))
     }
+}
+
+// ---------------------------------------------------------------------------
+// Interactive terminal sessions (libOS host)
+// ---------------------------------------------------------------------------
+//
+// A real TUI needs a pseudoterminal, not a pair of pipes: programs such as
+// opencode check `isatty(1)` and switch to a full-screen alternate-screen UI.
+// The Android host implements these calls in the C dispatcher; bare metal and
+// iOS return `None`, so the GUI terminal falls back to its built-in shell.
+
+pub const TERM_OP_START: u64 = 0;
+pub const TERM_OP_READ: u64 = 1;
+pub const TERM_OP_WRITE: u64 = 2;
+pub const TERM_OP_RESIZE: u64 = 3;
+pub const TERM_OP_CLOSE: u64 = 4;
+pub const TERM_OP_STATUS: u64 = 5;
+
+#[repr(C)]
+pub struct TermStartReq {
+    pub cmd_ptr: u64,
+    pub cmd_len: u64,
+    pub cols: u64,
+    pub rows: u64,
+}
+
+/// Spawn `command` (a shell-style command line) in a pseudoterminal.
+/// Returns a session id, or `None` when the host cannot run guest binaries.
+pub fn term_start(command: &str, cols: u64, rows: u64) -> Option<u64> {
+    let req = TermStartReq {
+        cmd_ptr: command.as_ptr() as u64,
+        cmd_len: command.len() as u64,
+        cols,
+        rows,
+    };
+    let r = syscall3(SYS_TERM, TERM_OP_START, &req as *const _ as u64, 0);
+    if r == ERROR { None } else { Some(r) }
+}
+
+/// Non-blocking read from a terminal session. `Some(0)` means "no output yet".
+pub fn term_read(session: u64, out: &mut [u8]) -> Option<usize> {
+    let r = syscall4(
+        SYS_TERM,
+        TERM_OP_READ,
+        session,
+        out.as_mut_ptr() as u64,
+        out.len() as u64,
+    );
+    if r == ERROR { None } else { Some(r as usize) }
+}
+
+/// Write raw bytes (keyboard input, terminal query replies) to a session.
+pub fn term_write(session: u64, data: &[u8]) -> usize {
+    let r = syscall4(
+        SYS_TERM,
+        TERM_OP_WRITE,
+        session,
+        data.as_ptr() as u64,
+        data.len() as u64,
+    );
+    if r == ERROR { 0 } else { r as usize }
+}
+
+/// Tell the guest its new terminal size.
+pub fn term_resize(session: u64, cols: u64, rows: u64) -> bool {
+    syscall4(SYS_TERM, TERM_OP_RESIZE, session, cols, rows) == 0
+}
+
+/// Reap a session; returns the guest exit code when it has exited.
+pub fn term_close(session: u64) -> Option<u64> {
+    let r = syscall3(SYS_TERM, TERM_OP_CLOSE, session, 0);
+    if r == ERROR { None } else { Some(r) }
+}
+
+/// True while the guest process is alive. Implemented separately from reads so
+/// a TUI that is quiet but waiting for a key is not mistaken for a dead app.
+pub fn term_alive(session: u64) -> bool {
+    syscall3(SYS_TERM, TERM_OP_STATUS, session, 0) != 0
 }
 
 /// High-level URL fetch (libOS host): GET `url` (HTTP or HTTPS) and write the

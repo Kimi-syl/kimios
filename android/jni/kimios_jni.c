@@ -24,6 +24,8 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/socket.h>
+#include <sys/wait.h>
+#include <signal.h>
 #include <netdb.h>
 #include <arpa/inet.h>
 
@@ -381,10 +383,14 @@ static uint64_t fs_linux_run(uint64_t a0) {
     argv[n] = NULL;
     char *envp[16]; int e = 0;
     envp[e++] = lib; envp[e++] = path; envp[e++] = home; envp[e++] = tmp; envp[e++] = "LANG=C.UTF-8";
-    char sslfile[700], ssldir[600];
+    char sslfile[700], ssldir[600], npmprefix[700], npmcache[420], nodepath[700];
     snprintf(sslfile, sizeof sslfile, "SSL_CERT_FILE=%s/etc/ssl/certs/ca-certificates.crt", sysroot);
     snprintf(ssldir, sizeof ssldir, "SSL_CERT_DIR=%s/etc/ssl/certs", sysroot);
+    snprintf(npmprefix, sizeof npmprefix, "NPM_CONFIG_PREFIX=%s/usr/local", sysroot);
+    snprintf(npmcache, sizeof npmcache, "NPM_CONFIG_CACHE=%s/.npm", home + strlen("HOME="));
+    snprintf(nodepath, sizeof nodepath, "NODE_PATH=%s/usr/lib/node_modules:%s/usr/local/lib/node_modules", sysroot, sysroot);
     envp[e++] = sslfile; envp[e++] = ssldir;
+    envp[e++] = npmprefix; envp[e++] = npmcache; envp[e++] = nodepath;
     // ICU data (node Intl.Collator etc.): absolute /usr/share/icu path is absent
     // on Android; point ICU_DATA at the sysroot's versioned data dir.
     char icudata[700]; icudata[0] = 0;
@@ -447,6 +453,259 @@ static uint64_t net_recv(uint64_t slot, void *buf, uint64_t len, uint64_t timeou
 }
 static uint64_t net_close(uint64_t slot) { if (slot < (uint64_t)nsock) { close(socks[slot]); socks[slot] = -1; } return 0; }
 
+// ===================== terminal PTY sessions =====================
+// A TUI needs a real terminal.  The session layer below keeps a pts master fd
+// and a small argv/envp builder; libkimi's SYS_TERM wrapper drives it from the
+// GUI thread.
+struct term_start_req {
+    uint64_t cmd_ptr, cmd_len, cols, rows;
+};
+typedef struct {
+    int used;
+    pid_t pid;
+    int fd;
+    int status;
+    int exited;
+} TermSession;
+#define MAX_TERMS 4
+static TermSession terms[MAX_TERMS];
+
+extern int kimi_guest_spawn_pty(const char *, const char *, char *const *,
+                                char *const *, int, int, int *);
+extern int kimi_guest_set_winsize(int, int, int);
+
+static TermSession *term_find(uint64_t id) {
+    if (id == 0 || id > MAX_TERMS) return NULL;
+    TermSession *t = &terms[id - 1];
+    return t->used ? t : NULL;
+}
+static uint64_t term_alloc(void) {
+    for (int i = 0; i < MAX_TERMS; i++) {
+        if (!terms[i].used) {
+            memset(&terms[i], 0, sizeof terms[i]);
+            terms[i].used = 1;
+            terms[i].fd = -1;
+            return (uint64_t)(i + 1);
+        }
+    }
+    return ERROR;
+}
+
+// Split a shell-style command line into argv tokens. Supports single/double
+// quotes and backslash escaping; no variable expansion (the guest shell, when
+// installed, handles that for scripts).
+static int split_cmd(char *s, char **out, int max) {
+    int n = 0;
+    char *p = s;
+    while (*p && n < max - 1) {
+        while (*p == ' ' || *p == '\t') p++;
+        if (!*p) break;
+        char quote = 0;
+        if (*p == '\'' || *p == '"') { quote = *p++; }
+        out[n++] = p;
+        char *w = p;
+        while (*p) {
+            if (quote) {
+                if (*p == quote) { p++; break; }
+            } else if (*p == ' ' || *p == '\t') {
+                break;
+            }
+            if (*p == '\\' && p[1]) p++;
+            *w++ = *p++;
+        }
+        *w = 0;
+        if (quote && *p == quote) p++;
+        while (*p && *p != ' ' && *p != '\t') p++;
+    }
+    out[n] = NULL;
+    return n;
+}
+
+static int resolve_exe(const char *sysroot, const char *name, char *out, size_t cap) {
+    if (strchr(name, '/')) {
+        snprintf(out, cap, "%s/%s", sysroot, name);
+        return access(out, X_OK) == 0 ? 0 : -1;
+    }
+    static const char *dirs[] = { "usr/local/bin", "usr/bin", "bin" };
+    for (unsigned i = 0; i < sizeof dirs / sizeof dirs[0]; i++) {
+        snprintf(out, cap, "%s/%s/%s", sysroot, dirs[i], name);
+        if (access(out, X_OK) == 0) return 0;
+    }
+    return -1;
+}
+
+// If `exe` is a script with a #! line, unwrap it so the ELF loader sees the
+// interpreter. npm-installed CLIs (including some opencode builds) are scripts.
+static int unwrap_script(const char *exe, const char *sysroot,
+                         char *runner, size_t runner_cap,
+                         char *script, size_t script_cap,
+                         int *extra_env_shift) {
+    (void)extra_env_shift;
+    int fd = open(exe, O_RDONLY);
+    if (fd < 0) return 0;
+    char line[512];
+    ssize_t n = read(fd, line, sizeof line - 1);
+    close(fd);
+    if (n < 3 || line[0] != '#' || line[1] != '!') return 0;
+    line[n] = 0;
+    char *p = line + 2;
+    while (*p == ' ' || *p == '\t') p++;
+    char *end = p;
+    while (*end && *end != '\n' && *end != '\r') end++;
+    *end = 0;
+    char *interp = p;
+    char *arg1 = NULL;
+    char *sp = p;
+    while (*sp && *sp != ' ' && *sp != '\t') sp++;
+    if (*sp) { *sp++ = 0; while (*sp == ' ' || *sp == '\t') sp++; arg1 = sp; }
+    char *arg2 = NULL;
+    if (arg1) {
+        char *e = arg1;
+        while (*e && *e != ' ' && *e != '\t') e++;
+        if (*e) { *e++ = 0; while (*e == ' ' || *e == '\t') e++; arg2 = e; }
+    }
+    // /usr/bin/env [-S] node -> node
+    if (strstr(interp, "env")) {
+        if (arg1 && strcmp(arg1, "-S") == 0) { arg1 = arg2; }
+        if (!arg1 || !*arg1) return 0;
+        interp = arg1;
+    }
+    if (interp[0] == '/') {
+        if (strncmp(interp, sysroot, strlen(sysroot)) == 0)
+            snprintf(runner, runner_cap, "%s", interp);
+        else
+            snprintf(runner, runner_cap, "%s%s", sysroot, interp);
+    } else {
+        if (resolve_exe(sysroot, interp, runner, runner_cap) != 0) return 0;
+    }
+    snprintf(script, script_cap, "%s", exe);
+    return 1;
+}
+
+static uint64_t fs_term_start(uint64_t reqp) {
+    struct term_start_req *rq = (struct term_start_req *)reqp;
+    if (!rq || rq->cmd_len == 0 || rq->cmd_len >= 512) return ERROR;
+    char cmd[512];
+    memcpy(cmd, (void *)rq->cmd_ptr, rq->cmd_len);
+    cmd[rq->cmd_len] = 0;
+
+    char *tokens[64];
+    int nt = split_cmd(cmd, tokens, 64);
+    if (nt == 0) return ERROR;
+
+    char sysroot[400], home[400], tmp[400], cfg[400], data[400], cache[400];
+    snprintf(sysroot, sizeof sysroot, "%s/alpine/root", diskRoot);
+    snprintf(home, sizeof home, "%s/home", diskRoot);
+    snprintf(tmp, sizeof tmp, "%s/tmp", diskRoot);
+    snprintf(cfg, sizeof cfg, "%s/.config", home);
+    snprintf(data, sizeof data, "%s/.local/share", home);
+    snprintf(cache, sizeof cache, "%s/.cache", home);
+    if (access(sysroot, X_OK) != 0) return ERROR;
+    mkdir_p(home); mkdir_p(tmp); mkdir_p(cfg);
+    mkdir_p(data); mkdir_p(cache);
+
+    char exe[600], runner[600], script[600];
+    if (resolve_exe(sysroot, tokens[0], exe, sizeof exe) != 0) return ERROR;
+
+    char *argv[64];
+    int an = 0;
+    if (unwrap_script(exe, sysroot, runner, sizeof runner, script, sizeof script, NULL)) {
+        argv[an++] = runner;
+        argv[an++] = script;
+    } else {
+        argv[an++] = exe;
+    }
+    for (int i = 1; i < nt && an < 62; i++) argv[an++] = tokens[i];
+    argv[an] = NULL;
+
+    char path[900], lib[900], term_env[] = "TERM=xterm-256color";
+    char color_env[] = "COLORTERM=truecolor", lang_env[] = "LANG=C.UTF-8";
+    char home_env[420], tmp_env[420], pwd_env[420], shell_env[420];
+    char xcfg[420], xdata[420], xcache[420], sslfile[700], ssldir[600];
+    char npmprefix[700], npmcache[420], nodepath[700];
+    snprintf(path, sizeof path, "PATH=%s/usr/local/bin:%s/usr/bin:%s/bin", sysroot, sysroot, sysroot);
+    snprintf(lib, sizeof lib, "LD_LIBRARY_PATH=%s/usr/lib:%s/lib", sysroot, sysroot);
+    snprintf(home_env, sizeof home_env, "HOME=%s", home);
+    snprintf(tmp_env, sizeof tmp_env, "TMPDIR=%s", tmp);
+    snprintf(pwd_env, sizeof pwd_env, "PWD=%s", sysroot);
+    snprintf(shell_env, sizeof shell_env, "SHELL=%s/bin/sh", sysroot);
+    snprintf(xcfg, sizeof xcfg, "XDG_CONFIG_HOME=%s", cfg);
+    snprintf(xdata, sizeof xdata, "XDG_DATA_HOME=%s", data);
+    snprintf(xcache, sizeof xcache, "XDG_CACHE_HOME=%s", cache);
+    snprintf(sslfile, sizeof sslfile, "SSL_CERT_FILE=%s/etc/ssl/certs/ca-certificates.crt", sysroot);
+    snprintf(ssldir, sizeof ssldir, "SSL_CERT_DIR=%s/etc/ssl/certs", sysroot);
+    snprintf(npmprefix, sizeof npmprefix, "NPM_CONFIG_PREFIX=%s/usr/local", sysroot);
+    snprintf(npmcache, sizeof npmcache, "NPM_CONFIG_CACHE=%s/.npm", home);
+    snprintf(nodepath, sizeof nodepath, "NODE_PATH=%s/usr/lib/node_modules:%s/usr/local/lib/node_modules", sysroot, sysroot);
+    char *envp[] = {
+        path, lib, home_env, tmp_env, pwd_env, shell_env, xcfg, xdata, xcache,
+        term_env, color_env, lang_env, sslfile, ssldir, npmprefix, npmcache, nodepath,
+        "PYTHONDONTWRITEBYTECODE=1", NULL
+    };
+
+    int master = -1;
+    pid_t pid = kimi_guest_spawn_pty(exe, sysroot, argv, envp,
+                                     (int)rq->cols, (int)rq->rows, &master);
+    if (pid <= 0 || master < 0) return ERROR;
+    uint64_t id = term_alloc();
+    if (id == ERROR) { close(master); kill(pid, SIGTERM); return ERROR; }
+    TermSession *t = &terms[id - 1];
+    t->pid = pid;
+    t->fd = master;
+    LOG("term %llu pid=%d exe=%s", (unsigned long long)id, (int)pid, exe);
+    return id;
+}
+
+static uint64_t fs_term(uint64_t op, uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3) {
+    switch (op) {
+    case 0: return fs_term_start(a0);
+    case 1: {
+        TermSession *t = term_find(a0);
+        if (!t) return ERROR;
+        ssize_t n = read(t->fd, (void *)a1, (size_t)a2);
+        if (n < 0) return (errno == EAGAIN || errno == EWOULDBLOCK) ? 0 : ERROR;
+        return (uint64_t)n;
+    }
+    case 2: {
+        TermSession *t = term_find(a0);
+        if (!t) return ERROR;
+        ssize_t n = write(t->fd, (void *)a1, (size_t)a2);
+        return n < 0 ? ERROR : (uint64_t)n;
+    }
+    case 3: {
+        TermSession *t = term_find(a0);
+        if (!t) return ERROR;
+        return kimi_guest_set_winsize(t->fd, (int)a1, (int)a2) == 0 ? 0 : ERROR;
+    }
+    case 4: {
+        TermSession *t = term_find(a0);
+        if (!t) return ERROR;
+        if (!t->exited) {
+            kill(t->pid, SIGTERM);
+            int st = 0;
+            waitpid(t->pid, &st, 0);
+            t->status = st;
+            t->exited = 1;
+        }
+        int code = WIFEXITED(t->status) ? WEXITSTATUS(t->status) : 128 + WTERMSIG(t->status);
+        close(t->fd);
+        memset(t, 0, sizeof *t);
+        return (uint64_t)code;
+    }
+    case 5: {
+        TermSession *t = term_find(a0);
+        if (!t) return 0;
+        if (!t->exited) {
+            int st = 0;
+            pid_t r = waitpid(t->pid, &st, WNOHANG);
+            if (r == t->pid) { t->status = st; t->exited = 1; }
+        }
+        return t->exited ? 0 : 1;
+    }
+    default: return ERROR;
+    }
+}
+
 // ===================== syscall dispatch =====================
 static uint64_t str_arg(uint64_t p, uint64_t len, char *out, size_t cap) { if (len >= cap) len = cap - 1; memcpy(out, (void *)p, len); out[len] = 0; return len; }
 
@@ -502,6 +761,7 @@ uint64_t kimi_host_syscall(uint64_t n, uint64_t a0, uint64_t a1, uint64_t a2, ui
         if (a2 <= 3) return audio_cmd(NULL, (int)a2);
         return ERROR;
     }
+    case 48: return fs_term(a0, a1, a2, a3, a4); // SYS_TERM: PTY session
     case 47: { // SYS_IMPORT_FILE: launch SAF picker into /disk dir (async copy)
         str_arg(a0, a1, path, sizeof path);
         const char *rel;

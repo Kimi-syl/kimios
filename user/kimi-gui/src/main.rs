@@ -11,6 +11,7 @@ mod font_data;
 mod keyboard;
 mod theme;
 mod font_store;
+mod term;
 
 use core::panic::PanicInfo;
 use core::sync::atomic::{AtomicU64, Ordering};
@@ -221,6 +222,8 @@ struct Ui {
     settings: Settings,
     apps: apps::Apps,
     shift: bool,
+    ctrl: bool,
+    alt: bool,
     symbols: bool,
     osk: bool,
     shade: bool,
@@ -241,6 +244,8 @@ impl Ui {
             settings: Settings::new(),
             apps: apps::Apps::new(),
             shift: false,
+            ctrl: false,
+            alt: false,
             symbols: false,
             osk: false,
             shade: false,
@@ -298,6 +303,12 @@ fn gui_run() -> ! {
         if dirty {
             render(&screen, &mut ui, clock);
             dirty = false;
+        }
+
+        if let Scene::App(AppKind::Terminal) = ui.scene {
+            if apps::poll_terminal(&mut ui.apps) {
+                dirty = true;
+            }
         }
 
         match k::input_poll() {
@@ -394,10 +405,25 @@ fn handle(screen: &Screen, ui: &mut Ui, event: k::InputEvent, clock: [u64; 7]) -
             false
         }
         (k::EV_KEY, k::KEY_ESC) if event.value != 0 => {
+            if let Scene::App(AppKind::Terminal) = ui.scene {
+                if apps::key_full(&mut ui.apps, AppKind::Terminal, k::KEY_ESC, false, ui.ctrl, ui.alt) {
+                    render(screen, ui, clock);
+                    return true;
+                }
+                return false;
+            }
             k::exit(0);
         }
         (k::EV_KEY, 42) | (k::EV_KEY, 54) => {
             ui.shift = event.value != 0;
+            false
+        }
+        (k::EV_KEY, 29) | (k::EV_KEY, 97) => {
+            ui.ctrl = event.value != 0;
+            false
+        }
+        (k::EV_KEY, 56) | (k::EV_KEY, 100) => {
+            ui.alt = event.value != 0;
             false
         }
         (k::EV_KEY, code)
@@ -421,7 +447,9 @@ fn handle(screen: &Screen, ui: &mut Ui, event: k::InputEvent, clock: [u64; 7]) -
                 return false;
             }
             if let Scene::App(app) = ui.scene {
-                if apps::key(&mut ui.apps, app, code, ui.shift) {
+                if apps::key_full(&mut ui.apps, app, code, ui.shift, ui.ctrl, ui.alt) {
+                    ui.ctrl = false;
+                    ui.alt = false;
                     render(screen, ui, clock);
                     return true;
                 }
@@ -828,6 +856,9 @@ fn open_app(screen: &Screen, ui: &mut Ui, app: AppKind, clock: [u64; 7]) {
 fn close_app(screen: &Screen, ui: &mut Ui, clock: [u64; 7]) {
     let width = screen.width();
     if let Scene::App(app) = ui.scene {
+        if app == AppKind::Terminal {
+            ui.apps.terminal.close_guest();
+        }
         if ui.settings.animations {
             for step in 0..=6 {
                 let offset = width * ease(step, 6) / 100;

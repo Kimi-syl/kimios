@@ -1374,3 +1374,32 @@ Open fronts, in rough priority order:
    on secondary cores.
 5. **Bare metal (spes)** — blocked on bootloader unlock and stock-image
    dumps; see [hardware.md](hardware.md).
+
+---
+
+### Ph53 — Ghostty-class GUI terminal + PTY TUI support
+
+**Built.** The line-oriented Terminal widget was replaced by a VT/ANSI
+emulator (`user/kimi-gui/src/term.rs`) backed by a pseudoterminal session on
+the Android libOS host (`kimi_guest_spawn_pty` / `SYS_TERM`).
+
+**Why.** Captured pipes are sufficient for `node -e '...'`, but every TUI checks
+`isatty(1)` and switches to the alternate screen. Without a PTY, opencode/vim/
+htop cannot enter their interactive modes at all.
+
+**How.** The emulator keeps an 80x26 cell grid plus 256 lines of scrollback in
+fixed `.bss` buffers, parses CSI/OSC/SGR sequences (including 256-colour and
+truecolour), supports cursor addressing, erase/insert/delete, scroll regions,
+the alternate screen (`?1049h/l`) and cursor-status replies. The Android C
+dispatcher opens `/dev/ptmx`, puts the guest in its own session with the slave
+as controlling terminal, sets `TERM=xterm-256color` and `COLORTERM=truecolor`,
+and exposes non-blocking read/write/resize/status syscalls. The GUI pumps guest
+output from its main loop and sends raw key sequences (arrows, Esc, Ctrl,
+bracketed paste) back to the PTY. npm-installed script launchers are unwrapped by
+reading their `#!` line so they run through the sysroot's `node`/`sh`.
+
+**Verified.** Rust builds for the bare-metal userland; Android/iOS staticlibs
+compile in CI. End-to-end TUI verification requires an Android device with a
+guest sysroot and is best done with `opencode` installed under
+`usr/local/bin`.
+

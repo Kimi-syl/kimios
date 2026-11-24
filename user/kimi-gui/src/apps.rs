@@ -2,10 +2,8 @@ use crate::draw::Screen;
 use crate::AppKind;
 use libkimi as k;
 use crate::theme::{BLACK, SURFACE, SURFACE_HI, SURFACE_MAX, OUTLINE, TEXT, MUTED, RED, RED_DIM, GREEN};
+use crate::term::Terminal;
 
-
-const TERM_WIDTH: usize = 50;
-const TERM_LINES: usize = 40;
 
 pub struct Music {
     track: usize,
@@ -81,13 +79,6 @@ pub struct Weather {
     status_len: usize,
 }
 
-pub struct Terminal {
-    lines: [[u8; TERM_WIDTH]; TERM_LINES],
-    line_len: [u8; TERM_LINES],
-    count: usize,
-    input: [u8; 64],
-    input_len: usize,
-}
 
 const BROWSER_WIDTH: usize = 50;
 const BROWSER_LINES: usize = 90;
@@ -717,48 +708,6 @@ impl Notes {
     }
 }
 
-impl Terminal {
-    fn push(&mut self, text: &str) {
-        for raw in text.split('\n') {
-            if self.count == TERM_LINES {
-                for index in 1..TERM_LINES {
-                    self.lines[index - 1] = self.lines[index];
-                    self.line_len[index - 1] = self.line_len[index];
-                }
-                self.count -= 1;
-            }
-            let mut used = 0usize;
-            let bytes = raw.as_bytes();
-            if bytes.is_empty() {
-                self.line_len[self.count] = 0;
-                self.count += 1;
-                continue;
-            }
-            for &byte in bytes {
-                if used == TERM_WIDTH {
-                    self.line_len[self.count] = TERM_WIDTH as u8;
-                    self.count += 1;
-                    used = 0;
-                    if self.count == TERM_LINES {
-                        for index in 1..TERM_LINES {
-                            self.lines[index - 1] = self.lines[index];
-                            self.line_len[index - 1] = self.line_len[index];
-                        }
-                        self.count -= 1;
-                    }
-                }
-                self.lines[self.count][used] = byte;
-                used += 1;
-            }
-            self.line_len[self.count] = used as u8;
-            self.count += 1;
-        }
-    }
-
-    fn clear(&mut self) {
-        self.count = 0;
-    }
-}
 
 impl Files {
     fn set_status(&mut self, text: &str) {
@@ -990,15 +939,7 @@ impl Weather {
 
 impl Apps {
     pub fn new() -> Self {
-        let mut terminal = Terminal {
-            lines: [[0u8; TERM_WIDTH]; TERM_LINES],
-            line_len: [0u8; TERM_LINES],
-            count: 0,
-            input: [0u8; 64],
-            input_len: 0,
-        };
-        terminal.push("KimiOS terminal 0.1");
-        terminal.push("Type help for commands.");
+        let terminal = Terminal::new();
         Self {
             music: Music {
                 track: 0,
@@ -1247,6 +1188,13 @@ pub fn key_char(code: u16, shift: bool) -> Option<(u8, bool)> {
 }
 
 pub fn key(apps: &mut Apps, app: AppKind, code: u16, shift: bool) -> bool {
+    key_full(apps, app, code, shift, false, false)
+}
+
+/// Keyboard entry with terminal modifiers. Hardware Ctrl/Alt are tracked by the
+/// main loop; the on-screen terminal accessory row uses the sticky `ctrl` bit
+/// stored on the Terminal itself.
+pub fn key_full(apps: &mut Apps, app: AppKind, code: u16, shift: bool, ctrl: bool, alt: bool) -> bool {
     match app {
         AppKind::Notes => {
             if apps.notes.editing.is_none() {
@@ -1264,29 +1212,7 @@ pub fn key(apps: &mut Apps, app: AppKind, code: u16, shift: bool) -> bool {
                 None => false,
             }
         }
-        AppKind::Terminal => {
-            match key_event(code, shift) {
-                Some((0, true)) => {
-                    if apps.terminal.input_len > 0 {
-                        apps.terminal.input_len -= 1;
-                    }
-                    true
-                }
-                Some((b'\n', _)) => {
-                    terminal_execute(apps);
-                    true
-                }
-                Some((byte, _)) => {
-                    if apps.terminal.input_len < apps.terminal.input.len() {
-                        let index = apps.terminal.input_len;
-                        apps.terminal.input[index] = byte;
-                        apps.terminal.input_len += 1;
-                    }
-                    true
-                }
-                None => false,
-            }
-        }
+        AppKind::Terminal => terminal_key(apps, code, shift, ctrl, alt),
         AppKind::Browser => {
             if !apps.browser.editing {
                 match code {
@@ -1329,58 +1255,147 @@ pub fn key(apps: &mut Apps, app: AppKind, code: u16, shift: bool) -> bool {
     }
 }
 
+fn terminal_key(apps: &mut Apps, code: u16, shift: bool, ctrl: bool, alt: bool) -> bool {
+    let term = &mut apps.terminal;
+    let ctrl = ctrl || term.ctrl;
+
+    if term.is_guest() {
+        let seq: &[u8] = match code {
+            1 => b"\x1b",
+            14 => b"\x7f",
+            15 => b"\t",
+            28 => b"\r",
+            102 => b"\x1b[H",
+            103 => b"\x1b[A",
+            104 => b"\x1b[5~",
+            105 => b"\x1b[D",
+            106 => b"\x1b[C",
+            107 => b"\x1b[F",
+            108 => b"\x1b[B",
+            109 => b"\x1b[6~",
+            110 => b"\x1b[2~",
+            111 => b"\x1b[3~",
+            _ => {
+                match key_event(code, shift) {
+                    Some((0, true)) => b"\x7f",
+                    Some((byte, _)) => {
+                        let mut one = [0u8; 1];
+                        if ctrl {
+                            one[0] = if byte.is_ascii_alphabetic() {
+                                byte.to_ascii_lowercase() & 0x1f
+                            } else if byte == b'[' {
+                                0x1b
+                            } else {
+                                byte
+                            };
+                        } else {
+                            one[0] = byte;
+                        }
+                        // Alt/Cmd is an ESC prefix in the terminal protocol.
+                        if alt {
+                            let _ = k::term_write(term.guest, b"\x1b");
+                        }
+                        if byte == b'\n' { one[0] = b'\r'; }
+                        term.send_bytes(&one);
+                        term.ctrl = false;
+                        return true;
+                    }
+                    None => return false,
+                }
+            }
+        };
+        if alt { let _ = k::term_write(term.guest, b"\x1b"); }
+        let sent = term.send_bytes(seq);
+        term.ctrl = false;
+        return sent;
+    }
+
+    // Local line editor / built-in shell mode.
+    match key_event(code, shift) {
+        Some((0, true)) => {
+            if term.input_len > 0 { term.input_len -= 1; }
+            true
+        }
+        Some((b'\n', _)) => { terminal_execute(apps); true }
+        Some((byte, _)) => {
+            if ctrl && byte.is_ascii_alphabetic() {
+                match byte.to_ascii_lowercase() {
+                    b'c' => { term.input_len = 0; term.ctrl = false; return true; }
+                    b'l' => { term.clear(); term.ctrl = false; return true; }
+                    _ => {}
+                }
+            }
+            if term.input_len < term.input.len() {
+                let index = term.input_len;
+                term.input[index] = byte;
+                term.input_len += 1;
+            }
+            term.ctrl = false;
+            true
+        }
+        None => match code {
+            104 => { term.scroll_up(5); true }
+            109 => { term.scroll_down(5); true }
+            103 => { term.scroll_up(1); true }
+            108 => { term.scroll_down(1); true }
+            _ => false,
+        },
+    }
+}
+
 fn terminal_execute(apps: &mut Apps) {
-    let mut command = [0u8; 64];
-    let length = apps.terminal.input_len.min(64);
+    let mut command = [0u8; 192];
+    let length = apps.terminal.input_len.min(command.len());
     command[..length].copy_from_slice(&apps.terminal.input[..length]);
     apps.terminal.input_len = 0;
     let mut start = 0;
     let mut end = length;
-    while start < end && command[start] == b' ' {
-        start += 1;
-    }
-    while end > start && command[end - 1] == b' ' {
-        end -= 1;
-    }
+    while start < end && command[start] == b' ' { start += 1; }
+    while end > start && command[end - 1] == b' ' { end -= 1; }
     let line = slice_str(&command[start..end]);
-    let mut echo = [0u8; 70];
+    if line.is_empty() { return; }
+
+    let mut echo = [0u8; 224];
     echo[0] = b'$';
     echo[1] = b' ';
-    let shown = (end - start).min(63);
-    echo[2..2 + shown].copy_from_slice(&command[start..start + shown]);
-    apps.terminal.push(slice_str(&echo[..2 + shown]));
-    if line.is_empty() {
-        return;
-    }
+    let shown = line.len().min(220);
+    echo[2..2 + shown].copy_from_slice(&line.as_bytes()[..shown]);
+    echo[2 + shown] = b'\r';
+    echo[3 + shown] = b'\n';
+    apps.terminal.feed(&echo[..4 + shown]);
+
     let mut split = 0;
-    while split < line.len() && line.as_bytes()[split] != b' ' {
-        split += 1;
-    }
-    let (name, _rest) = line.split_at(split);
+    while split < line.len() && line.as_bytes()[split] != b' ' { split += 1; }
+    let (name, rest) = line.split_at(split);
+    let rest = rest.trim_start();
+
     match name {
-        "" => {}
         "clear" => apps.terminal.clear(),
-        "exit" => apps.terminal.push("Close with the back arrow."),
-        "exec" => apps.terminal.push("exec: use 'run <file>' in the GUI terminal"),
+        "exit" => apps.terminal.feed_text("Close with the back arrow.\r\n"),
+        "opencode" | "guest" | "pty" => {
+            let cmd = if name == "opencode" { line } else { rest };
+            if cmd.is_empty() {
+                apps.terminal.feed_text("usage: opencode [args]\r\n");
+            } else if !apps.terminal.start_guest(cmd) {
+                apps.terminal.feed_text("Could not start PTY guest. Install node/opencode with apkg first.\r\n");
+            }
+        }
+        "run" => {
+            if rest.is_empty() {
+                apps.terminal.feed_text("usage: run <binary> [args]\r\n");
+            } else if !apps.terminal.start_guest(rest) {
+                apps.terminal.feed_text("run: host guest execution unavailable\r\n");
+            }
+        }
         _ => {
-            // Same command interpreter as the CLI shell; capture its console
-            // output and render it into the terminal display.
+            // Same command interpreter as the CLI shell, but preserve ANSI
+            // sequences instead of stripping control bytes.
             k::capture_begin();
             k::shell::exec(line.as_bytes());
             let mut out = [0u8; 8192];
             let n = k::capture_take(&mut out);
             k::capture_end();
-            for byte in &mut out[..n] {
-                if *byte == b'\n' || *byte == b'\t' {
-                    continue;
-                }
-                if *byte < 32 || *byte > 126 {
-                    *byte = b'.';
-                }
-            }
-            if n > 0 {
-                apps.terminal.push(slice_str(&out[..n]));
-            }
+            if n > 0 { apps.terminal.feed(&out[..n]); }
         }
     }
 }
@@ -1444,6 +1459,7 @@ pub fn tap(_screen: &Screen, apps: &mut Apps, app: AppKind, point: (i64, i64), o
         AppKind::Photos => photos_tap(apps, point),
         AppKind::Files => files_tap(apps, point),
         AppKind::Weather => weather_tap(apps, point),
+        AppKind::Terminal => terminal_tap(apps, point, osk),
         AppKind::Browser => browser_tap(apps, point, osk),
         AppKind::Apk => apk_tap(apps, point),
         AppKind::Dvm => dvm_tap(apps, point),
@@ -1623,6 +1639,12 @@ fn weather_tap(apps: &mut Apps, point: (i64, i64)) {
     if point.1 >= 368 && point.1 <= 408 && point.0 >= 20 && point.0 <= 160 {
         apps.weather.refresh();
     }
+}
+
+/// Pump terminal PTY output. Called from the GUI main loop every frame; returns
+/// true when the terminal changed and the scene needs redrawing.
+pub fn poll_terminal(apps: &mut Apps) -> bool {
+    apps.terminal.poll_guest()
 }
 
 pub fn draw(screen: &Screen, apps: &Apps, app: AppKind, clock: [u64; 7], osk: bool) {
@@ -2052,28 +2074,78 @@ fn draw_weather(screen: &Screen, weather: &Weather, clock: [u64; 7]) {
     screen.text(24, 730, slice_str(&weather.status[..weather.status_len]), 1, MUTED());
 }
 
+fn terminal_bar_y(osk: bool) -> i64 { if osk { 418 } else { 732 } }
+
+fn terminal_accessory(index: usize, osk: bool) -> (i64, i64, i64, i64) {
+    (16 + index as i64 * 45, terminal_bar_y(osk), 42, 28)
+}
+
 fn draw_terminal(screen: &Screen, terminal: &Terminal, osk: bool) {
     let width = screen.width();
     screen.fill(0, 93, width, screen.height() - 93, BLACK());
-    let max_lines = if osk { 24 } else { TERM_LINES };
-    let separator_y = if osk { 416 } else { 684 };
-    let input_y = if osk { 430 } else { 700 };
-    let start = terminal.count.saturating_sub(max_lines);
-    let mut y = 108i64;
-    for index in start..terminal.count {
-        let length = terminal.line_len[index] as usize;
-        screen.text_mono(20, y, slice_str(&terminal.lines[index][..length]), 1, TEXT());
-        y += 13;
+
+    // 80 columns at 5 logical px/cell fits the 480 px app width with room for
+    // a scrollbar. 26 rows is the classic 80x24 TUI size plus breathing room.
+    terminal.render(screen, 20, 104, 5, 11, 10);
+
+    // Scrollback position indicator.
+    if osk {
+        let total = 26 + 120;
+        let pos = 104 + ((26 - terminal.scroll_offset.min(25)) * 270 / total) as i64;
+        screen.fill(474, 104, 2, 286, 0x0020_2028);
+        screen.fill(474, pos, 2, 10, theme_muted());
     }
-    screen.fill(20, separator_y, width - 40, 1, OUTLINE());
-    screen.text_mono(20, input_y, "$", 2, RED());
-    let shown = terminal.input_len.min(52);
-    screen.text_mono(44, input_y, slice_str(&terminal.input[..shown]), 2, TEXT());
-    if terminal.input_len == 0 {
-        screen.text_mono(44, input_y, "type a command", 2, 0x0050_505a);
+
+    if !terminal.is_guest() {
+        let prompt_y = 396;
+        screen.text_mono(20, prompt_y, "$", 1, RED());
+        let shown = terminal.input_len.min(78);
+        screen.text_mono(34, prompt_y, slice_str(&terminal.input[..shown]), 1, TEXT());
+        if terminal.input_len == 0 {
+            screen.text_mono(34, prompt_y, "type a command or `opencode`", 1, MUTED());
+        }
+        if !osk {
+            screen.text_mono(20, 458, "PTY guest: opencode [args]  |  run <binary>  |  ^C / Esc / arrows above", 1, MUTED());
+            screen.text_mono(20, 476, slice_str(&terminal.title[..terminal.title_len]), 1, MUTED());
+        }
+    } else if !osk {
+        screen.text_mono(20, 458, "PTY attached - full-screen TUI mode. Back returns to KimiOS.", 1, MUTED());
     }
-    if !osk {
-        screen.text_mono(20, 744, "help  ls  cat  date  df  mem  ps  uptime  clear", 1, MUTED());
+
+    let labels = ["esc", "tab", "ctrl", "←", "↑", "↓", "→", "^C", "pgup", "pgdn"];
+    for (index, label) in labels.iter().enumerate() {
+        let (x, y, w, h) = terminal_accessory(index, osk);
+        let active = (index == 2 && terminal.ctrl) || terminal.is_guest();
+        let fill = if active { SURFACE_MAX() } else { SURFACE_HI() };
+        screen.round_rect(x, y, w, h, 8, fill);
+        screen.text_centered(x + w / 2, y + 6, label, 1, if index == 2 && terminal.ctrl { RED() } else { TEXT() });
+    }
+}
+
+fn theme_muted() -> u32 { MUTED() }
+
+fn terminal_tap(apps: &mut Apps, point: (i64, i64), osk: bool) {
+    let term = &mut apps.terminal;
+    if point.1 >= terminal_bar_y(osk) && point.1 <= terminal_bar_y(osk) + 28 {
+        for index in 0..10 {
+            let (x, y, w, h) = terminal_accessory(index, osk);
+            if point.0 >= x && point.0 < x + w && point.1 >= y && point.1 < y + h {
+                match index {
+                    0 => { term.send_bytes(b"\x1b"); }
+                    1 => { term.send_bytes(b"\t"); }
+                    2 => { term.ctrl = !term.ctrl; }
+                    3 => { if term.is_guest() { term.send_bytes(b"\x1b[D"); } else { term.scroll_up(1); } }
+                    4 => { if term.is_guest() { term.send_bytes(b"\x1b[A"); } else { term.scroll_up(1); } }
+                    5 => { if term.is_guest() { term.send_bytes(b"\x1b[B"); } else { term.scroll_down(1); } }
+                    6 => { if term.is_guest() { term.send_bytes(b"\x1b[C"); } else { term.scroll_down(1); } }
+                    7 => { term.send_bytes(b"\x03"); }
+                    8 => { if term.is_guest() { term.send_bytes(b"\x1b[5~"); } else { term.scroll_up(5); } }
+                    9 => { if term.is_guest() { term.send_bytes(b"\x1b[6~"); } else { term.scroll_down(5); } }
+                    _ => {}
+                }
+                return;
+            }
+        }
     }
 }
 
