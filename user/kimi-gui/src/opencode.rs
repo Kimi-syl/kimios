@@ -496,7 +496,8 @@ impl Oc {
 
     pub fn refresh_installed(&mut self) {
         self.installed = k::stat("/disk/alpine/root/usr/bin/opencode").is_some()
-            || k::stat("/disk/alpine/root/bin/opencode").is_some();
+            || k::stat("/disk/alpine/root/bin/opencode").is_some()
+            || k::stat("/disk/opencode/node-runtime.marker").is_some();
         if self.installed && self.status_len == 0 {
             self.set_status("Tap Start to run opencode serve");
         }

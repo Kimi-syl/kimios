@@ -1487,7 +1487,7 @@ fn terminal_start(apps: &mut Apps) {
     t.started = true;
     t.vt.reset();
     t.note("KimiOS shell - commands run natively on the device.");
-    t.note("  ls  cat  npm install <pkg>  node ...  python3 ...  busybox ...");
+    t.note("  ls  cat  npm install <pkg>  node ...  python3 ...  busybox ...  opencode");
     t.note("");
 }
 
@@ -1540,8 +1540,9 @@ pub fn terminal_frame(apps: &mut Apps) -> bool {
 
 /// Submit the current line: echo it, run it via the loader, render its output.
 fn is_tui_cmd(name: &str) -> bool {
+    let name = name.rsplit('/').next().unwrap_or(name);
     matches!(name,
-        "top" | "htop" | "btop" | "vi" | "vim" | "nvim" | "less" | "more" | "most"
+        "opencode" | "top" | "htop" | "btop" | "vi" | "vim" | "nvim" | "less" | "more" | "most"
         | "nano" | "watch" | "tmux" | "screen" | "mc" | "man" | "fzf" | "dialog"
         | "ctop" | "ncdu" | "atop")
 }
@@ -1574,7 +1575,18 @@ fn terminal_run(apps: &mut Apps) {
     let rest = rest.trim();
 
     // Full-screen TUI -> run under a REAL PTY so it gets a tty and can draw.
+    // The emulator/rendering is shared by Android and iOS; the guest runner is
+    // Android-only because iOS forbids fork/exec of downloaded binaries.
     if is_tui_cmd(prog) {
+        if !k::proc_supported() {
+            if prog == "opencode" {
+                t.note("No terminal backend configured.");
+                t.note("On iPad, set /disk/remote-tty.cfg to a Kimi PTY bridge.");
+            } else {
+                t.note("No terminal backend configured.");
+            }
+            return;
+        }
         t.vt.reset();
         match k::proc_spawn(prog, rest, crate::vt::ROWS as u64, crate::vt::COLS as u64) {
             Some(slot) => {
@@ -1811,6 +1823,10 @@ fn oc_key(apps: &mut Apps, code: u16, shift: bool) -> bool {
 
 fn oc_tap(screen: &Screen, apps: &mut Apps, point: (i64, i64)) {
     let _ = screen;
+    if point.1 >= 120 && point.1 <= 148 && point.0 >= 330 && apps.oc.ready {
+        let _ = k::open_url("http://127.0.0.1:4199/");
+        return;
+    }
     let oc = &mut apps.oc;
     if oc.setup {
         if point.1 >= 104 && point.1 <= 144 && point.0 <= 120 {
@@ -1935,6 +1951,9 @@ fn draw_oc(screen: &Screen, oc: &crate::opencode::Oc, osk: bool) {
     let st = slice_str(&oc.status[..oc.status_len]);
     let sl = st.len().min(40);
     screen.text(20, 132, &st[..sl], 1, GREEN());
+    if oc.ready {
+        screen.text(width - 76, 132, "Web UI", 1, RED());
+    }
     let (l0, bg0) = if !oc.installed {
         ("Install", RED())
     } else if oc.started {

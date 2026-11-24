@@ -53,6 +53,7 @@ final class KimiHost {
         instrBox = UnsafeMutablePointer<UInt64>.allocate(capacity: 16)
         instrBox?.initialize(repeating: 0, count: 16)
         startNs = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+        KimiNode.shared.prepare()
     }
 
     var frontBufferMTL: MTLBuffer? { frontBuffer }
@@ -218,9 +219,172 @@ final class KimiHost {
             return UInt64.max
         case 10, 24: // SYS_WAIT / SYS_KILL (no child processes)
             return UInt64.max
+
+        // ---- host services shared with the Android dispatcher ----
+        case 40: // SYS_SYMLINK(target,targetlen,path,pathlen)
+            return KimiSystem.symlink(target: userStr(a0, a1), path: userStr(a2, a3))
+                ? 0 : UInt64.max
+        case 42: // SYS_FETCH_URL(url,urlLen,dest,destLen)
+            return KimiFetch.shared.fetchSync(url: userStr(a0, a1), dest: userStr(a2, a3))
+                ?? UInt64.max
+        case 43: // SYS_LOCAL_TIME(out[9])
+            guard let out = UnsafeMutablePointer<UInt64>(bitPattern: UInt(a0)) else {
+                return UInt64.max
+            }
+            KimiSystem.localTime(out: out)
+            return 0
+        case 44: // SYS_LOCATION(out[4])
+            guard let out = UnsafeMutablePointer<UInt64>(bitPattern: UInt(a0)) else {
+                return UInt64.max
+            }
+            let fix = KimiLocation.shared.snapshot()
+            for i in 0..<4 { out[i] = fix[i] }
+            return 0
+        case 45: // SYS_OPEN_URL(url,len)
+            return KimiSystem.openURL(userStr(a0, a1)) ? 0 : UInt64.max
+        case 46: // SYS_AUDIO(path,len,cmd)
+            if a2 == 4 {
+                guard let out = UnsafeMutablePointer<UInt64>(bitPattern: UInt(a0)) else {
+                    return UInt64.max
+                }
+                return KimiAudio.shared.query(out: out)
+            }
+            let path = a2 == 0 ? userStr(a0, a1) : nil
+            return KimiAudio.shared.command(path: path, cmd: a2)
+        case 47: // SYS_IMPORT_FILE(dir,len)
+            return KimiImporter.shared.launch(dir: userStr(a0, a1)) ? 0 : UInt64.max
+        case 49: // SYS_SYSINFO(out[10])
+            guard let out = UnsafeMutablePointer<UInt64>(bitPattern: UInt(a0)) else {
+                return UInt64.max
+            }
+            KimiSystem.sysinfo(out: out)
+            return 0
+        case 50: // SYS_PROCLIST(out,capacity)
+            guard let out = UnsafeMutablePointer<UInt64>(bitPattern: UInt(a0)) else {
+                return UInt64.max
+            }
+            return KimiSystem.procList(out: out, capacity: a1)
+        case 52: // SYS_COPY(src,srclen,dst,dstlen)
+            return KimiSystem.copyFile(src: userStr(a0, a1), dst: userStr(a2, a3))
+                ? 0 : UInt64.max
+        case 57: // SYS_FETCH_ASYNC(url,urlLen,dest,destLen)
+            return KimiFetch.shared.startAsync(url: userStr(a0, a1), dest: userStr(a2, a3))
+                ? 0 : UInt64.max
+        case 58: // SYS_FETCH_PROGRESS(out[3])
+            guard let out = UnsafeMutablePointer<UInt64>(bitPattern: UInt(a0)) else {
+                return UInt64.max
+            }
+            return KimiFetch.shared.progress(out: out)
+        case 48: // SYS_WEB: embedded WKWebView
+            return webSyscall(a0, a1, a2, a3, a4)
+        case 56: // SYS_PROC: remote PTY sessions
+            return procSyscall(a0, a1, a2, a3, a4)
+        case 59: // SYS_FETCH_AUTH(req{up,ul,dp,dl,kp,kl})
+            guard let base = UnsafeMutableRawPointer(bitPattern: UInt(a0)) else {
+                return UInt64.max
+            }
+            let f = base.assumingMemoryBound(to: UInt64.self)
+            let url = userStr(f[0], f[1])
+            let dest = userStr(f[2], f[3])
+            let key = userStr(f[4], f[5])
+            return KimiFetch.shared.fetchSync(url: url, dest: dest, bearer: key) ?? UInt64.max
         default:
             return UInt64.max
         }
+    }
+
+    private func procSyscall(_ op: UInt64, _ a1: UInt64, _ a2: UInt64,
+                             _ a3: UInt64, _ a4: UInt64) -> UInt64 {
+        switch Int(op) {
+        case 0: // spawn(req{bin,binLen,arg,argLen,rows,cols})
+            guard let base = UnsafeMutableRawPointer(bitPattern: UInt(a1)) else {
+                return UInt64.max
+            }
+            let f = base.assumingMemoryBound(to: UInt64.self)
+            let bin = userStr(f[0], f[1])
+            let arg = userStr(f[2], f[3])
+            if KimiNode.shared.canRun(bin: bin, arg: arg),
+               let slot = KimiNode.shared.spawnServer(port: 4199) {
+                return slot
+            }
+            return KimiRemoteTTY.shared.spawn(bin: bin, arg: arg, rows: f[4], cols: f[5])
+                ?? UInt64.max
+        case 1: // read(slot,buf,cap)
+            guard let p = UnsafeMutableRawPointer(bitPattern: UInt(a2)) else { return 0 }
+            if KimiNode.shared.isLocalSlot(a1) {
+                return KimiNode.shared.read(slot: a1, into: p, cap: a3)
+            }
+            return KimiRemoteTTY.shared.read(slot: a1, into: p, cap: a3)
+        case 2: // write(slot,buf,len)
+            guard let p = UnsafeMutableRawPointer(bitPattern: UInt(a2)) else { return 0 }
+            let data = Data(bytes: p, count: Int(a3))
+            if KimiNode.shared.isLocalSlot(a1) {
+                return KimiNode.shared.write(slot: a1, data: data)
+            }
+            return KimiRemoteTTY.shared.write(slot: a1, data: data)
+        case 3: // kill(slot)
+            if KimiNode.shared.isLocalSlot(a1) {
+                return KimiNode.shared.close(slot: a1) ? 0 : UInt64.max
+            }
+            return KimiRemoteTTY.shared.close(slot: a1) ? 0 : UInt64.max
+        case 4: // resize(slot,rows,cols)
+            if KimiNode.shared.isLocalSlot(a1) {
+                return KimiNode.shared.resize(slot: a1, rows: a2, cols: a3) ? 0 : UInt64.max
+            }
+            return KimiRemoteTTY.shared.resize(slot: a1, rows: a2, cols: a3) ? 0 : UInt64.max
+        case 5: // status
+            if KimiNode.shared.isLocalSlot(a1) {
+                return KimiNode.shared.status(slot: a1)
+            }
+            return KimiRemoteTTY.shared.status(slot: a1)
+        case 6: // close
+            if KimiNode.shared.isLocalSlot(a1) {
+                return KimiNode.shared.close(slot: a1) ? 0 : UInt64.max
+            }
+            return KimiRemoteTTY.shared.close(slot: a1) ? 0 : UInt64.max
+        case 7: // capability
+            return KimiRemoteTTY.shared.supported() ? 1 : 0
+        default:
+            return UInt64.max
+        }
+    }
+
+    private func webSyscall(_ op: UInt64, _ a1: UInt64, _ a2: UInt64,
+                            _ a3: UInt64, _ a4: UInt64) -> UInt64 {
+        switch Int(op) {
+        case 0: // init(width,height)
+            return KimiWeb.shared.initialize(w: Int(a1), h: Int(a2)) ? 0 : UInt64.max
+        case 1: // buffer pointer
+            guard let p = KimiWeb.shared.buffer() else { return 0 }
+            return UInt64(UInt(bitPattern: p))
+        case 2: // render(force) -> sequence
+            return KimiWeb.shared.render(force: a1 != 0)
+        case 3: // touch(x,y,action)
+            return KimiWeb.shared.touch(x: UInt32(a1), y: UInt32(a2), action: UInt32(a3))
+                ? 0 : UInt64.max
+        case 4: // load(url)
+            return KimiWeb.shared.load(userStr(a1, a2)) ? 0 : UInt64.max
+        case 5: return KimiWeb.shared.back() ? 0 : UInt64.max
+        case 6: return KimiWeb.shared.forward() ? 0 : UInt64.max
+        case 7: return KimiWeb.shared.reload() ? 0 : UInt64.max
+        case 8: return writeString(KimiWeb.shared.url(), ptr: a1, cap: a2)
+        case 9: return writeString(KimiWeb.shared.title(), ptr: a1, cap: a2)
+        case 10: return KimiWeb.shared.canGoBack() ? 1 : 0
+        case 11: return KimiWeb.shared.canGoForward() ? 1 : 0
+        case 12: return KimiWeb.shared.viewport(w: Int(a1), h: Int(a2)) ? 0 : UInt64.max
+        case 13: return KimiWeb.shared.pause() ? 0 : UInt64.max
+        case 14: return KimiWeb.shared.resume() ? 0 : UInt64.max
+        default: return UInt64.max
+        }
+    }
+
+    private func writeString(_ text: String, ptr: UInt64, cap: UInt64) -> UInt64 {
+        let bytes = Array(text.utf8)
+        let n = min(bytes.count, Int(cap))
+        if n > 0, let p = UnsafeMutableRawPointer(bitPattern: UInt(ptr)) {
+            memcpy(p, bytes, n)
+        }
+        return UInt64(n)
     }
 
     private func netSyscall(_ op: UInt64, _ a1: UInt64, _ a2: UInt64, _ a3: UInt64, _ a4: UInt64) -> UInt64 {

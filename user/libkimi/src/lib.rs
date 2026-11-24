@@ -819,6 +819,11 @@ pub fn plugin_run_out(id: &str, out: &mut [u8]) -> Option<(u64, usize)> {
 
 /// Spawn an interactive session. `bin` is sysroot-relative or a bare name;
 /// `arg` is a tokenized argument string (empty + bin "sh" => interactive shell).
+/// Whether the host has a working PTY/remote-terminal backend.
+pub fn proc_supported() -> bool {
+    syscall3(SYS_PROC, 7, 0, 0) == 1
+}
+
 /// Returns a session slot id.
 pub fn proc_spawn(bin: &str, arg: &str, rows: u64, cols: u64) -> Option<u64> {
     #[repr(C)]

@@ -56,7 +56,9 @@ auxv/stack, and enters the interpreter. Three platform mitigations make it work
 3.14 and Node.js 24 execute on the real device** at native speed. Full design +
 the bionic-sigchain/TLS bug that blocked Node:
 [docs/desktop-lite-native.md](docs/desktop-lite-native.md). iOS guest execution
-is the remaining port (no `fork`, stricter JIT).
+is the remaining port (no `fork`, stricter JIT). The terminal's VT/ANSI renderer
+and key UI are shared with the `.ipa`; PTY-backed OpenCode/vim/htop sessions are
+Android-only until an iOS guest runner exists.
 
 **Alpine `apk` compatibility:** kpkg also speaks Alpine's package format via
 `apkg` (`apkg update / info / install <name>`): it parses APKINDEX repos and `.apk`
@@ -248,5 +250,7 @@ Full per-phase history: **[docs/phases.md](docs/phases.md)**.
 - [docs/android-feasibility.md](docs/android-feasibility.md) — why APK
   compatibility was abandoned; the mini-Dalvik scope shipped.
 - [docs/hardware.md](docs/hardware.md) — Redmi Note 11 (spes) hardware profile.
+- [docs/ios-parity.md](docs/ios-parity.md) — exact APK/IPA host-feature parity matrix and the iOS guest-execution boundary.
+- [docs/ios-remote-terminal.md](docs/ios-remote-terminal.md) — no-emulator remote PTY bridge that gives the iPad OpenCode/vim/htop TUIs.
 - [kimios-android](https://github.com/Kimi-syl/kimios-android) — the QEMU
   frontend (full-kernel emulation, bundled QEMU, VNC/ashmem display).

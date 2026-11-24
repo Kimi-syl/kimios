@@ -19,6 +19,9 @@ targets:
     sources:
       - path: Sources
       - path: KimiosBridge.h
+      - path: Resources/opencode
+        type: folder
+        buildPhase: resources
     info:
       path: Info.plist
       properties:
@@ -26,6 +29,14 @@ targets:
         CFBundleShortVersionString: "0.9.0"
         CFBundleVersion: "1"
         UILaunchScreen: {}
+        NSLocationWhenInUseUsageDescription: "KimiOS uses your location for Weather and Maps."
+        NSPhotoLibraryUsageDescription: "KimiOS imports photos and files you choose into its sandbox."
+        NSLocalNetworkUsageDescription: "KimiOS connects to your Kimi PTY bridge for remote terminal sessions and its local OpenCode server."
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
+          NSAllowsArbitraryLoadsInWebContent: true
+        UIFileSharingEnabled: true
+        LSSupportsOpeningDocumentsInPlace: true
         UIRequiredDeviceCapabilities: [arm64, metal]
         UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
         UIStatusBarHidden: true
@@ -44,4 +55,7 @@ targets:
           - "$(SRCROOT)"
         TARGETED_DEVICE_FAMILY: "1,2"
         DEAD_CODE_STRIPPING: YES
+    dependencies:
+      - framework: Vendor/NodeMobile.xcframework
+        embed: true
     scheme: {}
