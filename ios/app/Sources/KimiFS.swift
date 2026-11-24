@@ -60,6 +60,21 @@ final class KimiFS {
         return nil
     }
 
+    /// Absolute sandbox URL for a virtual `/disk/...` path. Used by the host
+    /// services (fetch, audio, file import, symlinks) that need a real URL.
+    func sandboxURL(forDiskPath path: String) -> URL? {
+        guard let rel = relPath(path), let url = diskURL(rel) else { return nil }
+        return url
+    }
+
+    /// Create parent directories for a virtual disk path.
+    func ensureParents(forDiskPath path: String) -> URL? {
+        guard let url = sandboxURL(forDiskPath: path) else { return nil }
+        try? fm.createDirectory(at: url.deletingLastPathComponent(),
+                                withIntermediateDirectories: true)
+        return url
+    }
+
     private func isDir(_ url: URL) -> Bool {
         var d: ObjCBool = false
         return fm.fileExists(atPath: url.path, isDirectory: &d) && d.boolValue

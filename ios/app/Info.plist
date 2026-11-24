@@ -24,6 +24,10 @@
     <true/>
     <key>UILaunchScreen</key>
     <dict/>
+    <key>NSLocationWhenInUseUsageDescription</key>
+    <string>KimiOS uses your location for Weather and Maps.</string>
+    <key>NSPhotoLibraryUsageDescription</key>
+    <string>KimiOS imports photos and files you choose into its sandbox.</string>
     <key>UIRequiredDeviceCapabilities</key>
     <array>
         <string>arm64</string>

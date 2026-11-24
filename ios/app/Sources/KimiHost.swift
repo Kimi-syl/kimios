@@ -218,6 +218,71 @@ final class KimiHost {
             return UInt64.max
         case 10, 24: // SYS_WAIT / SYS_KILL (no child processes)
             return UInt64.max
+
+        // ---- host services shared with the Android dispatcher ----
+        case 40: // SYS_SYMLINK(target,targetlen,path,pathlen)
+            return KimiSystem.symlink(target: userStr(a0, a1), path: userStr(a2, a3))
+                ? 0 : UInt64.max
+        case 42: // SYS_FETCH_URL(url,urlLen,dest,destLen)
+            return KimiFetch.shared.fetchSync(url: userStr(a0, a1), dest: userStr(a2, a3))
+                ?? UInt64.max
+        case 43: // SYS_LOCAL_TIME(out[9])
+            guard let out = UnsafeMutablePointer<UInt64>(bitPattern: UInt(a0)) else {
+                return UInt64.max
+            }
+            KimiSystem.localTime(out: out)
+            return 0
+        case 44: // SYS_LOCATION(out[4])
+            guard let out = UnsafeMutablePointer<UInt64>(bitPattern: UInt(a0)) else {
+                return UInt64.max
+            }
+            let fix = KimiLocation.shared.snapshot()
+            for i in 0..<4 { out[i] = fix[i] }
+            return 0
+        case 45: // SYS_OPEN_URL(url,len)
+            return KimiSystem.openURL(userStr(a0, a1)) ? 0 : UInt64.max
+        case 46: // SYS_AUDIO(path,len,cmd)
+            if a2 == 4 {
+                guard let out = UnsafeMutablePointer<UInt64>(bitPattern: UInt(a0)) else {
+                    return UInt64.max
+                }
+                return KimiAudio.shared.query(out: out)
+            }
+            let path = a2 == 0 ? userStr(a0, a1) : nil
+            return KimiAudio.shared.command(path: path, cmd: a2)
+        case 47: // SYS_IMPORT_FILE(dir,len)
+            return KimiImporter.shared.launch(dir: userStr(a0, a1)) ? 0 : UInt64.max
+        case 49: // SYS_SYSINFO(out[10])
+            guard let out = UnsafeMutablePointer<UInt64>(bitPattern: UInt(a0)) else {
+                return UInt64.max
+            }
+            KimiSystem.sysinfo(out: out)
+            return 0
+        case 50: // SYS_PROCLIST(out,capacity)
+            guard let out = UnsafeMutablePointer<UInt64>(bitPattern: UInt(a0)) else {
+                return UInt64.max
+            }
+            return KimiSystem.procList(out: out, capacity: a1)
+        case 52: // SYS_COPY(src,srclen,dst,dstlen)
+            return KimiSystem.copyFile(src: userStr(a0, a1), dst: userStr(a2, a3))
+                ? 0 : UInt64.max
+        case 57: // SYS_FETCH_ASYNC(url,urlLen,dest,destLen)
+            return KimiFetch.shared.startAsync(url: userStr(a0, a1), dest: userStr(a2, a3))
+                ? 0 : UInt64.max
+        case 58: // SYS_FETCH_PROGRESS(out[3])
+            guard let out = UnsafeMutablePointer<UInt64>(bitPattern: UInt(a0)) else {
+                return UInt64.max
+            }
+            return KimiFetch.shared.progress(out: out)
+        case 59: // SYS_FETCH_AUTH(req{up,ul,dp,dl,kp,kl})
+            guard let base = UnsafeMutableRawPointer(bitPattern: UInt(a0)) else {
+                return UInt64.max
+            }
+            let f = base.assumingMemoryBound(to: UInt64.self)
+            let url = userStr(f[0], f[1])
+            let dest = userStr(f[2], f[3])
+            let key = userStr(f[4], f[5])
+            return KimiFetch.shared.fetchSync(url: url, dest: dest, bearer: key) ?? UInt64.max
         default:
             return UInt64.max
         }
