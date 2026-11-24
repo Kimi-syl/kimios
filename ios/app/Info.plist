@@ -29,7 +29,14 @@
     <key>NSPhotoLibraryUsageDescription</key>
     <string>KimiOS imports photos and files you choose into its sandbox.</string>
     <key>NSLocalNetworkUsageDescription</key>
-    <string>KimiOS connects to your Kimi PTY bridge for remote terminal sessions.</string>
+    <string>KimiOS connects to your Kimi PTY bridge for remote terminal sessions and its local OpenCode server.</string>
+    <key>NSAppTransportSecurity</key>
+    <dict>
+        <key>NSAllowsLocalNetworking</key>
+        <true/>
+        <key>NSAllowsArbitraryLoadsInWebContent</key>
+        <true/>
+    </dict>
     <key>UIFileSharingEnabled</key>
     <true/>
     <key>LSSupportsOpeningDocumentsInPlace</key>

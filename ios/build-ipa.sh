@@ -15,17 +15,23 @@ USER_DIR="$ROOT/user"
 APP_DIR="$ROOT/ios/app"
 BUILD_DIR="$ROOT/ios/build"
 
-echo "[1/5] building Rust staticlib for aarch64-apple-ios"
+echo "[1/7] building Rust staticlib for aarch64-apple-ios"
 rustup target add aarch64-apple-ios
 cargo build --release -p kimi-gui --lib --target aarch64-apple-ios \
   --manifest-path "$USER_DIR/Cargo.toml"
 cp "$USER_DIR/target/aarch64-apple-ios/release/libkimi_gui.a" "$APP_DIR/libkimi_gui.a"
 
-echo "[2/5] generating Xcode project (xcodegen)"
+echo "[2/7] fetching Node 24 mobile runtime"
+bash "$ROOT/tools/fetch-node-mobile.sh"
+
+echo "[3/7] building local OpenCode Node server bundle"
+bash "$ROOT/tools/build-opencode-node.sh"
+
+echo "[4/7] generating Xcode project (xcodegen)"
 command -v xcodegen >/dev/null 2>&1 || brew install xcodegen
 (cd "$APP_DIR" && xcodegen generate)
 
-echo "[3/5] xcodebuild (unsigned, iphoneos)"
+echo "[5/7] xcodebuild (unsigned, iphoneos)"
 xcodebuild \
   -project "$APP_DIR/KimiOS.xcodeproj" \
   -scheme KimiOS \
@@ -35,7 +41,7 @@ xcodebuild \
   CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
   build
 
-echo "[4/5] packaging .ipa"
+echo "[6/7] packaging .ipa"
 APP="$BUILD_DIR/Build/Products/Release-iphoneos/KimiOS.app"
 test -d "$APP" || { echo "ERROR: $APP not found"; exit 1; }
 rm -rf "$BUILD_DIR/Payload"
@@ -43,5 +49,5 @@ mkdir -p "$BUILD_DIR/Payload"
 cp -R "$APP" "$BUILD_DIR/Payload/"
 (cd "$BUILD_DIR" && zip -qry KimiOS.ipa Payload)
 
-echo "[5/5] done: $BUILD_DIR/KimiOS.ipa"
+echo "[7/7] done: $BUILD_DIR/KimiOS.ipa"
 ls -la "$BUILD_DIR/KimiOS.ipa"

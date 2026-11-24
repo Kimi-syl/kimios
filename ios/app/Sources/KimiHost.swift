@@ -53,6 +53,7 @@ final class KimiHost {
         instrBox = UnsafeMutablePointer<UInt64>.allocate(capacity: 16)
         instrBox?.initialize(repeating: 0, count: 16)
         startNs = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+        KimiNode.shared.prepare()
     }
 
     var frontBufferMTL: MTLBuffer? { frontBuffer }
@@ -302,22 +303,44 @@ final class KimiHost {
             let f = base.assumingMemoryBound(to: UInt64.self)
             let bin = userStr(f[0], f[1])
             let arg = userStr(f[2], f[3])
+            if KimiNode.shared.canRun(bin: bin, arg: arg),
+               let slot = KimiNode.shared.spawnServer(port: 4199) {
+                return slot
+            }
             return KimiRemoteTTY.shared.spawn(bin: bin, arg: arg, rows: f[4], cols: f[5])
                 ?? UInt64.max
         case 1: // read(slot,buf,cap)
             guard let p = UnsafeMutableRawPointer(bitPattern: UInt(a2)) else { return 0 }
+            if KimiNode.shared.isLocalSlot(a1) {
+                return KimiNode.shared.read(slot: a1, into: p, cap: a3)
+            }
             return KimiRemoteTTY.shared.read(slot: a1, into: p, cap: a3)
         case 2: // write(slot,buf,len)
             guard let p = UnsafeMutableRawPointer(bitPattern: UInt(a2)) else { return 0 }
             let data = Data(bytes: p, count: Int(a3))
+            if KimiNode.shared.isLocalSlot(a1) {
+                return KimiNode.shared.write(slot: a1, data: data)
+            }
             return KimiRemoteTTY.shared.write(slot: a1, data: data)
-        case 3: // kill(slot): close the remote session
+        case 3: // kill(slot)
+            if KimiNode.shared.isLocalSlot(a1) {
+                return KimiNode.shared.close(slot: a1) ? 0 : UInt64.max
+            }
             return KimiRemoteTTY.shared.close(slot: a1) ? 0 : UInt64.max
         case 4: // resize(slot,rows,cols)
+            if KimiNode.shared.isLocalSlot(a1) {
+                return KimiNode.shared.resize(slot: a1, rows: a2, cols: a3) ? 0 : UInt64.max
+            }
             return KimiRemoteTTY.shared.resize(slot: a1, rows: a2, cols: a3) ? 0 : UInt64.max
         case 5: // status
+            if KimiNode.shared.isLocalSlot(a1) {
+                return KimiNode.shared.status(slot: a1)
+            }
             return KimiRemoteTTY.shared.status(slot: a1)
         case 6: // close
+            if KimiNode.shared.isLocalSlot(a1) {
+                return KimiNode.shared.close(slot: a1) ? 0 : UInt64.max
+            }
             return KimiRemoteTTY.shared.close(slot: a1) ? 0 : UInt64.max
         case 7: // capability
             return KimiRemoteTTY.shared.supported() ? 1 : 0
