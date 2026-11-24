@@ -276,6 +276,8 @@ final class KimiHost {
             return KimiFetch.shared.progress(out: out)
         case 48: // SYS_WEB: embedded WKWebView
             return webSyscall(a0, a1, a2, a3, a4)
+        case 56: // SYS_PROC: remote PTY sessions
+            return procSyscall(a0, a1, a2, a3, a4)
         case 59: // SYS_FETCH_AUTH(req{up,ul,dp,dl,kp,kl})
             guard let base = UnsafeMutableRawPointer(bitPattern: UInt(a0)) else {
                 return UInt64.max
@@ -285,6 +287,40 @@ final class KimiHost {
             let dest = userStr(f[2], f[3])
             let key = userStr(f[4], f[5])
             return KimiFetch.shared.fetchSync(url: url, dest: dest, bearer: key) ?? UInt64.max
+        default:
+            return UInt64.max
+        }
+    }
+
+    private func procSyscall(_ op: UInt64, _ a1: UInt64, _ a2: UInt64,
+                             _ a3: UInt64, _ a4: UInt64) -> UInt64 {
+        switch Int(op) {
+        case 0: // spawn(req{bin,binLen,arg,argLen,rows,cols})
+            guard let base = UnsafeMutableRawPointer(bitPattern: UInt(a1)) else {
+                return UInt64.max
+            }
+            let f = base.assumingMemoryBound(to: UInt64.self)
+            let bin = userStr(f[0], f[1])
+            let arg = userStr(f[2], f[3])
+            return KimiRemoteTTY.shared.spawn(bin: bin, arg: arg, rows: f[4], cols: f[5])
+                ?? UInt64.max
+        case 1: // read(slot,buf,cap)
+            guard let p = UnsafeMutableRawPointer(bitPattern: UInt(a2)) else { return 0 }
+            return KimiRemoteTTY.shared.read(slot: a1, into: p, cap: a3)
+        case 2: // write(slot,buf,len)
+            guard let p = UnsafeMutableRawPointer(bitPattern: UInt(a2)) else { return 0 }
+            let data = Data(bytes: p, count: Int(a3))
+            return KimiRemoteTTY.shared.write(slot: a1, data: data)
+        case 3: // kill(slot): close the remote session
+            return KimiRemoteTTY.shared.close(slot: a1) ? 0 : UInt64.max
+        case 4: // resize(slot,rows,cols)
+            return KimiRemoteTTY.shared.resize(slot: a1, rows: a2, cols: a3) ? 0 : UInt64.max
+        case 5: // status
+            return KimiRemoteTTY.shared.status(slot: a1)
+        case 6: // close
+            return KimiRemoteTTY.shared.close(slot: a1) ? 0 : UInt64.max
+        case 7: // capability
+            return KimiRemoteTTY.shared.supported() ? 1 : 0
         default:
             return UInt64.max
         }

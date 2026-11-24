@@ -1578,12 +1578,12 @@ fn terminal_run(apps: &mut Apps) {
     // The emulator/rendering is shared by Android and iOS; the guest runner is
     // Android-only because iOS forbids fork/exec of downloaded binaries.
     if is_tui_cmd(prog) {
-        if !k::host_pty_supported() {
+        if !k::proc_supported() {
             if prog == "opencode" {
-                t.note("OpenCode TUI needs Android guest execution.");
-                t.note("On iPad, use a remote OpenCode server from the OpenCode app.");
+                t.note("No terminal backend configured.");
+                t.note("On iPad, set /disk/remote-tty.cfg to a Kimi PTY bridge.");
             } else {
-                t.note("Full-screen TUIs need the Android libOS guest runner.");
+                t.note("No terminal backend configured.");
             }
             return;
         }

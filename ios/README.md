@@ -75,6 +75,15 @@ AVAudioPlayer, UIDocumentPicker import, symlinks, file copy, system/process
 info, local time and an offscreen WKWebView pixel bridge. See
 [docs/ios-parity.md](../docs/ios-parity.md) for the full matrix.
 
+## Remote terminal / OpenCode TUI
+
+Because iOS cannot fork/exec Linux ELF binaries, the IPA includes a remote PTY
+client instead of a large emulator. Run `tools/kimi-pty-bridge.py` on a Linux,
+macOS or Termux host and put its `host:port token` in
+`Documents/disk/remote-tty.cfg`. The iPad then runs `opencode`/vim/htop through
+that PTY while rendering locally with the shared VT emulator. See
+[docs/ios-remote-terminal.md](../docs/ios-remote-terminal.md).
+
 ## Verified natively (no Mac required)
 
 `ios/host-harness/` implements the same dispatcher in C and runs the real GUI on

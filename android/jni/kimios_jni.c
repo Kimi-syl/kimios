@@ -1235,6 +1235,7 @@ uint64_t kimi_host_syscall(uint64_t n, uint64_t a0, uint64_t a1, uint64_t a2, ui
         case 4: return proc_resize(a1, a2, a3);
         case 5: return proc_status(a1);
         case 6: return proc_close(a1);
+        case 7: return 1; // PTY capability
         default: return ERROR;
         }
     case 7: case 9: case 35: case 10: case 24: case 38: return ERROR;

@@ -31,7 +31,7 @@ dispatcher implements it with Apple frameworks.
 | Feature | Why |
 |---|---|
 | Local Linux ELF execution (`SYS_LINUX_RUN`, `SYS_RUN_PATH`) | iOS app sandboxes do not permit `fork`/`exec` of downloaded binaries; the Darwin kernel cannot service a Linux AArch64 guest's `svc` ABI. |
-| PTY guest sessions (`SYS_PROC`) and full-screen TUIs (OpenCode, vim, htop) | They require the Linux guest runner above. |
+| Local PTY guest sessions (`SYS_PROC`) and full-screen TUIs (OpenCode, vim, htop) | They require the Linux guest runner above. A **remote PTY backend** is implemented instead: see [ios-remote-terminal.md](ios-remote-terminal.md). |
 | Plugins and AI Studio local `llama-server` | Same guest runner dependency. |
 | `spawn`/`exec`/`wait`/`kill` process model | iOS apps are single-process under the sandbox. |
 | Native local OpenCode `serve` / OpenCode TUI | OpenCode is a Linux ARM64 Bun/JSC executable; iOS has no compatible local loader/kernel ABI. |

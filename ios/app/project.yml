@@ -28,6 +28,9 @@ targets:
         UILaunchScreen: {}
         NSLocationWhenInUseUsageDescription: "KimiOS uses your location for Weather and Maps."
         NSPhotoLibraryUsageDescription: "KimiOS imports photos and files you choose into its sandbox."
+        NSLocalNetworkUsageDescription: "KimiOS connects to your Kimi PTY bridge for remote terminal sessions."
+        UIFileSharingEnabled: true
+        LSSupportsOpeningDocumentsInPlace: true
         UIRequiredDeviceCapabilities: [arm64, metal]
         UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
         UIStatusBarHidden: true

@@ -819,14 +819,9 @@ pub fn plugin_run_out(id: &str, out: &mut [u8]) -> Option<(u64, usize)> {
 
 /// Spawn an interactive session. `bin` is sysroot-relative or a bare name;
 /// `arg` is a tokenized argument string (empty + bin "sh" => interactive shell).
-/// Whether this host can launch interactive guest processes on a PTY.
-///
-/// Android's libOS host has fork + /dev/ptmx and therefore supports TUIs. iOS
-/// intentionally reports false: app sandboxes cannot fork/exec guest binaries,
-/// so the shared terminal keeps its built-in shell instead of pretending a PTY
-/// spawn succeeded.
-pub const fn host_pty_supported() -> bool {
-    cfg!(target_os = "android") || cfg!(target_os = "linux")
+/// Whether the host has a working PTY/remote-terminal backend.
+pub fn proc_supported() -> bool {
+    syscall3(SYS_PROC, 7, 0, 0) == 1
 }
 
 /// Returns a session slot id.
