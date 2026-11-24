@@ -21,6 +21,12 @@ cargo build --release -p kimi-gui --lib --target aarch64-apple-ios \
   --manifest-path "$USER_DIR/Cargo.toml"
 cp "$USER_DIR/target/aarch64-apple-ios/release/libkimi_gui.a" "$APP_DIR/libkimi_gui.a"
 
+echo "[1b/7] building iSH (Linux ARM64 guest) static libs"
+IOS_DEPLOYMENT_TARGET=15.0 bash "$ROOT/ios/deps/build_ish.sh"
+
+echo "[1c/7] preparing Alpine fakefs rootfs"
+bash "$ROOT/ios/deps/prepare_rootfs.sh"
+
 echo "[2/7] fetching Node 24 mobile runtime"
 bash "$ROOT/tools/fetch-node-mobile.sh"
 
@@ -44,6 +50,8 @@ xcodebuild \
 echo "[6/7] packaging .ipa"
 APP="$BUILD_DIR/Build/Products/Release-iphoneos/KimiOS.app"
 test -d "$APP" || { echo "ERROR: $APP not found"; exit 1; }
+echo "[6b/7] bundling Alpine rootfs"
+cp -R "$ROOT/ios/deps/rootfs/alpine" "$APP/alpine-rootfs"
 rm -rf "$BUILD_DIR/Payload"
 mkdir -p "$BUILD_DIR/Payload"
 cp -R "$APP" "$BUILD_DIR/Payload/"

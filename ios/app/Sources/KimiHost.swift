@@ -224,6 +224,32 @@ final class KimiHost {
         case 40: // SYS_SYMLINK(target,targetlen,path,pathlen)
             return KimiSystem.symlink(target: userStr(a0, a1), path: userStr(a2, a3))
                 ? 0 : UInt64.max
+        case 41: // SYS_LINUX_RUN(bin,arg,out) -> iSH emulated Linux guest
+            guard let base = userPtr(a0) else { return UInt64.max }
+            let f = base.assumingMemoryBound(to: UInt64.self)
+            guard let outp = UnsafeMutableRawPointer(bitPattern: UInt(f[4])) else {
+                return UInt64.max
+            }
+            var length = 0
+            let cmd = self.guestCommand(userStr(f[0], f[1]), userStr(f[2], f[3]))
+            let code = KimiISH.runCommand(cmd,
+                                          output: outp.assumingMemoryBound(to: UInt8.self),
+                                          capacity: Int(f[5]),
+                                          length: &length,
+                                          timeout: 120)
+            if code < 0 { return UInt64.max }
+            f[6] = UInt64(length)
+            f[7] = UInt64(code)
+            return 0
+        case 51: // SYS_RUN_PATH(path,len,arg,arglen) -> iSH guest, status only
+            let cmd = self.guestCommand(userStr(a0, a1), userStr(a2, a3))
+            var length = 0
+            var scratch = [UInt8](repeating: 0, count: 1)
+            let code = scratch.withUnsafeMutableBufferPointer { buf in
+                KimiISH.runCommand(cmd, output: buf.baseAddress!, capacity: 1,
+                                   length: &length, timeout: 120)
+            }
+            return code < 0 ? UInt64.max : UInt64(code)
         case 42: // SYS_FETCH_URL(url,urlLen,dest,destLen)
             return KimiFetch.shared.fetchSync(url: userStr(a0, a1), dest: userStr(a2, a3))
                 ?? UInt64.max
@@ -412,6 +438,15 @@ final class KimiHost {
 
     private func userPtr(_ p: UInt64) -> UnsafeMutableRawPointer? {
         UnsafeMutableRawPointer(bitPattern: UInt(p))
+    }
+
+    /// Build a guest command line from a sysroot-relative binary + argument
+    /// payload (SYS_LINUX_RUN / SYS_RUN_PATH). `usr/bin/node` -> `/usr/bin/node`.
+    private func guestCommand(_ bin: String, _ arg: String) -> String {
+        var path = bin
+        if !path.hasPrefix("/") && path.contains("/") { path = "/" + path }
+        let a = arg.trimmingCharacters(in: .whitespacesAndNewlines)
+        return a.isEmpty ? path : path + " " + a
     }
 
     private func present(rect x0: UInt64, _ y0: UInt64, _ x1: UInt64, _ y1: UInt64) {

@@ -51,8 +51,15 @@ targets:
         SWIFT_OBJC_BRIDGING_HEADER: KimiosBridge.h
         OTHER_LDFLAGS:
           - "$(SRCROOT)/libkimi_gui.a"
+          - "$(SRCROOT)/../deps/ish/build-ios/libish.a"
+          - "$(SRCROOT)/../deps/ish/build-ios/libish_emu.a"
+          - "$(SRCROOT)/../deps/ish/build-ios/libfakefs.a"
+          - "-lsqlite3"
         LIBRARY_SEARCH_PATHS:
           - "$(SRCROOT)"
+        HEADER_SEARCH_PATHS:
+          - "$(SRCROOT)/../deps/ish"
+          - "$(SRCROOT)/../deps/ish/build-ios"
         TARGETED_DEVICE_FAMILY: "1,2"
         DEAD_CODE_STRIPPING: YES
     dependencies:

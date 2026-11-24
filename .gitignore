@@ -19,3 +19,8 @@
 /disk256.img
 /ios/host-harness/elftest/out/
 tools/__pycache__/
+
+# iOS iSH dependency build artifacts (rebuilt by ios/deps/*.sh)
+ios/deps/ish/
+ios/deps/cache/
+ios/deps/rootfs/
