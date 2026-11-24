@@ -274,6 +274,8 @@ final class KimiHost {
                 return UInt64.max
             }
             return KimiFetch.shared.progress(out: out)
+        case 48: // SYS_WEB: embedded WKWebView
+            return webSyscall(a0, a1, a2, a3, a4)
         case 59: // SYS_FETCH_AUTH(req{up,ul,dp,dl,kp,kl})
             guard let base = UnsafeMutableRawPointer(bitPattern: UInt(a0)) else {
                 return UInt64.max
@@ -286,6 +288,44 @@ final class KimiHost {
         default:
             return UInt64.max
         }
+    }
+
+    private func webSyscall(_ op: UInt64, _ a1: UInt64, _ a2: UInt64,
+                            _ a3: UInt64, _ a4: UInt64) -> UInt64 {
+        switch Int(op) {
+        case 0: // init(width,height)
+            return KimiWeb.shared.initialize(w: Int(a1), h: Int(a2)) ? 0 : UInt64.max
+        case 1: // buffer pointer
+            guard let p = KimiWeb.shared.buffer() else { return 0 }
+            return UInt64(UInt(bitPattern: p))
+        case 2: // render(force) -> sequence
+            return KimiWeb.shared.render(force: a1 != 0)
+        case 3: // touch(x,y,action)
+            return KimiWeb.shared.touch(x: UInt32(a1), y: UInt32(a2), action: UInt32(a3))
+                ? 0 : UInt64.max
+        case 4: // load(url)
+            return KimiWeb.shared.load(userStr(a1, a2)) ? 0 : UInt64.max
+        case 5: return KimiWeb.shared.back() ? 0 : UInt64.max
+        case 6: return KimiWeb.shared.forward() ? 0 : UInt64.max
+        case 7: return KimiWeb.shared.reload() ? 0 : UInt64.max
+        case 8: return writeString(KimiWeb.shared.url(), ptr: a1, cap: a2)
+        case 9: return writeString(KimiWeb.shared.title(), ptr: a1, cap: a2)
+        case 10: return KimiWeb.shared.canGoBack() ? 1 : 0
+        case 11: return KimiWeb.shared.canGoForward() ? 1 : 0
+        case 12: return KimiWeb.shared.viewport(w: Int(a1), h: Int(a2)) ? 0 : UInt64.max
+        case 13: return KimiWeb.shared.pause() ? 0 : UInt64.max
+        case 14: return KimiWeb.shared.resume() ? 0 : UInt64.max
+        default: return UInt64.max
+        }
+    }
+
+    private func writeString(_ text: String, ptr: UInt64, cap: UInt64) -> UInt64 {
+        let bytes = Array(text.utf8)
+        let n = min(bytes.count, Int(cap))
+        if n > 0, let p = UnsafeMutableRawPointer(bitPattern: UInt(ptr)) {
+            memcpy(p, bytes, n)
+        }
+        return UInt64(n)
     }
 
     private func netSyscall(_ op: UInt64, _ a1: UInt64, _ a2: UInt64, _ a3: UInt64, _ a4: UInt64) -> UInt64 {
