@@ -1,9 +1,10 @@
 name: iOS iSH smoke
 
-# Runtime smoke for the embedded iSH Linux guest: builds iSH for the iOS
-# Simulator, then actually boots the Alpine rootfs and runs commands in it via
-# `simctl spawn`. This proves the emulator + rootfs execute (not just compile),
-# mirroring how dsh-Go verifies its guest. Isolated from the IPA build.
+# Runtime smoke for the embedded iSH Linux guest. Builds the iSH CLI NATIVELY on
+# the Apple-Silicon runner (the CLI only exists in non-cross builds), boots an
+# Alpine aarch64 rootfs, and runs real commands inside the emulated guest. This
+# proves the emulator + rootfs execute — not just compile. Isolated from the IPA
+# build. Mirrors how dsh-Go verifies its guest.
 
 on:
   workflow_dispatch:
@@ -11,14 +12,13 @@ on:
     branches: [main, 'feat/**']
     paths:
       - 'ios/deps/**'
-      - 'ios/app/Sources/KimiISH.*'
       - '.github/workflows/ios-ish-smoke.yml'
 
 jobs:
-  ish-smoke:
-    name: Boot iSH guest in the iOS Simulator
+  native-smoke:
+    name: Run the iSH Linux guest natively
     runs-on: macos-latest
-    timeout-minutes: 60
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
 
@@ -28,37 +28,5 @@ jobs:
           echo "$(brew --prefix llvm)/bin" >> "$GITHUB_PATH"
           echo "$(brew --prefix lld)/bin" >> "$GITHUB_PATH"
 
-      - name: Build iSH (simulator) + ish CLI
-        run: bash ios/deps/build_ish.sh iphonesimulator --cli
-
-      - name: Fetch + extract Alpine rootfs
-        run: |
-          curl -fL --retry 3 -o /tmp/alpine.tar.gz \
-            https://dl-cdn.alpinelinux.org/alpine/v3.21/releases/aarch64/alpine-minirootfs-3.21.0-aarch64.tar.gz
-          rm -rf /tmp/alpine && mkdir -p /tmp/alpine
-          tar -xzf /tmp/alpine.tar.gz -C /tmp/alpine
-          ls /tmp/alpine | head
-          head -1 /tmp/alpine/etc/os-release
-
-      - name: Boot a simulator
-        id: sim
-        run: |
-          UDID=$(xcrun simctl list devices available -j \
-            | python3 -c 'import json,sys; d=json.load(sys.stdin)["devices"]; print(next(x["udid"] for v in d.values() for x in v if x.get("isAvailable")))')
-          echo "udid=$UDID" >> "$GITHUB_OUTPUT"
-          xcrun simctl boot "$UDID" 2>/dev/null || true
-          xcrun simctl bootstatus "$UDID" -b
-          echo "booted $UDID"
-
-      - name: Run guest commands (echo / os-release / ls)
-        run: |
-          ISH="$PWD/ios/deps/ish/build-ios-sim/ish"
-          test -x "$ISH" || { echo "ish CLI missing"; exit 1; }
-          UDID="${{ steps.sim.outputs.udid }}"
-          set -x
-          timeout 180 xcrun simctl spawn "$UDID" "$ISH" -r /tmp/alpine \
-            /bin/sh -c 'echo HELLO_ISH; cat /etc/os-release | head -1; echo CWD=$(pwd); ls / | head; exit 7' \
-            | tee /tmp/out.txt
-          rc=${PIPESTATUS[0]}
-          grep -q 'HELLO_ISH' /tmp/out.txt || { echo "guest did not run"; exit 1; }
-          echo "guest exit status: $rc (expected 7)"
+      - name: Build iSH natively and run the guest
+        run: bash ios/deps/ish-native-smoke.sh "$RUNNER_TEMP/ish-native"
