@@ -229,7 +229,7 @@ final class KimiNode {
         addr.sin_addr.s_addr = inet_addr("127.0.0.1")
         let fd = socket(AF_INET, SOCK_STREAM, 0)
         if fd < 0 { return false }
-        defer { close(fd) }
+        defer { Darwin.close(fd) }
         let r = withUnsafePointer(to: &addr) {
             $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
                 connect(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
