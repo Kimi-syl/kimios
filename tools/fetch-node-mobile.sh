@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env bash
+#!/usr/bin/env bash
 # Fetch the Node 24.5 iOS runtime used by the local OpenCode server.
 set -euo pipefail
 

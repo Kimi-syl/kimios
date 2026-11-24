@@ -1,4 +1,4 @@
-﻿// Minimal @parcel/watcher-compatible shim built on fs.watch. OpenCode uses the
+// Minimal @parcel/watcher-compatible shim built on fs.watch. OpenCode uses the
 // watcher for file-change hints; correctness is preserved, latency is higher.
 const fs = require("fs");
 const path = require("path");

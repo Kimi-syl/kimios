@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env bash
+#!/usr/bin/env bash
 # Build the Node-target OpenCode bundle for the iOS app.
 #
 # The iPad runs the OpenCode server in NodeMobile (Node 24.5). This script
@@ -41,6 +41,8 @@ if [ -z "$BUN" ]; then
     fi
   fi
 fi
+
+export PATH="$(dirname "$BUN"):$PATH"
 
 # --- OpenCode source, pinned ------------------------------------------------
 if [ ! -d "$SRC/.git" ]; then

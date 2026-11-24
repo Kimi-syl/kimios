@@ -1,4 +1,4 @@
-﻿// Node 24 compatibility shim: OpenCode's Node bundle imports a few Node 26
+// Node 24 compatibility shim: OpenCode's Node bundle imports a few Node 26
 // exports that are absent on the Node 24 mobile runtime.
 export function isSea() { return false }
 export function getAssetKeys() { return [] }

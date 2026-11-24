@@ -1,4 +1,4 @@
-﻿// KimiNode: local OpenCode server runtime for iOS.
+// KimiNode: local OpenCode server runtime for iOS.
 //
 // NodeMobile (Node 24.5) executes a Node-target OpenCode bundle inside the app
 // process. The shared Rust OpenCode client talks to it at 127.0.0.1:4199 over
