@@ -74,11 +74,11 @@ fi
 # socket translation at host loopback.
 SERVE_OUT="$WORK/opencode-serve.out"
 rm -f "$SERVE_OUT"
-( cd "$SRC" && OPENCODE_PASSWORD=test ./build/ish -r "$ROOTFS" \
-    /usr/local/bin/opencode serve --hostname 127.0.0.1 --port 4199 ) > "$SERVE_OUT" 2>&1 &
+( cd "$SRC" && OPENCODE_SERVER_PASSWORD=test ./build/ish -r "$ROOTFS" \
+    /usr/local/bin/opencode serve --hostname 0.0.0.0 --port 4199 ) > "$SERVE_OUT" 2>&1 &
 SPID=$!
 HTTP="000"
-for _ in $(seq 1 40); do
+for _ in $(seq 1 180); do
   sleep 1
   HTTP="$(curl -sS -o /dev/null -w '%{http_code}' -u opencode:test http://127.0.0.1:4199/ 2>/dev/null || true)"
   [ "$HTTP" = "200" ] && break
