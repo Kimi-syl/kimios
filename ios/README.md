@@ -84,6 +84,16 @@ opens the official OpenCode web interface in an authenticated WKWebView. No
 remote server and no emulator are involved. See
 [docs/ios-local-opencode-research.md](../docs/ios-local-opencode-research.md).
 
+## Local iSH Linux runtime
+
+The IPA embeds iSH-ARM64 with an Alpine fakefs rootfs, libstdc++/libgcc, CA
+certificates and the OpenCode Linux ARM64 binary. `SYS_LINUX_RUN` and
+`SYS_RUN_PATH` execute guest commands; `SYS_PROC` exposes streaming PTY
+sessions with input, resize and exit status. `/disk` is bind-mounted into the
+guest and `/root` maps to `/disk/home`. The OpenCode TUI has been verified under
+a real PTY in CI; see [docs/ios-ish-runtime.md](../docs/ios-ish-runtime.md).
+iSH is GPLv3 — see [NOTICE](../NOTICE).
+
 ## Remote terminal / OpenCode TUI
 
 Because iOS cannot fork/exec Linux ELF binaries, the IPA includes a remote PTY

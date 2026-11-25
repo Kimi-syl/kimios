@@ -15,9 +15,11 @@ dispatcher implements it with Apple frameworks.
 > been executed inside iSH in CI (`opencode --version` → `1.19.6`). See
 > `ios/deps/build_ish.sh`, `ios/deps/prepare_rootfs.sh`,
 > `ios/deps/install_guest_runtime.sh`, and `ios/app/Sources/KimiISH.{h,m}`.
+> A real-PTY CI probe verifies that the OpenCode TUI enters the alternate screen
+> and emits its ANSI interface inside iSH.
 >
 > iSH is **GPLv3**; the distributed IPA is a GPLv3 combined work. See `NOTICE`.
-> Device runtime verification of the full OpenCode TUI is still required.
+> Physical-iPad verification of the in-app PTY remains the final gate.
 
 ## Implemented on both
 
