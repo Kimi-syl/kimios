@@ -414,6 +414,7 @@ int kimi_pty_close(uint64_t slot) {
     pthread_mutex_lock(&s->lock);
     if (s->closed) { pthread_mutex_unlock(&s->lock); return 0; }
     s->closed = true;
+    if (!s->exited) { s->exited = true; s->code = 0; }
     int pid = s->pid;
     struct tty *tty = s->tty;
     s->tty = NULL;

@@ -4,6 +4,7 @@
 set -euo pipefail
 
 WORK="${1:-$(pwd)/ios/deps/ish-native}"
+ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 SRC="$WORK/src"
 ROOTFS="$WORK/alpine"
 ISH="$SRC/build/ish"
@@ -77,17 +78,16 @@ rm -f "$TUI_OUT"
 export TERM=xterm-256color
 export COLORTERM=truecolor
 set +e
-( cd "$SRC" && script -q /dev/null ./build/ish -r "$ROOTFS" /usr/local/bin/opencode ) > "$TUI_OUT" 2>&1 &
-TPID=$!
-( sleep 35; kill -9 "$TPID" 2>/dev/null ) & TWATCH=$!
-wait "$TPID"; TRC=$?
-kill "$TWATCH" 2>/dev/null || true
+python3 "$ROOT/ios/deps/pty_probe.py" "$TUI_OUT" "$SRC" 30 \
+  ./build/ish -r "$ROOTFS" /usr/local/bin/opencode
+TRC=$?
 set -e
 echo "----- OpenCode TUI probe exit=$TRC bytes=$(wc -c < "$TUI_OUT") -----"
 head -c 1200 "$TUI_OUT" | sed -n l || true
-if grep -q $'\x1b\[' "$TUI_OUT"; then
+if LC_ALL=C grep -q $'\x1b\[' "$TUI_OUT"; then
   echo "[opencode-smoke] TUI emitted ANSI control sequences: PASS"
 else
-  echo "[opencode-smoke] WARNING: no ANSI sequences observed; TUI may have exited early"
+  echo "[opencode-smoke] FAIL: no ANSI sequences observed; TUI did not render" >&2
+  exit 1
 fi
 echo "[opencode-smoke] PASS"
