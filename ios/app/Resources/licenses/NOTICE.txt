@@ -1,0 +1,23 @@
+﻿KimiOS notices
+==============
+
+KimiOS original code is licensed under the MIT License (see LICENSE).
+
+The iOS IPA optionally embeds iSH, a userspace Linux emulator:
+  Project: https://github.com/OpenMinis/ish-arm64
+  Pinned commit: c5c264da19148512167aa493d7bd4e50aae1b74e
+  License: GNU GPL version 3 (see GPL-3.0.txt and LICENSE.IOS upstream)
+
+When the iSH backend is enabled, the distributed IPA is a combined work under
+GPLv3. Corresponding source is available at:
+  https://github.com/Kimi-syl/kimios
+  https://github.com/OpenMinis/ish-arm64
+Build instructions are in ios/deps/build_ish.sh and ios/build-ipa.sh.
+
+The Alpine Linux minirootfs and packages carry their own licenses. OpenCode is
+distributed under its upstream license (MIT at the time of writing); see the
+OpenCode repository for the complete notice.
+
+The iSH copyright holders have published LICENSE.IOS terms permitting App Store
+distribution while otherwise complying with the GPL. This project does not grant
+any additional rights to iSH or third-party components.

@@ -252,5 +252,7 @@ Full per-phase history: **[docs/phases.md](docs/phases.md)**.
 - [docs/hardware.md](docs/hardware.md) — Redmi Note 11 (spes) hardware profile.
 - [docs/ios-parity.md](docs/ios-parity.md) — exact APK/IPA host-feature parity matrix and the iOS guest-execution boundary.
 - [docs/ios-remote-terminal.md](docs/ios-remote-terminal.md) — no-emulator remote PTY bridge that gives the iPad OpenCode/vim/htop TUIs.
+- [NOTICE](NOTICE) — third-party licensing, including the GPLv3 iSH embedded Linux backend.
+- [docs/ios-ish-runtime.md](docs/ios-ish-runtime.md) — local iSH Linux runtime, PTY sessions, OpenCode execution, and remaining device checks.
 - [kimios-android](https://github.com/Kimi-syl/kimios-android) — the QEMU
   frontend (full-kernel emulation, bundled QEMU, VNC/ashmem display).

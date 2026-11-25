@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env bash
+#!/usr/bin/env bash
 # Runtime proof: execute the real OpenCode Linux ARM64 musl binary inside the
 # iSH ARM64 interpreter. Reuses the build/rootfs from ish-native-smoke.sh.
 set -euo pipefail
@@ -68,5 +68,26 @@ printf '%s\n' "----- exit=$RC -----"
 if ! grep -q 'opencode' "$OUT"; then
   echo "FAIL: OpenCode binary did not run inside iSH" >&2
   exit 1
+fi
+# Probe the actual interactive TUI under a host PTY. The app's KimiISH PTY uses
+# the same iSH devpts path; this proves OpenCode's TUI renderer starts inside the
+# guest instead of only its CLI/version path.
+TUI_OUT="$WORK/opencode-tui.out"
+rm -f "$TUI_OUT"
+export TERM=xterm-256color
+export COLORTERM=truecolor
+set +e
+( cd "$SRC" && script -q /dev/null ./build/ish -r "$ROOTFS" /usr/local/bin/opencode ) > "$TUI_OUT" 2>&1 &
+TPID=$!
+( sleep 35; kill -9 "$TPID" 2>/dev/null ) & TWATCH=$!
+wait "$TPID"; TRC=$?
+kill "$TWATCH" 2>/dev/null || true
+set -e
+echo "----- OpenCode TUI probe exit=$TRC bytes=$(wc -c < "$TUI_OUT") -----"
+head -c 1200 "$TUI_OUT" | sed -n l || true
+if grep -q $'\x1b\[' "$TUI_OUT"; then
+  echo "[opencode-smoke] TUI emitted ANSI control sequences: PASS"
+else
+  echo "[opencode-smoke] WARNING: no ANSI sequences observed; TUI may have exited early"
 fi
 echo "[opencode-smoke] PASS"

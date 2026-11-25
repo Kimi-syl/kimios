@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env bash
+#!/usr/bin/env bash
 # Add the runtime pieces OpenCode needs to the iSH Alpine fakefs rootfs:
 # libstdc++/libgcc, CA certificates, and the Linux ARM64 musl OpenCode binary.
 # Runs after prepare_rootfs.sh. All downloads are cached under ios/deps/cache.

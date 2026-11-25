@@ -7,17 +7,17 @@ the Android C dispatcher (JNI/guest loader); "iOS host" means the Swift
 dispatcher implements it with Apple frameworks.
 
 
-> **Update — iOS can now execute Linux binaries.** The IPA embeds **iSH**
-> (`OpenMinis/ish-arm64`), a userspace Linux ARM64 emulator (threaded-code
-> interpreter, no JIT), with an Alpine fakefs rootfs. `SYS_LINUX_RUN` /
-> `SYS_RUN_PATH` boot that guest headlessly and run `/bin/sh -c <cmd>`, so
-> terminal commands (`git`, `curl`, `apk`, `node`, …) execute on device without
-> `fork`/`exec` of guest ELF. See `ios/deps/build_ish.sh`,
-> `ios/deps/prepare_rootfs.sh`, `ios/app/Sources/KimiISH.{h,m}`.
+> **Update — iOS executes a real Linux userland locally.** The IPA embeds
+> **iSH-ARM64** (`OpenMinis/ish-arm64`), a threaded-code ARM64 Linux userspace
+> interpreter with no JIT. Alpine is bundled as a fakefs rootfs, and
+> `SYS_LINUX_RUN` / `SYS_RUN_PATH` plus streaming PTY-backed `SYS_PROC`
+> sessions run real Linux processes. The actual OpenCode ARM64 musl binary has
+> been executed inside iSH in CI (`opencode --version` → `1.19.6`). See
+> `ios/deps/build_ish.sh`, `ios/deps/prepare_rootfs.sh`,
+> `ios/deps/install_guest_runtime.sh`, and `ios/app/Sources/KimiISH.{h,m}`.
 >
-> Consequence: iSH is **GPLv3**, so the distributed IPA is a GPLv3 combined
-> work. Build/packaging is CI-verified; runtime guest boot is not yet
-> device-verified. Interactive PTY TUIs still use the remote-PTY path.
+> iSH is **GPLv3**; the distributed IPA is a GPLv3 combined work. See `NOTICE`.
+> Device runtime verification of the full OpenCode TUI is still required.
 
 ## Implemented on both
 
@@ -43,11 +43,8 @@ dispatcher implements it with Apple frameworks.
 
 | Feature | Why |
 |---|---|
-| Local Linux ELF execution (`SYS_LINUX_RUN`, `SYS_RUN_PATH`) | iOS app sandboxes do not permit `fork`/`exec` of downloaded binaries; the Darwin kernel cannot service a Linux AArch64 guest's `svc` ABI. |
-| Local PTY guest sessions (`SYS_PROC`) and full-screen TUIs (OpenCode, vim, htop) | They require the Linux guest runner above. A **remote PTY backend** is implemented instead: see [ios-remote-terminal.md](ios-remote-terminal.md). |
-| Plugins and AI Studio local `llama-server` | Same guest runner dependency. |
-| `spawn`/`exec`/`wait`/`kill` process model | iOS apps are single-process under the sandbox. |
-| Native local OpenCode `serve` / OpenCode TUI | OpenCode is a Linux ARM64 Bun/JSC executable; iOS has no compatible local loader/kernel ABI. |
+| `fork`/`exec` of arbitrary host binaries | iSH executes Linux ELF inside its emulated kernel; it does not grant Darwin `fork`/`exec`. |
+| GPU acceleration / Metal inside the guest | The guest is a software ARM64 interpreter; Metal is available only to the host UI. |
 
 ## Practical OpenCode path on iPad
 

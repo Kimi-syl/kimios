@@ -22,6 +22,9 @@ targets:
       - path: Resources/opencode
         type: folder
         buildPhase: resources
+      - path: Resources/licenses
+        type: folder
+        buildPhase: resources
     info:
       path: Info.plist
       properties:

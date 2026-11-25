@@ -31,7 +31,9 @@
 #include "fs/real.h"
 #include "fs/dev.h"
 #include "fs/devices.h"
+#define ISH_INTERNAL 1
 #include "fs/fake.h"
+#undef ISH_INTERNAL
 #include "fs/tty.h"
 #include "kernel/signal.h"
 
@@ -107,7 +109,7 @@ static void kimi_install_stubs(void) {
         @"vi", @"vim", @"nano", @"less", @"more", @"top", @"htop", @"ps", @"kill",
         @"pgrep", @"pkill", @"ping", @"nc", @"ssh", @"ssh-keygen", @"openssl", @"jq",
         @"tree", @"diff", @"patch", @"md5sum", @"sha256sum", @"base64", @"xxd", @"hexdump",
-        @"bc", @"dialog", @"tmux", @"screen", @"man"
+        @"bc", @"dialog", @"tmux", @"screen", @"man", @"opencode", @"bun", @"deno"
     ];
     for (NSString *t in tools) {
         NSString *p = [dir stringByAppendingPathComponent:t];
@@ -522,5 +524,22 @@ int kimi_pty_close(uint64_t slot) {
     return -1;
 }
 @end
+
+int kimi_pty_spawn(const char *command, const char *cwd, int rows, int cols,
+                   uint64_t *slot) {
+    (void)command; (void)cwd; (void)rows; (void)cols; (void)slot;
+    return -1;
+}
+long kimi_pty_read(uint64_t slot, void *buf, size_t cap) {
+    (void)slot; (void)buf; (void)cap; return -1;
+}
+long kimi_pty_write(uint64_t slot, const void *buf, size_t len) {
+    (void)slot; (void)buf; (void)len; return -1;
+}
+int kimi_pty_resize(uint64_t slot, int rows, int cols) {
+    (void)slot; (void)rows; (void)cols; return -1;
+}
+int kimi_pty_status(uint64_t slot) { (void)slot; return -1; }
+int kimi_pty_close(uint64_t slot) { (void)slot; return -1; }
 
 #endif
