@@ -77,13 +77,17 @@ rm -f "$TUI_OUT"
 export TERM=xterm-256color
 export COLORTERM=truecolor
 tmux kill-session -t kimios-oc 2>/dev/null || true
+TUI_EXIT="$WORK/opencode-tui.exit"
+rm -f "$TUI_EXIT"
 tmux new-session -d -s kimios-oc -x 100 -y 30 \
-  "cd '$SRC' && exec ./build/ish -r '$ROOTFS' /usr/local/bin/opencode"
+  "cd '$SRC'; ./build/ish -r '$ROOTFS' /usr/local/bin/opencode; echo EXIT:\$? > '$TUI_EXIT'"
+tmux set-option -t kimios-oc remain-on-exit on
 sleep 45
-tmux capture-pane -p -t kimios-oc -S -40 > "$TUI_OUT" 2>&1 || true
+tmux capture-pane -p -t kimios-oc -S -80 > "$TUI_OUT" 2>&1 || true
 tmux kill-session -t kimios-oc 2>/dev/null || true
 echo "----- OpenCode TUI pane ($(wc -l < "$TUI_OUT") lines, $(wc -c < "$TUI_OUT") bytes) -----"
 sed -n '1,80p' "$TUI_OUT" || true
+[ -f "$TUI_EXIT" ] && cat "$TUI_EXIT" || true
 # A TUI frame must contain actual UI text; ANSI alone can be a startup query.
 if [ "$(tr -d '[:space:]' < "$TUI_OUT" | wc -c)" -lt 40 ]; then
   echo "FAIL: OpenCode TUI pane is empty" >&2
