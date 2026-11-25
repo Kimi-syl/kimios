@@ -30,3 +30,6 @@ jobs:
 
       - name: Build iSH natively and run the guest
         run: bash ios/deps/ish-native-smoke.sh "$RUNNER_TEMP/ish-native"
+
+      - name: Run real OpenCode binary inside iSH
+        run: bash ios/deps/opencode-native-smoke.sh "$RUNNER_TEMP/ish-native"
