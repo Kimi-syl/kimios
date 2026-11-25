@@ -24,7 +24,7 @@ jobs:
 
       - name: Install build deps
         run: |
-          brew install meson ninja llvm lld libarchive pkg-config
+          brew install meson ninja llvm lld libarchive pkg-config tmux
           echo "$(brew --prefix llvm)/bin" >> "$GITHUB_PATH"
           echo "$(brew --prefix lld)/bin" >> "$GITHUB_PATH"
 

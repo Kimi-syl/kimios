@@ -70,45 +70,27 @@ if ! grep -q 'opencode' "$OUT"; then
   echo "FAIL: OpenCode binary did not run inside iSH" >&2
   exit 1
 fi
-# Probe local server startup inside the guest. iSH maps guest loopback inside
-# its own network namespace, so this is the meaningful server test; the TUI probe
-# below then exercises the rendered client.
-SERVE_OUT="$WORK/opencode-serve.out"
-rm -f "$SERVE_OUT"
-set +e
-( cd "$SRC" && ./build/ish -r "$ROOTFS" /bin/sh -c '
-    OPENCODE_SERVER_PASSWORD=test /usr/local/bin/opencode serve --hostname 127.0.0.1 --port 4199 > /tmp/ocserve.log 2>&1 &
-    P=$!
-    sleep 90
-    cat /tmp/ocserve.log
-    kill $P 2>/dev/null
-  ' ) > "$SERVE_OUT" 2>&1
-SRC_RC=$?
-set -e
-echo "----- OpenCode serve startup exit=$SRC_RC -----"
-cat "$SERVE_OUT" | tail -40 || true
-if ! grep -qi 'listening on' "$SERVE_OUT"; then
-  echo "WARNING: guest-local OpenCode server log did not show a listening line"
-fi
-
-# Probe the actual interactive TUI under a host PTY. The app's KimiISH PTY uses
-# the same iSH devpts path; this proves OpenCode's TUI renderer starts inside the
-# guest instead of only its CLI/version path.
+# Probe the actual interactive TUI through tmux, which (unlike a bare pipe)
+# answers OpenCode's terminal capability queries and provides a real screen.
 TUI_OUT="$WORK/opencode-tui.out"
 rm -f "$TUI_OUT"
 export TERM=xterm-256color
 export COLORTERM=truecolor
-set +e
-python3 "$ROOT/ios/deps/pty_probe.py" "$TUI_OUT" "$SRC" 30 \
-  ./build/ish -r "$ROOTFS" /usr/local/bin/opencode
-TRC=$?
-set -e
-echo "----- OpenCode TUI probe exit=$TRC bytes=$(wc -c < "$TUI_OUT") -----"
-head -c 1200 "$TUI_OUT" | sed -n l || true
-if LC_ALL=C grep -q $'\x1b\[' "$TUI_OUT"; then
-  echo "[opencode-smoke] TUI emitted ANSI control sequences: PASS"
-else
-  echo "[opencode-smoke] FAIL: no ANSI sequences observed; TUI did not render" >&2
+tmux kill-session -t kimios-oc 2>/dev/null || true
+tmux new-session -d -s kimios-oc -x 100 -y 30 \
+  "cd '$SRC' && exec ./build/ish -r '$ROOTFS' /usr/local/bin/opencode"
+sleep 45
+tmux capture-pane -p -t kimios-oc -S -40 > "$TUI_OUT" 2>&1 || true
+tmux kill-session -t kimios-oc 2>/dev/null || true
+echo "----- OpenCode TUI pane ($(wc -l < "$TUI_OUT") lines, $(wc -c < "$TUI_OUT") bytes) -----"
+sed -n '1,80p' "$TUI_OUT" || true
+# A TUI frame must contain actual UI text; ANSI alone can be a startup query.
+if [ "$(tr -d '[:space:]' < "$TUI_OUT" | wc -c)" -lt 40 ]; then
+  echo "FAIL: OpenCode TUI pane is empty" >&2
+  exit 1
+fi
+if grep -qiE 'error|exec format|not found' "$TUI_OUT"; then
+  echo "FAIL: OpenCode TUI reported an error" >&2
   exit 1
 fi
 echo "[opencode-smoke] PASS"
