@@ -186,6 +186,67 @@ impl Screen {
         }
     }
 
+    /// Blit an RGBA8 sprite sub-cell (`cw`×`ch` at `sx,sy` inside a `sw`×`sh`
+    /// atlas) at logical `(dx,dy)`, nearest-neighbour scaled by `scale`
+    /// art-pixels and alpha-blended. `mirror` flips horizontally. Used by the
+    /// pet overlay; pixel-art stays crisp because each art pixel maps to an
+    /// integer block of physical pixels.
+    pub fn sprite(
+        &self,
+        dx: i64,
+        dy: i64,
+        scale: i64,
+        src: &[u8],
+        sw: i64,
+        sh: i64,
+        sx: i64,
+        sy: i64,
+        cw: i64,
+        ch: i64,
+        mirror: bool,
+    ) {
+        let pscale = (self.physical_width / LOGICAL_WIDTH) * scale.max(1);
+        if pscale <= 0 || cw <= 0 || ch <= 0 || sw <= 0 || sh <= 0 {
+            return;
+        }
+        let px0 = self.map_x(dx);
+        let py0 = self.map_y(dy);
+        self.mark_dirty(px0, py0, px0 + cw * pscale, py0 + ch * pscale);
+        for ay in 0..ch {
+            let row = sy + ay;
+            if row < 0 || row >= sh {
+                continue;
+            }
+            for ax in 0..cw {
+                let col = sx + if mirror { cw - 1 - ax } else { ax };
+                if col < 0 || col >= sw {
+                    continue;
+                }
+                let o = ((row * sw + col) * 4) as usize;
+                if o + 4 > src.len() {
+                    continue;
+                }
+                let a = src[o + 3] as u32;
+                if a == 0 {
+                    continue;
+                }
+                let color =
+                    ((src[o] as u32) << 16) | ((src[o + 1] as u32) << 8) | src[o + 2] as u32;
+                let bx = px0 + ax * pscale;
+                let by = py0 + ay * pscale;
+                if a >= 255 {
+                    self.phys_fill(bx, by, pscale, pscale, color);
+                } else {
+                    for yy in 0..pscale {
+                        for xx in 0..pscale {
+                            self.phys_blend(bx + xx, by + yy, color, a);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     pub fn fill(&self, x: i64, y: i64, width: i64, height: i64, color: u32) {
         self.phys_fill(
             self.map_x(x),

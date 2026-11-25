@@ -1,0 +1,298 @@
+{
+ "schema": 1,
+ "id": "kimi-whale",
+ "name": "Kimi",
+ "author": "KimiOS",
+ "license": "CC-BY-4.0",
+ "pixelArt": true,
+ "scale": 1,
+ "canvas": {
+  "w": 24,
+  "h": 24
+ },
+ "anchor": {
+  "x": 11,
+  "baseline": 21
+ },
+ "contentBox": {
+  "x": 2,
+  "y": 4,
+  "w": 20,
+  "h": 18
+ },
+ "animations": {
+  "idle": {
+   "sheet": "pet.png",
+   "frameW": 24,
+   "frameH": 24,
+   "cols": 6,
+   "box": {
+    "x": 0,
+    "y": 0,
+    "w": 24,
+    "h": 24
+   },
+   "frames": [
+    {
+     "i": 0,
+     "ms": 500
+    },
+    {
+     "i": 1,
+     "ms": 500
+    }
+   ]
+  },
+  "working": {
+   "sheet": "pet.png",
+   "frameW": 24,
+   "frameH": 24,
+   "cols": 6,
+   "box": {
+    "x": 0,
+    "y": 0,
+    "w": 24,
+    "h": 24
+   },
+   "frames": [
+    {
+     "i": 2,
+     "ms": 220
+    },
+    {
+     "i": 3,
+     "ms": 220
+    }
+   ]
+  },
+  "thinking": {
+   "sheet": "pet.png",
+   "frameW": 24,
+   "frameH": 24,
+   "cols": 6,
+   "box": {
+    "x": 0,
+    "y": 0,
+    "w": 24,
+    "h": 24
+   },
+   "frames": [
+    {
+     "i": 4,
+     "ms": 400
+    },
+    {
+     "i": 5,
+     "ms": 400
+    }
+   ]
+  },
+  "attention": {
+   "sheet": "pet.png",
+   "frameW": 24,
+   "frameH": 24,
+   "cols": 6,
+   "box": {
+    "x": 0,
+    "y": 0,
+    "w": 24,
+    "h": 24
+   },
+   "frames": [
+    {
+     "i": 6,
+     "ms": 260
+    },
+    {
+     "i": 7,
+     "ms": 260
+    }
+   ]
+  },
+  "error": {
+   "sheet": "pet.png",
+   "frameW": 24,
+   "frameH": 24,
+   "cols": 6,
+   "box": {
+    "x": 0,
+    "y": 0,
+    "w": 24,
+    "h": 24
+   },
+   "frames": [
+    {
+     "i": 8,
+     "ms": 300
+    },
+    {
+     "i": 9,
+     "ms": 300
+    }
+   ]
+  },
+  "notification": {
+   "sheet": "pet.png",
+   "frameW": 24,
+   "frameH": 24,
+   "cols": 6,
+   "box": {
+    "x": 0,
+    "y": 0,
+    "w": 24,
+    "h": 24
+   },
+   "frames": [
+    {
+     "i": 10,
+     "ms": 350
+    },
+    {
+     "i": 11,
+     "ms": 350
+    }
+   ]
+  },
+  "sleeping": {
+   "sheet": "pet.png",
+   "frameW": 24,
+   "frameH": 24,
+   "cols": 6,
+   "box": {
+    "x": 0,
+    "y": 0,
+    "w": 24,
+    "h": 24
+   },
+   "frames": [
+    {
+     "i": 12,
+     "ms": 700
+    },
+    {
+     "i": 13,
+     "ms": 700
+    }
+   ]
+  },
+  "waking": {
+   "sheet": "pet.png",
+   "frameW": 24,
+   "frameH": 24,
+   "cols": 6,
+   "box": {
+    "x": 0,
+    "y": 0,
+    "w": 24,
+    "h": 24
+   },
+   "frames": [
+    {
+     "i": 14,
+     "ms": 600
+    }
+   ]
+  },
+  "tap": {
+   "sheet": "pet.png",
+   "frameW": 24,
+   "frameH": 24,
+   "cols": 6,
+   "box": {
+    "x": 0,
+    "y": 0,
+    "w": 24,
+    "h": 24
+   },
+   "frames": [
+    {
+     "i": 15,
+     "ms": 450
+    }
+   ]
+  },
+  "roam": {
+   "sheet": "pet.png",
+   "frameW": 24,
+   "frameH": 24,
+   "cols": 6,
+   "box": {
+    "x": 0,
+    "y": 0,
+    "w": 24,
+    "h": 24
+   },
+   "frames": [
+    {
+     "i": 16,
+     "ms": 260
+    },
+    {
+     "i": 17,
+     "ms": 260
+    }
+   ]
+  }
+ },
+ "states": {
+  "idle": [
+   "idle"
+  ],
+  "thinking": [
+   "thinking"
+  ],
+  "working": [
+   "working"
+  ],
+  "juggling": [
+   "working"
+  ],
+  "sweeping": [
+   "working"
+  ],
+  "notification": [
+   "notification"
+  ],
+  "attention": [
+   "attention"
+  ],
+  "error": [
+   "error"
+  ],
+  "carrying": [
+   "working"
+  ],
+  "sleeping": [
+   "sleeping"
+  ],
+  "waking": [
+   "waking"
+  ]
+ },
+ "timings": {
+  "minDisplay": {
+   "attention": 2500,
+   "error": 2500,
+   "notification": 2000,
+   "waking": 600
+  },
+  "autoReturn": {
+   "attention": 2500,
+   "error": 3000,
+   "notification": 4000
+  }
+ },
+ "reactions": {
+  "tapLeft": "tap",
+  "tapRight": "tap",
+  "tickle": "tap",
+  "drag": "tap"
+ },
+ "roam": {
+  "anim": "roam",
+  "faces": "right"
+ },
+ "sleep": {
+  "afterMs": 30000
+ }
+}

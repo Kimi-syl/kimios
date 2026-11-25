@@ -15,6 +15,7 @@ mod vt;
 mod ai;
 mod chat;
 mod opencode;
+mod pet;
 
 use core::panic::PanicInfo;
 use core::sync::atomic::{AtomicU64, Ordering};
@@ -616,6 +617,7 @@ struct Settings {
     torch: bool,
     brightness: i64,
     animations: bool,
+    pet: bool,
 }
 
 impl Settings {
@@ -628,6 +630,7 @@ impl Settings {
             torch: false,
             brightness: 70,
             animations: false,
+            pet: true,
         }
     }
 }
@@ -697,6 +700,8 @@ struct Ui {
     fps_window_ms: u64,
     last_jiggle_ms: u64,
     last_monitor_ms: u64,
+    pet: pet::Pet,
+    last_pet_ms: u64,
 }
 
 impl Ui {
@@ -732,6 +737,8 @@ impl Ui {
             fps_window_ms: 0,
             last_jiggle_ms: 0,
             last_monitor_ms: 0,
+            pet: pet::Pet::load_default(),
+            last_pet_ms: 0,
         }
     }
 
@@ -869,6 +876,23 @@ fn gui_run() -> ! {
             dirty = true;
         }
 
+        // Desktop pet: advance its animation and repaint while on Home.
+        if ui.settings.pet && ui.pet.valid && ui.scene == Scene::Home && !ui.shade
+            && ui.folder_view.is_none() && !ui.edit_mode
+        {
+            if ui.last_pet_ms == 0 {
+                ui.last_pet_ms = now;
+            } else {
+                let dt = now.saturating_sub(ui.last_pet_ms) as i64;
+                if dt >= 100 {
+                    ui.last_pet_ms = now;
+                    ui.pet.tick(now, dt);
+                    ui.paint_bg = true;
+                    dirty = true;
+                }
+            }
+        }
+
         // Animating home (edit-mode jiggle / folder view) moves icons every
         // frame; repaint the wallpaper each frame or old pixels ghost into
         // duplicated logos. (Icon drag uses the fast snapshot path below.)
@@ -993,6 +1017,12 @@ pub extern "C" fn kimi_test_load(theme_path: u64, font_path: u64) -> u64 {
 #[cfg(not(target_os = "none"))]
 pub extern "C" fn kimi_test_osk() -> u64 {
     keyboard::self_test()
+}
+
+#[no_mangle]
+#[cfg(not(target_os = "none"))]
+pub extern "C" fn kimi_test_pet() -> u64 {
+    pet::self_test()
 }
 
 /// Host-only test hook: fetch+cache the kpkg repo (1 = success).
@@ -1858,6 +1888,16 @@ fn tapped(screen: &Screen, ui: &mut Ui, point: (i64, i64), clock: [u64; 7]) {
                     render(screen, ui, clock);
                 }
                 return;
+            }
+            if ui.settings.pet && ui.pet.valid {
+                let px = screen.width() - 46;
+                let py = screen.height() - 128;
+                if ui.pet.hit(px, py, point.0, point.1) {
+                    ui.pet.tap(k::uptime_ms(), point.0 < px);
+                    ui.paint_bg = true;
+                    render(screen, ui, clock);
+                    return;
+                }
             }
             if let Some(page) = home_page_hit(screen, point) {
                 if ui.home_page != page {
@@ -2738,6 +2778,9 @@ fn draw_home(
         }
     }
 
+    if ui.settings.pet && ui.pet.valid && ui.folder_view.is_none() {
+        ui.pet.draw(screen, width - 46, height - 128 + y_offset);
+    }
     draw_home_indicator(screen);
 }
 
@@ -3288,7 +3331,7 @@ fn draw_settings(screen: &Screen, settings: &Settings, x_offset: i64) {
     }
 
     screen.text(x + 24, 456, "APPEARANCE", 1, MUTED());
-    screen.round_rect(x + 20, 480, width - 40, 168, 28, SURFACE());
+    screen.round_rect(x + 20, 480, width - 40, 248, 28, SURFACE());
     screen.circle(x + 58, 524, 18, 0x009c_74e8);
     screen.text(x + 88, 504, "Dark mode", 2, TEXT());
     screen.text(x + 88, 532, "Nothing palette", 1, MUTED());
@@ -3298,11 +3341,15 @@ fn draw_settings(screen: &Screen, settings: &Settings, x_offset: i64) {
     screen.text(x + 88, 584, "UI animations", 2, TEXT());
     screen.text(x + 88, 612, "Experimental - disabled by default", 1, 0x00d8_9040);
     draw_switch(screen, x + width - 92, 588, settings.animations);
+    screen.fill(x + 40, 640, width - 80, 1, OUTLINE());
+    screen.circle(x + 58, 684, 18, 0x0060_a8fa);
+    screen.text(x + 88, 664, "Desktop pet", 2, TEXT());
+    screen.text(x + 88, 692, "A little whale keeps you company", 1, MUTED());
+    draw_switch(screen, x + width - 92, 668, settings.pet);
 
-    screen.round_rect(x + 20, 660, width - 40, 96, 28, SURFACE());
-    screen.text(x + 44, 680, "About KimiOS", 2, TEXT());
-    screen.text(x + 44, 710, "ARM64 bare metal", 1, MUTED());
-    screen.text(x + 44, 730, "1080x1920 - Material 3 / Nothing", 1, MUTED());
+    screen.round_rect(x + 20, 740, width - 40, 56, 28, SURFACE());
+    screen.text(x + 44, 756, "About KimiOS", 2, TEXT());
+    screen.text(x + 44, 780, "ARM64 - Material 3 / Nothing", 1, MUTED());
 }
 
 fn draw_switch(screen: &Screen, x: i64, y: i64, on: bool) {
@@ -3332,6 +3379,9 @@ fn settings_hit(screen: &Screen, point: (i64, i64)) -> Option<usize> {
     if point.0 >= 20 && point.0 < screen.width() - 20 && point.1 >= 584 && point.1 < 648 {
         return Some(4);
     }
+    if point.0 >= 20 && point.0 < screen.width() - 20 && point.1 >= 664 && point.1 < 728 {
+        return Some(5);
+    }
     None
 }
 
@@ -3341,7 +3391,8 @@ fn toggle_settings(settings: &mut Settings, row: usize) {
         1 => settings.bluetooth = !settings.bluetooth,
         2 => settings.dnd = !settings.dnd,
         3 => settings.dark = !settings.dark,
-        _ => settings.animations = !settings.animations,
+        4 => settings.animations = !settings.animations,
+        _ => settings.pet = !settings.pet,
     }
 }
 
