@@ -32,5 +32,16 @@
             android:name=".WebActivity"
             android:exported="false"
             android:configChanges="orientation|screenSize|keyboardHidden" />
+        <service
+            android:name=".KimiA11yService"
+            android:exported="false"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/kimi_a11y" />
+        </service>
     </application>
 </manifest>

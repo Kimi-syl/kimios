@@ -376,6 +376,9 @@ public final class KimiBridge {
     /** Sub-op 9: cached page title (never null). */
     public static String nativeWebTitle() { return KimiWeb.title(); }
 
+    /** Instant UI-element snapshot from the accessibility service (SYS_UI_READ). */
+    public static String uiSnapshot() { return KimiA11yService.snapshot(); }
+
     /** Sub-op 10: 0/1 from volatile cache. */
     public static long nativeWebCanGoBack() { return KimiWeb.canGoBack(); }
 
