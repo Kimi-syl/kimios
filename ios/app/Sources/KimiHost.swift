@@ -224,6 +224,32 @@ final class KimiHost {
         case 40: // SYS_SYMLINK(target,targetlen,path,pathlen)
             return KimiSystem.symlink(target: userStr(a0, a1), path: userStr(a2, a3))
                 ? 0 : UInt64.max
+        case 41: // SYS_LINUX_RUN(bin,arg,out) -> iSH emulated Linux guest
+            guard let base = userPtr(a0) else { return UInt64.max }
+            let f = base.assumingMemoryBound(to: UInt64.self)
+            guard let outp = UnsafeMutableRawPointer(bitPattern: UInt(f[4])) else {
+                return UInt64.max
+            }
+            var length = 0
+            let cmd = self.guestCommand(userStr(f[0], f[1]), userStr(f[2], f[3]))
+            let code = KimiISH.runCommand(cmd,
+                                          output: outp.assumingMemoryBound(to: UInt8.self),
+                                          capacity: Int(f[5]),
+                                          length: &length,
+                                          timeout: 120)
+            if code < 0 { return UInt64.max }
+            f[6] = UInt64(length)
+            f[7] = UInt64(code)
+            return 0
+        case 51: // SYS_RUN_PATH(path,len,arg,arglen) -> iSH guest, status only
+            let cmd = self.guestCommand(userStr(a0, a1), userStr(a2, a3))
+            var length = 0
+            var scratch = [UInt8](repeating: 0, count: 1)
+            let code = scratch.withUnsafeMutableBufferPointer { buf in
+                KimiISH.runCommand(cmd, output: buf.baseAddress!, capacity: 1,
+                                   length: &length, timeout: 120)
+            }
+            return code < 0 ? UInt64.max : UInt64(code)
         case 42: // SYS_FETCH_URL(url,urlLen,dest,destLen)
             return KimiFetch.shared.fetchSync(url: userStr(a0, a1), dest: userStr(a2, a3))
                 ?? UInt64.max
@@ -293,6 +319,10 @@ final class KimiHost {
         }
     }
 
+    private func isISHSlot(_ slot: UInt64) -> Bool {
+        (slot >> 32) == 0x4953485F
+    }
+
     private func procSyscall(_ op: UInt64, _ a1: UInt64, _ a2: UInt64,
                              _ a3: UInt64, _ a4: UInt64) -> UInt64 {
         switch Int(op) {
@@ -307,42 +337,78 @@ final class KimiHost {
                let slot = KimiNode.shared.spawnServer(port: 4199) {
                 return slot
             }
+            // Full-screen terminal programs run in the local iSH AArch64 guest.
+            if KimiISH.available() {
+                let command = arg.isEmpty ? bin : bin + " " + arg
+                var slot: UInt64 = 0
+                let rc = command.withCString { cmd in
+                    "/disk".withCString { cwd in
+                        kimi_pty_spawn(cmd, cwd,
+                                       Int32(min(f[4], UInt64(Int32.max))),
+                                       Int32(min(f[5], UInt64(Int32.max))),
+                                       &slot)
+                    }
+                }
+                if rc == 0 { return slot }
+            }
             return KimiRemoteTTY.shared.spawn(bin: bin, arg: arg, rows: f[4], cols: f[5])
                 ?? UInt64.max
         case 1: // read(slot,buf,cap)
             guard let p = UnsafeMutableRawPointer(bitPattern: UInt(a2)) else { return 0 }
+            if isISHSlot(a1) {
+                let n = kimi_pty_read(a1, p, Int(a3))
+                return n < 0 ? UInt64.max : UInt64(n)
+            }
             if KimiNode.shared.isLocalSlot(a1) {
                 return KimiNode.shared.read(slot: a1, into: p, cap: a3)
             }
             return KimiRemoteTTY.shared.read(slot: a1, into: p, cap: a3)
         case 2: // write(slot,buf,len)
             guard let p = UnsafeMutableRawPointer(bitPattern: UInt(a2)) else { return 0 }
+            if isISHSlot(a1) {
+                let n = kimi_pty_write(a1, p, Int(a3))
+                return n < 0 ? UInt64.max : UInt64(n)
+            }
             let data = Data(bytes: p, count: Int(a3))
             if KimiNode.shared.isLocalSlot(a1) {
                 return KimiNode.shared.write(slot: a1, data: data)
             }
             return KimiRemoteTTY.shared.write(slot: a1, data: data)
         case 3: // kill(slot)
+            if isISHSlot(a1) {
+                return kimi_pty_close(a1) == 0 ? 0 : UInt64.max
+            }
             if KimiNode.shared.isLocalSlot(a1) {
                 return KimiNode.shared.close(slot: a1) ? 0 : UInt64.max
             }
             return KimiRemoteTTY.shared.close(slot: a1) ? 0 : UInt64.max
         case 4: // resize(slot,rows,cols)
+            if isISHSlot(a1) {
+                return kimi_pty_resize(a1, Int32(a2), Int32(a3)) == 0 ? 0 : UInt64.max
+            }
             if KimiNode.shared.isLocalSlot(a1) {
                 return KimiNode.shared.resize(slot: a1, rows: a2, cols: a3) ? 0 : UInt64.max
             }
             return KimiRemoteTTY.shared.resize(slot: a1, rows: a2, cols: a3) ? 0 : UInt64.max
         case 5: // status
+            if isISHSlot(a1) {
+                let st = kimi_pty_status(a1)
+                return st < 0 ? UInt64.max : UInt64(st)
+            }
             if KimiNode.shared.isLocalSlot(a1) {
                 return KimiNode.shared.status(slot: a1)
             }
             return KimiRemoteTTY.shared.status(slot: a1)
         case 6: // close
+            if isISHSlot(a1) {
+                return kimi_pty_close(a1) == 0 ? 0 : UInt64.max
+            }
             if KimiNode.shared.isLocalSlot(a1) {
                 return KimiNode.shared.close(slot: a1) ? 0 : UInt64.max
             }
             return KimiRemoteTTY.shared.close(slot: a1) ? 0 : UInt64.max
         case 7: // capability
+            if KimiISH.available() { return 1 }
             return KimiRemoteTTY.shared.supported() ? 1 : 0
         default:
             return UInt64.max
@@ -412,6 +478,15 @@ final class KimiHost {
 
     private func userPtr(_ p: UInt64) -> UnsafeMutableRawPointer? {
         UnsafeMutableRawPointer(bitPattern: UInt(p))
+    }
+
+    /// Build a guest command line from a sysroot-relative binary + argument
+    /// payload (SYS_LINUX_RUN / SYS_RUN_PATH). `usr/bin/node` -> `/usr/bin/node`.
+    private func guestCommand(_ bin: String, _ arg: String) -> String {
+        var path = bin
+        if !path.hasPrefix("/") && path.contains("/") { path = "/" + path }
+        let a = arg.trimmingCharacters(in: .whitespacesAndNewlines)
+        return a.isEmpty ? path : path + " " + a
     }
 
     private func present(rect x0: UInt64, _ y0: UInt64, _ x1: UInt64, _ y1: UInt64) {

@@ -1,0 +1,35 @@
+name: iOS iSH smoke
+
+# Runtime smoke for the embedded iSH Linux guest. Builds the iSH CLI NATIVELY on
+# the Apple-Silicon runner (the CLI only exists in non-cross builds), boots an
+# Alpine aarch64 rootfs, and runs real commands inside the emulated guest. This
+# proves the emulator + rootfs execute — not just compile. Isolated from the IPA
+# build. Mirrors how dsh-Go verifies its guest.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, 'feat/**']
+    paths:
+      - 'ios/deps/**'
+      - '.github/workflows/ios-ish-smoke.yml'
+
+jobs:
+  native-smoke:
+    name: Run the iSH Linux guest natively
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build deps
+        run: |
+          brew install meson ninja llvm lld libarchive pkg-config tmux
+          echo "$(brew --prefix llvm)/bin" >> "$GITHUB_PATH"
+          echo "$(brew --prefix lld)/bin" >> "$GITHUB_PATH"
+
+      - name: Build iSH natively and run the guest
+        run: bash ios/deps/ish-native-smoke.sh "$RUNNER_TEMP/ish-native"
+
+      - name: Run real OpenCode binary inside iSH
+        run: bash ios/deps/opencode-native-smoke.sh "$RUNNER_TEMP/ish-native"

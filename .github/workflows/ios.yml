@@ -22,6 +22,12 @@ jobs:
         with:
           targets: aarch64-apple-ios
 
+      - name: Install iSH build deps (meson, ninja, llvm, libarchive)
+        run: |
+          brew install meson ninja llvm lld libarchive pkg-config
+          echo "LLVM_PREFIX=$(brew --prefix llvm)" >> "$GITHUB_ENV"
+          echo "$(brew --prefix llvm)/bin" >> "$GITHUB_PATH"
+
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
