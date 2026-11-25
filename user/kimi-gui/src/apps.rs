@@ -2415,7 +2415,9 @@ impl Maps {
             }
             None => {
                 self.has_fix = false;
-                self.set_status("Location unavailable");
+                // The map card already says "Location unavailable"; keep the
+                // status line actionable instead of repeating it.
+                self.set_status("Enable location access");
             }
         }
     }
@@ -2449,7 +2451,8 @@ impl Weather {
     fn refresh(&mut self) {
         let Some((lat, lon, accuracy)) = location_fix() else {
             self.has_fix = false;
-            self.set_status("Location unavailable");
+            // Avoid echoing the card's "Location unavailable" in the status line.
+            self.set_status("Enable location access");
             return;
         };
         self.has_fix = true;

@@ -1474,9 +1474,15 @@ Java_com_kimios_libos_KimiBridge_nativeStoreRun(JNIEnv *env, jclass cls, jstring
     static char out[2048];
     uint64_t r = kimi_test_store_run((uint64_t)(uintptr_t)nm, (uint64_t)src,
                                      (uint64_t)(uintptr_t)out, sizeof out - 1);
-    out[r ? (r - 1) : 0] = 0;
+    // `r` is the full output length + 1, not the number of bytes copied into
+    // `out` (the Rust side clamps before copying). Clamp here too, otherwise a
+    // store item whose output exceeds the buffer (e.g. busybox usage text)
+    // writes the NUL terminator far past the end of `out`.
+    size_t n = (r > 0) ? (size_t)(r - 1) : 0;
+    if (n > sizeof out - 1) n = sizeof out - 1;
+    out[n] = 0;
     LOG("mstore run src=%d name='%s' result=%llu out=[%.*s]", (int)src, nm,
-        (unsigned long long)r, (int)(r ? r - 1 : 0), out);
+        (unsigned long long)r, (int)n, out);
     (*env)->ReleaseStringUTFChars(env, jname, nm);
     return (jlong)r;
 }
