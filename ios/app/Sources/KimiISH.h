@@ -31,4 +31,15 @@ NS_ASSUME_NONNULL_BEGIN
 
 @end
 
+/// PTY-backed guest sessions used by SYS_PROC. `command` is passed to
+/// /bin/sh -c; `cwd` should be a guest path such as /disk.
+int kimi_pty_spawn(const char *command, const char *cwd, int rows, int cols,
+                   uint64_t *slot);
+long kimi_pty_read(uint64_t slot, void *buf, size_t cap);
+long kimi_pty_write(uint64_t slot, const void *buf, size_t len);
+int kimi_pty_resize(uint64_t slot, int rows, int cols);
+/// 0 = running, >0 = exit code + 1, -1 = invalid slot.
+int kimi_pty_status(uint64_t slot);
+int kimi_pty_close(uint64_t slot);
+
 NS_ASSUME_NONNULL_END

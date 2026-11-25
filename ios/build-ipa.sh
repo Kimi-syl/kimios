@@ -27,6 +27,9 @@ IOS_DEPLOYMENT_TARGET=15.0 bash "$ROOT/ios/deps/build_ish.sh"
 echo "[1c/7] preparing Alpine fakefs rootfs"
 bash "$ROOT/ios/deps/prepare_rootfs.sh"
 
+echo "[1d/7] installing guest OpenCode runtime (libstdc++, CA certs, opencode)"
+bash "$ROOT/ios/deps/install_guest_runtime.sh"
+
 echo "[2/7] fetching Node 24 mobile runtime"
 bash "$ROOT/tools/fetch-node-mobile.sh"
 

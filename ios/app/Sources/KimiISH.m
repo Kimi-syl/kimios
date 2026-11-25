@@ -31,6 +31,9 @@
 #include "fs/real.h"
 #include "fs/dev.h"
 #include "fs/devices.h"
+#include "fs/fake.h"
+#include "fs/tty.h"
+#include "kernel/signal.h"
 
 static dispatch_once_t g_bootOnce;
 static int g_bootErr = -9999;
@@ -41,12 +44,15 @@ static volatile int g_exitPid = 0;
 static volatile int g_exitCode = 0;
 
 // Called by the iSH kernel when a guest task exits (on its own thread).
+static void kimi_session_note_exit(struct task *task, int code);
+
 static void kimi_exit_hook(struct task *task, int code) {
     if (task != NULL && task->pid == g_exitPid) {
         g_exitCode = code;
         dispatch_semaphore_t sem = g_exitSem;
         if (sem) dispatch_semaphore_signal(sem);
     }
+    kimi_session_note_exit(task, code);
 }
 
 static NSString *kimi_writable_root(void) {
@@ -137,9 +143,293 @@ static int kimi_boot(NSString *rootDir) {
     do_mount(&procfs, "proc", "/proc", "", 0);
     do_mount(&devptsfs, "devpts", "/dev/pts", "", 0);
 
+    // Share the KimiOS /disk tree (projects, configs, downloads) with the guest
+    // and expose /root through /disk/home so OpenCode sees the native config.
+    NSArray<NSString *> *docs =
+        NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
+    NSString *disk = [docs.firstObject stringByAppendingPathComponent:@"disk"];
+    NSString *home = [disk stringByAppendingPathComponent:@"home"];
+    NSString *sysroot = [disk stringByAppendingPathComponent:@"alpine/root"];
+    NSFileManager *fm = [NSFileManager defaultManager];
+    [fm createDirectoryAtPath:home withIntermediateDirectories:YES attributes:nil error:nil];
+    [fm createDirectoryAtPath:sysroot withIntermediateDirectories:YES attributes:nil error:nil];
+    fakefs_bind_mount("/disk", disk.fileSystemRepresentation, false);
+    fakefs_bind_mount("/root", home.fileSystemRepresentation, false);
+
     exit_hook = kimi_exit_hook;
     return 0;
 }
+
+// ---------------------------------------------------------------- PTY sessions
+// The UI-facing terminal is a fake slave tty whose driver callbacks feed a
+// bounded in-memory byte queue. The guest shell/process gets this tty as
+// stdin/stdout/stderr, so ANSI output streams immediately and keystrokes go
+// through tty_input() without a host pipe or a 120-second one-shot wrapper.
+
+#define KIMI_PTY_BUF (4u * 1024u * 1024u)
+
+typedef struct kimi_pty_session {
+    uint64_t id;
+    struct tty *tty;
+    int pid;
+    int code;
+    bool exited;
+    bool closed;
+    bool released;
+    char *out;
+    size_t out_len;
+    pthread_mutex_t lock;
+    struct kimi_pty_session *next;
+} kimi_pty_session;
+
+static kimi_pty_session *g_sessions = NULL;
+static pthread_mutex_t g_sessions_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t g_spawn_lock = PTHREAD_MUTEX_INITIALIZER;
+static uint64_t g_next_session = 0x4953485F00000001ULL;
+
+static void kimi_session_append(kimi_pty_session *s, const void *buf, size_t len) {
+    if (s == NULL || buf == NULL || len == 0 || s->out == NULL) return;
+    pthread_mutex_lock(&s->lock);
+    if (len >= KIMI_PTY_BUF) {
+        memcpy(s->out, (const char *)buf + (len - KIMI_PTY_BUF), KIMI_PTY_BUF);
+        s->out_len = KIMI_PTY_BUF;
+    } else {
+        if (s->out_len + len > KIMI_PTY_BUF) {
+            size_t drop = s->out_len + len - KIMI_PTY_BUF;
+            memmove(s->out, s->out + drop, s->out_len - drop);
+            s->out_len -= drop;
+        }
+        memcpy(s->out + s->out_len, buf, len);
+        s->out_len += len;
+    }
+    pthread_mutex_unlock(&s->lock);
+}
+
+static int kimi_tty_init(struct tty *tty) {
+    kimi_pty_session *s = calloc(1, sizeof(*s));
+    if (s == NULL) return -1;
+    s->out = malloc(KIMI_PTY_BUF);
+    if (s->out == NULL) { free(s); return -1; }
+    pthread_mutex_init(&s->lock, NULL);
+    s->tty = tty;
+    tty->data = s;
+    return 0;
+}
+
+static int kimi_tty_write(struct tty *tty, const void *buf, size_t len, bool blocking) {
+    (void)blocking;
+    kimi_session_append((kimi_pty_session *)tty->data, buf, len);
+    return (int)len;
+}
+
+static void kimi_tty_cleanup(struct tty *tty) {
+    kimi_pty_session *s = (kimi_pty_session *)tty->data;
+    if (s != NULL) {
+        pthread_mutex_lock(&s->lock);
+        s->tty = NULL;
+        s->released = true;
+        if (!s->exited) { s->exited = true; s->code = 0; }
+        pthread_mutex_unlock(&s->lock);
+        tty->data = NULL;
+    }
+}
+
+static struct tty_driver_ops kimi_tty_ops = {
+    .init = kimi_tty_init,
+    .write = kimi_tty_write,
+    .cleanup = kimi_tty_cleanup,
+};
+static struct tty_driver kimi_pty_driver = {.ops = &kimi_tty_ops};
+
+static void kimi_hangup_release(struct tty *tty) {
+    if (tty == NULL) return;
+    lock(&tty->lock);
+    tty_hangup(tty);
+    unlock(&tty->lock);
+    tty_release(tty);
+}
+
+static void kimi_session_note_exit(struct task *task, int code) {
+    if (task == NULL) return;
+    pthread_mutex_lock(&g_sessions_lock);
+    for (kimi_pty_session *s = g_sessions; s != NULL; s = s->next) {
+        if (s->pid == task->pid) {
+            pthread_mutex_lock(&s->lock);
+            s->exited = true;
+            s->code = code;
+            pthread_mutex_unlock(&s->lock);
+            break;
+        }
+    }
+    pthread_mutex_unlock(&g_sessions_lock);
+}
+
+static kimi_pty_session *kimi_session_find(uint64_t id) {
+    kimi_pty_session *found = NULL;
+    pthread_mutex_lock(&g_sessions_lock);
+    for (kimi_pty_session *s = g_sessions; s != NULL; s = s->next) {
+        if (s->id == id) { found = s; break; }
+    }
+    pthread_mutex_unlock(&g_sessions_lock);
+    return found;
+}
+
+int kimi_pty_spawn(const char *command, const char *cwd, int rows, int cols, uint64_t *slot) {
+    if (command == NULL || slot == NULL || ![KimiISH available]) return -1;
+    if (![KimiISH prepare:NULL]) return -2;
+    pthread_mutex_lock(&g_spawn_lock);
+    struct task *saved = current;
+    int err = become_new_init_child();
+    if (err < 0) { current = saved; pthread_mutex_unlock(&g_spawn_lock); return err; }
+
+    struct tty *tty = pty_open_fake(&kimi_pty_driver);
+    if (IS_ERR(tty)) {
+        int e = (int)PTR_ERR(tty);
+        current = saved;
+        pthread_mutex_unlock(&g_spawn_lock);
+        return e;
+    }
+    kimi_pty_session *s = (kimi_pty_session *)tty->data;
+    char stdio[64];
+    snprintf(stdio, sizeof(stdio), "/dev/pts/%d", tty->num);
+    err = create_stdio(stdio, TTY_PSEUDO_SLAVE_MAJOR, tty->num);
+    if (err < 0) {
+        tty_release(tty);
+        current = saved;
+        pthread_mutex_unlock(&g_spawn_lock);
+        return err;
+    }
+
+    tty_set_winsize(tty, (struct winsize_) {
+        .row = (word_t)(rows > 0 ? rows : 24),
+        .col = (word_t)(cols > 0 ? cols : 80),
+    });
+    // The app/agent sets its own raw mode; start without echo/newline mangling.
+    tty->termios.iflags = 0;
+    tty->termios.oflags = 0;
+    tty->termios.lflags = 0;
+
+    const char *cd = (cwd != NULL && cwd[0] != '\0') ? cwd : "/";
+    char wrapped[512];
+    snprintf(wrapped, sizeof(wrapped),
+             "cd '%s' 2>/dev/null || cd /; exec /bin/sh -c \"$KIMI_COMMAND\"", cd);
+    char *env_cmd = malloc(strlen(command) + 16);
+    if (env_cmd == NULL) {
+        kimi_hangup_release(tty);
+        current = saved;
+        pthread_mutex_unlock(&g_spawn_lock);
+        return -1;
+    }
+    snprintf(env_cmd, strlen(command) + 16, "KIMI_COMMAND=%s", command);
+    const char *envp[] = {
+        "TERM=xterm-256color",
+        "HOME=/root",
+        "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        "COLORTERM=truecolor",
+        "LANG=C.UTF-8",
+        env_cmd,
+        NULL,
+    };
+    char *argv[] = { "/bin/sh", "-c", wrapped, NULL };
+    err = do_execve("/bin/sh", 3, argv, envp);
+    free(env_cmd);
+    if (err < 0) {
+        kimi_hangup_release(tty);
+        current = saved;
+        pthread_mutex_unlock(&g_spawn_lock);
+        return err;
+    }
+
+    s->pid = current->pid;
+    s->id = g_next_session++;
+    pthread_mutex_lock(&g_sessions_lock);
+    s->next = g_sessions;
+    g_sessions = s;
+    pthread_mutex_unlock(&g_sessions_lock);
+
+    err = task_start(current);
+    current = saved;
+    pthread_mutex_unlock(&g_spawn_lock);
+    if (err < 0) {
+        tty_hangup(tty);
+        tty_release(tty);
+        return err;
+    }
+    *slot = s->id;
+    return 0;
+}
+
+long kimi_pty_read(uint64_t slot, void *buf, size_t cap) {
+    kimi_pty_session *s = kimi_session_find(slot);
+    if (s == NULL || buf == NULL) return -1;
+    pthread_mutex_lock(&s->lock);
+    size_t n = s->out_len < cap ? s->out_len : cap;
+    if (n > 0) {
+        memcpy(buf, s->out, n);
+        memmove(s->out, s->out + n, s->out_len - n);
+        s->out_len -= n;
+    }
+    pthread_mutex_unlock(&s->lock);
+    return (long)n;
+}
+
+long kimi_pty_write(uint64_t slot, const void *buf, size_t len) {
+    kimi_pty_session *s = kimi_session_find(slot);
+    if (s == NULL || buf == NULL) return -1;
+    pthread_mutex_lock(&s->lock);
+    struct tty *tty = s->tty;
+    pthread_mutex_unlock(&s->lock);
+    if (tty == NULL) return 0;
+    return tty_input(tty, buf, len, false);
+}
+
+int kimi_pty_resize(uint64_t slot, int rows, int cols) {
+    kimi_pty_session *s = kimi_session_find(slot);
+    if (s == NULL || rows <= 0 || cols <= 0) return -1;
+    pthread_mutex_lock(&s->lock);
+    struct tty *tty = s->tty;
+    pthread_mutex_unlock(&s->lock);
+    if (tty == NULL) return -1;
+    lock(&tty->lock);
+    tty_set_winsize(tty, (struct winsize_) {.row = (word_t)rows, .col = (word_t)cols});
+    unlock(&tty->lock);
+    return 0;
+}
+
+int kimi_pty_status(uint64_t slot) {
+    kimi_pty_session *s = kimi_session_find(slot);
+    if (s == NULL) return -1;
+    pthread_mutex_lock(&s->lock);
+    bool exited = s->exited;
+    int code = s->code;
+    pthread_mutex_unlock(&s->lock);
+    return exited ? code + 1 : 0;
+}
+
+int kimi_pty_close(uint64_t slot) {
+    kimi_pty_session *s = kimi_session_find(slot);
+    if (s == NULL) return -1;
+    pthread_mutex_lock(&s->lock);
+    if (s->closed) { pthread_mutex_unlock(&s->lock); return 0; }
+    s->closed = true;
+    int pid = s->pid;
+    struct tty *tty = s->tty;
+    s->tty = NULL;
+    pthread_mutex_unlock(&s->lock);
+
+    if (pid > 0) {
+        struct task *task = pid_get_task((dword_t)pid);
+        if (task != NULL) send_signal(task, SIGKILL_, SIGINFO_NIL);
+    }
+    if (tty != NULL) {
+        lock(&tty->lock);
+        tty_hangup(tty);
+        unlock(&tty->lock);
+        tty_release(tty);
+    }
+    return 0;
+}
+
 
 @implementation KimiISH
 
@@ -173,85 +463,44 @@ static int kimi_boot(NSString *rootDir) {
            length:(size_t *)length
           timeout:(double)timeout {
     if (length) *length = 0;
-    if (![self prepare:NULL]) return -100;
-    if (g_runLock == nil) {
-        @synchronized(self) { if (g_runLock == nil) g_runLock = [NSLock new]; }
-    }
-    [g_runLock lock];
-    int result = -101;
-    int p[2] = { -1, -1 };
-
-    if (pipe(p) < 0) goto done;
-    fcntl(p[0], F_SETFL, fcntl(p[0], F_GETFL, 0) | O_NONBLOCK);
-
-    struct task *saved = current;
-    int err = become_new_init_child();
-    if (err < 0) { current = saved; result = -102; goto done; }
-    struct task *task = current;
-
-    // stdin = /dev/null; stdout & stderr = pipe write end.
-    struct fd *f0 = adhoc_fd_create(&realfs_fdops);
-    if (f0) { f0->real_fd = open("/dev/null", O_RDONLY); task->files->files[0] = f0; }
-    struct fd *f1 = adhoc_fd_create(&realfs_fdops);
-    if (f1) { f1->real_fd = dup(p[1]); task->files->files[1] = f1; }
-    struct fd *f2 = adhoc_fd_create(&realfs_fdops);
-    if (f2) { f2->real_fd = dup(p[1]); task->files->files[2] = f2; }
-    close(p[1]); p[1] = -1;
-
+    uint64_t slot = 0;
     const char *cmd = command.UTF8String ?: "";
-    size_t clen = strlen(cmd);
-    char *argv = malloc(clen + 32);
-    if (!argv) { current = saved; result = -103; goto done; }
-    size_t pos = 0;
-    memcpy(argv + pos, "/bin/sh", 8); pos += 8;   // includes NUL
-    memcpy(argv + pos, "-c", 3);      pos += 3;   // includes NUL
-    memcpy(argv + pos, cmd, clen + 1); pos += clen + 1;
-    argv[pos] = '\0';                             // final NUL (double-NUL end)
+    int err = kimi_pty_spawn(cmd, "/disk/alpine/root", 24, 80, &slot);
+    if (err < 0) return err;
 
-    static const char envp[] =
-        "TERM=xterm-256color\0"
-        "HOME=/root\0"
-        "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\0"
-        "PYTHONMALLOC=malloc\0"
-        "NO_COLOR=1\0"
-        "\0";
-
-    err = do_execve("/bin/sh", 3, argv, envp);
-    free(argv);
-    if (err < 0) { current = saved; result = -104; goto done; }
-
-    g_exitPid = task->pid;
-    g_exitCode = -1;
-    g_exitSem = dispatch_semaphore_create(0);
-
-    err = task_start(task);
-    current = saved;
-    if (err < 0) { result = -105; goto done; }
-
-    double to = timeout > 0 ? timeout : 120.0;
-    long waited = dispatch_semaphore_wait(g_exitSem,
-        dispatch_time(DISPATCH_TIME_NOW, (int64_t)(to * NSEC_PER_SEC)));
-    if (waited != 0) { result = -106; goto done; }   // timed out
-
-    // Drain captured output (write ends are gone once the task exited).
     size_t total = 0;
-    for (int i = 0; i < 1000 && out != NULL && total < capacity; i++) {
-        ssize_t n = read(p[0], out + total, capacity - total);
-        if (n > 0) { total += (size_t)n; }
-        else if (n == 0) { break; }
-        else if (errno == EAGAIN || errno == EWOULDBLOCK) { usleep(500); }
-        else { break; }
+    double to = timeout > 0 ? timeout : 120.0;
+    NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:to];
+    for (;;) {
+        uint8_t tmp[8192];
+        long n = kimi_pty_read(slot, tmp, sizeof(tmp));
+        if (n > 0 && out != NULL && total < capacity) {
+            size_t take = (size_t)n;
+            if (take > capacity - total) take = capacity - total;
+            memcpy(out + total, tmp, take);
+            total += take;
+        }
+        int st = kimi_pty_status(slot);
+        if (st > 0) {
+            while ((n = kimi_pty_read(slot, tmp, sizeof(tmp))) > 0 &&
+                   out != NULL && total < capacity) {
+                size_t take = (size_t)n;
+                if (take > capacity - total) take = capacity - total;
+                memcpy(out + total, tmp, take);
+                total += take;
+            }
+            if (length) *length = total;
+            int code = st - 1;
+            kimi_pty_close(slot);
+            return (code & 0xff) ? (128 + (code & 0xff)) : ((code >> 8) & 0xff);
+        }
+        if ([deadline timeIntervalSinceNow] <= 0) {
+            kimi_pty_close(slot);
+            if (length) *length = total;
+            return -106;
+        }
+        usleep(2000);
     }
-    if (length) *length = total;
-
-    int code = g_exitCode;
-    result = (code & 0xff) ? (128 + (code & 0xff)) : ((code >> 8) & 0xff);
-
-done:
-    if (p[0] >= 0) close(p[0]);
-    if (p[1] >= 0) close(p[1]);
-    [g_runLock unlock];
-    return result;
 }
 
 @end
