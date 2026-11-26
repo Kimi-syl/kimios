@@ -702,6 +702,7 @@ struct Ui {
     last_monitor_ms: u64,
     pet: pet::Pet,
     last_pet_ms: u64,
+    pet_activity: usize,
 }
 
 impl Ui {
@@ -739,6 +740,7 @@ impl Ui {
             last_monitor_ms: 0,
             pet: pet::Pet::load_default(),
             last_pet_ms: 0,
+            pet_activity: 0,
         }
     }
 
@@ -893,6 +895,16 @@ fn gui_run() -> ! {
             }
         }
 
+        // Reflect app activity in the pet's state (working/thinking/idle).
+        {
+            let app_open = matches!(ui.scene, Scene::App(_));
+            let desired = pet::activity_state(app_open, false);
+            if desired != ui.pet_activity {
+                ui.pet_activity = desired;
+                ui.pet.set_state(desired, now);
+            }
+        }
+
         // Animating home (edit-mode jiggle / folder view) moves icons every
         // frame; repaint the wallpaper each frame or old pixels ghost into
         // duplicated logos. (Icon drag uses the fast snapshot path below.)
@@ -1023,6 +1035,14 @@ pub extern "C" fn kimi_test_osk() -> u64 {
 #[cfg(not(target_os = "none"))]
 pub extern "C" fn kimi_test_pet() -> u64 {
     pet::self_test()
+}
+
+#[no_mangle]
+#[cfg(not(target_os = "none"))]
+pub extern "C" fn kimi_test_pet_pack(jp: u64, jl: u64, pp: u64, pl: u64) -> u64 {
+    let json = unsafe { core::slice::from_raw_parts(jp as *const u8, jl as usize) };
+    let png = unsafe { core::slice::from_raw_parts(pp as *const u8, pl as usize) };
+    pet::test_pack(json, png)
 }
 
 /// Host-only test hook: fetch+cache the kpkg repo (1 = success).
