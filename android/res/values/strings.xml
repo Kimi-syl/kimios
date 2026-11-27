@@ -1,4 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">KimiOS</string>
+    <string name="a11y_desc">Lets KimiOS read the current screen\'s UI elements so its terminal and agent can see what is on screen. No content is sent off-device.</string>
 </resources>

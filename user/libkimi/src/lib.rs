@@ -734,6 +734,15 @@ pub const SYS_PROC: u64 = 56;
 pub const SYS_FETCH_ASYNC: u64 = 57;
 pub const SYS_FETCH_PROGRESS: u64 = 58;
 pub const SYS_FETCH_AUTH: u64 = 59;
+pub const SYS_UI_READ: u64 = 60;
+
+/// Instant UI-element snapshot from the host accessibility layer (Android
+/// AccessibilityService). Writes a text snapshot into `out`; returns the byte
+/// count, or None when unavailable (service disabled / non-Android host).
+pub fn ui_read(out: &mut [u8]) -> Option<usize> {
+    let n = syscall3(SYS_UI_READ, out.as_mut_ptr() as u64, out.len() as u64, 0);
+    if n == ERROR { None } else { Some(n as usize) }
+}
 
 /// `[cpu_pct_x10, ram_total_kb, ram_used_kb, storage_total_kb, storage_used_kb,
 /// uptime_s, proc_count, battery_pct, battery_charging, reserved]`.

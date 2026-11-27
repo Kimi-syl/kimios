@@ -631,6 +631,17 @@ pub fn exec(input: &[u8]) {
                 k::print("  kplugin catalog [filter] [page] browse installable Alpine tools\n");
             }
         }
+    } else if command == &b"ui"[..] || command == &b"uiread"[..] {
+        let mut buf = [0u8; 8192];
+        match k::ui_read(&mut buf) {
+            Some(n) if n > 0 => {
+                k::print_bytes(&buf[..n]);
+                if buf[n - 1] != b'\n' {
+                    k::print("\n");
+                }
+            }
+            _ => k::print("ui: no snapshot. Enable Android Settings > Accessibility > KimiOS,\nthen open the app you want to read and run `ui` again.\n"),
+        }
     } else if command == &b"net"[..] {
         let timeout = parse_u64(argument).unwrap_or(5000);
         k::net_status(timeout);

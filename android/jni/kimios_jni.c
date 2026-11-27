@@ -69,6 +69,7 @@ static jmethodID g_web_init_mid, g_web_buf_mid, g_web_render_mid, g_web_touch_mi
                  g_web_url_mid, g_web_title_mid, g_web_canback_mid, g_web_canfwd_mid,
                  g_web_viewport_mid, g_web_pause_mid, g_web_resume_mid;
 static jmethodID g_plugin_api_mid, g_plugin_manifest_mid, g_plugin_notify_mid;
+static jmethodID g_ui_read_mid;
 
 static JNIEnv *gui_env(int *attached) {
     *attached = 0;
@@ -1239,6 +1240,7 @@ uint64_t kimi_host_syscall(uint64_t n, uint64_t a0, uint64_t a1, uint64_t a2, ui
         default: return ERROR;
         }
     case 7: case 9: case 35: case 10: case 24: case 38: return ERROR;
+    case 60: return call_str_out(g_ui_read_mid, (char *)a0, a1); // SYS_UI_READ
     default: LOG("unhandled syscall %llu", (unsigned long long)n); return ERROR;
     }
 }
@@ -1291,6 +1293,7 @@ Java_com_kimios_libos_KimiBridge_nativeInit(JNIEnv *env, jclass cls, jstring fil
         g_plugin_api_mid      = (*env)->GetStaticMethodID(env, g_bridge, "nativePluginApi",           "()J");
         g_plugin_manifest_mid = (*env)->GetStaticMethodID(env, g_bridge, "nativePluginManifest",    "(Ljava/lang/String;)[Ljava/lang/String;");
         g_plugin_notify_mid   = (*env)->GetStaticMethodID(env, g_bridge, "nativePluginNotifications","()[B");
+        g_ui_read_mid         = (*env)->GetStaticMethodID(env, g_bridge, "uiSnapshot", "()Ljava/lang/String;");
         jmethodID setroot = (*env)->GetStaticMethodID(env, g_bridge, "setDiskRoot", "(Ljava/lang/String;)V");
         if (setroot) {
             jstring jr = (*env)->NewStringUTF(env, diskRoot);
