@@ -6,7 +6,7 @@ extern uint64_t kimi_test_pet(void);
 int main(void){
   uint64_t r=kimi_test_pet();
   printf("pet self_test=0x%llx (0x1ff=all pass)\n",(unsigned long long)r);
-  const char* names[]={"load","png-dims","pack-parse","frame-advance","oneshot-hold","oneshot-return","sleep","tap-reaction","render"};
-  for(int i=0;i<9;i++) printf("  [%s] %s\n", names[i], (r>>i)&1?"PASS":"FAIL");
-  return r==0x1ff?0:1;
+  const char* names[]={"load","png-dims","pack-parse","frame-advance","oneshot-hold","oneshot-return","sleep","tap-reaction","render","act-idle","act-work","act-think"};
+  for(int i=0;i<12;i++) printf("  [%s] %s\n", names[i], (r>>i)&1?"PASS":"FAIL");
+  return r==0xfff?0:1;
 }

@@ -657,6 +657,33 @@ fn parse_pack(json: &[u8]) -> Option<PetPack> {
     Some(pack)
 }
 
+/// Read a whole `/disk/...` file into `buf`; returns bytes read.
+fn read_disk(path: &str, buf: &mut [u8]) -> Option<usize> {
+    let h = k::open(path)?;
+    let mut total = 0usize;
+    while total < buf.len() {
+        let n = k::read_file(h, total, &mut buf[total..]);
+        if n == 0 {
+            break;
+        }
+        total += n;
+    }
+    k::close(h);
+    Some(total)
+}
+
+/// Map app activity to a pet state: streaming -> thinking, an open app ->
+/// working, otherwise idle. Pure so it can be unit-tested.
+pub fn activity_state(app_open: bool, streaming: bool) -> usize {
+    if streaming {
+        S_THINKING
+    } else if app_open {
+        S_WORKING
+    } else {
+        S_IDLE
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Runtime state machine + renderer
 // ---------------------------------------------------------------------------
@@ -692,10 +719,9 @@ impl Pet {
         }
     }
 
-    /// Load the built-in pet (embedded pack.json + PNG atlas).
-    pub fn load_default() -> Self {
-        let json = include_bytes!("pet_default.json");
-        let png = include_bytes!("pet_default.png");
+    /// Build a pet from a pack.json + PNG atlas (the import path). Returns a
+    /// disabled pet if either fails to parse/decode.
+    pub fn from_pack(json: &[u8], png: &[u8]) -> Self {
         let mut pet = Pet::disabled();
         if decode_png(png).is_none() {
             return pet;
@@ -706,6 +732,26 @@ impl Pet {
             pet.state = S_IDLE;
         }
         pet
+    }
+
+    /// Load the active pet: an imported pack in `/disk/pet/` (pack.json +
+    /// atlas.png) if present and valid, otherwise the built-in whale.
+    pub fn load_default() -> Self {
+        static mut DJ: [u8; 65536] = [0; 65536];
+        static mut DP: [u8; 262144] = [0; 262144];
+        unsafe {
+            let dj = core::slice::from_raw_parts_mut(DJ.as_mut_ptr(), DJ.len());
+            let dp = core::slice::from_raw_parts_mut(DP.as_mut_ptr(), DP.len());
+            if let (Some(jn), Some(pn)) = (read_disk("/disk/pet/pack.json", dj), read_disk("/disk/pet/atlas.png", dp)) {
+                if jn > 0 && pn > 0 {
+                    let pet = Pet::from_pack(&dj[..jn], &dp[..pn]);
+                    if pet.valid {
+                        return pet;
+                    }
+                }
+            }
+        }
+        Pet::from_pack(include_bytes!("pet_default.json"), include_bytes!("pet_default.png"))
     }
 
     fn display_anim(&self) -> usize {
@@ -947,6 +993,41 @@ pub fn self_test() -> u64 {
     let nonzero = fb.iter().filter(|&&p| p != 0).count();
     if nonzero > 20 {
         ok |= 1 << 8;
+    }
+    if activity_state(false, false) == S_IDLE {
+        ok |= 1 << 9;
+    }
+    if activity_state(true, false) == S_WORKING {
+        ok |= 1 << 10;
+    }
+    if activity_state(true, true) == S_THINKING {
+        ok |= 1 << 11;
+    }
+    ok
+}
+
+/// Host test for the import path: build a pet from caller-supplied pack bytes.
+/// Bitmask: 1 valid, 2 atlas dims match pack canvas*tiles, 4 >=1 anim, 8 renders.
+pub fn test_pack(json: &[u8], png: &[u8]) -> u64 {
+    let mut ok = 0u64;
+    let pet = Pet::from_pack(json, png);
+    if pet.valid {
+        ok |= 1;
+    } else {
+        return ok;
+    }
+    if pet.pack.nanims >= 1 {
+        ok |= 4;
+    }
+    let (w, h) = unsafe { (ATLAS_W, ATLAS_H) };
+    if w > 0 && h > 0 {
+        ok |= 2;
+    }
+    let mut fb = [0u32; 480 * 160];
+    let screen = Screen::new(fb.as_mut_ptr() as u64, 480, 160, 480 * 4);
+    pet.draw(&screen, 60, 60);
+    if fb.iter().filter(|&&p| p != 0).count() > 10 {
+        ok |= 8;
     }
     ok
 }
