@@ -79,6 +79,11 @@ public final class KimiA11yService extends AccessibilityService {
         CharSequence txt = n.getText();
         String text = txt != null ? txt.toString()
                 : (n.getContentDescription() != null ? n.getContentDescription().toString() : "");
+        // Never expose secret input: mask password/OTP field text so the snapshot
+        // (reachable from the shell/agent) cannot leak credentials.
+        if (n.isPassword() && !text.isEmpty()) {
+            text = "\u2022\u2022\u2022\u2022";
+        }
         CharSequence cn = n.getClassName();
         String cls = cn != null ? cn.toString() : "";
         if (!text.isEmpty() || n.isClickable() || n.isEditable()) {
