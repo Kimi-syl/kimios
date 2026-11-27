@@ -623,6 +623,9 @@ impl Oc {
                     while j < buf.len() && pn < 63 {
                         let c = buf[j];
                         if c == b'\n' || c == b'\r' || c == b' ' { break; }
+                        // Keep the buffer printable ASCII so `pw_str` can treat it
+                        // as UTF-8 without a lossy fallback.
+                        if !(0x21..=0x7e).contains(&c) { break; }
                         self.pw[pn] = c;
                         pn += 1;
                         j += 1;
@@ -644,7 +647,11 @@ impl Oc {
     }
 
     fn pw_str(&self) -> &str {
-        core::str::from_utf8(&self.pw[..self.pw_len]).unwrap_or("")
+        // SAFETY: `pump_log` only stores printable ASCII (0x21..=0x7e) into
+        // `pw`, so this prefix is always valid UTF-8. Going through
+        // `from_utf8_unchecked` avoids a constant empty-string fallback flowing
+        // into the password path.
+        unsafe { core::str::from_utf8_unchecked(&self.pw[..self.pw_len]) }
     }
 
     /// Ensure a session exists; create one if needed. Returns true on success.

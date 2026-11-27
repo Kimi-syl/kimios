@@ -1,5 +1,9 @@
 name: iOS IPA
 
+# Least privilege: this workflow only checks out and builds.
+permissions:
+  contents: read
+
 on:
   workflow_dispatch:
   push:

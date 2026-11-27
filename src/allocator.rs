@@ -68,6 +68,19 @@ fn align_up(value: usize, align: usize) -> Option<usize> {
     value.checked_add(align - 1).map(|sum| sum & !(align - 1))
 }
 
+/// True when `[address, address + size)` lies inside the static heap.
+///
+/// The free list stores its links in-band, so a corrupt or stale link would be
+/// followed straight into an arbitrary address. Every node is range-checked
+/// against the heap before it is dereferenced.
+fn in_heap(address: usize, size: usize) -> bool {
+    let base = heap_base();
+    address >= base
+        && address
+            .checked_add(size)
+            .map_or(false, |end| end <= base + HEAP_SIZE)
+}
+
 /// Bytes currently reserved by callers (including block headers).
 pub fn used() -> usize {
     FREE.lock().used
@@ -97,9 +110,18 @@ pub fn alloc(layout: Layout) -> Option<NonNull<u8>> {
     let mut current = list.head;
     while !current.is_null() {
         let start = current as usize;
+        // Reject a free-list link that does not point at a full header inside
+        // the heap instead of dereferencing it.
+        if !in_heap(start, HEADER) {
+            return None;
+        }
         let payload = align_up(start + HEADER, align)?;
         let used = align_up(payload + size, 16)? - start;
+        // The block's own `size` field must also stay within the heap.
         let total = unsafe { (*current).size };
+        if !in_heap(start, total) || !in_heap(start, used) {
+            return None;
+        }
 
         if used <= total {
             let next = unsafe { (*current).next };
@@ -145,10 +167,20 @@ pub fn dealloc(pointer: NonNull<u8>) {
     let block = (pointer.as_ptr() as usize - HEADER) as *mut Block;
     let address = block as usize;
 
+    // Ignore a free of memory that is not a heap block (bad pointer or a
+    // double-free of an already-merged block): writing its header would corrupt
+    // the list.
+    if !in_heap(address, HEADER) {
+        return;
+    }
+
     let mut list = FREE.lock();
     let mut previous: *mut Block = core::ptr::null_mut();
     let mut current = list.head;
     while !current.is_null() && (current as usize) < address {
+        if !in_heap(current as usize, HEADER) {
+            return;
+        }
         previous = current;
         current = unsafe { (*current).next };
     }
