@@ -9,6 +9,21 @@ use crate::font_data::{self, Font};
 const LOGICAL_WIDTH: i64 = 480;
 const APP_HEIGHT: i64 = 800;
 
+/// Horizontal advance of one glyph, in font units (1 em = `font.em`).
+///
+/// The built-in SANS atlas advances the space at only 0.156 em, so at typical
+/// body sizes it rounds to ~1.7 logical px and words visibly run together. A
+/// 0.25 em floor gives normal word spacing; fonts that already set a wider
+/// space (MONO, PIXEL) are unaffected.
+fn advance_units(font: &Font, ch: char, glyph: &font_data::Glyph) -> i64 {
+    let advance = glyph.advance as i64;
+    if ch == ' ' {
+        advance.max(font.em as i64 / 4)
+    } else {
+        advance
+    }
+}
+
 pub struct Screen {
     pixels: *mut u32,
     physical_width: i64,
@@ -449,18 +464,22 @@ impl Screen {
         font: &Font,
     ) -> i64 {
         let em = font.em as i64;
-        let mut pen = x;
+        // Pen is tracked in 1/em px so fractional advances accumulate. Truncating
+        // each advance to whole px dropped narrow glyphs entirely at small sizes
+        // (space 20/128 em * 11 px => 1 px, period likewise), which ran words
+        // together ("KimiOS 0.1 is up to date" rendered as "KimiOS0lisuptodate").
+        let mut pen_fp = x * em;
         for ch in text.chars() {
             let Some(glyph) = font.glyph_for(ch as u32) else {
-                pen += size * 4 / 10;
+                pen_fp += (size * 4 / 10) * em;
                 continue;
             };
             if glyph.w > 0 && glyph.h > 0 {
-                self.draw_font_glyph(font, glyph, pen, y, size, color);
+                self.draw_font_glyph(font, glyph, pen_fp / em, y, size, color);
             }
-            pen += glyph.advance as i64 * size / em;
+            pen_fp += advance_units(font, ch, glyph) * size;
         }
-        pen
+        pen_fp / em
     }
 
     fn draw_font_glyph(
@@ -521,14 +540,16 @@ impl Screen {
 
     pub fn font_width(text: &str, size: i64, font: &Font) -> i64 {
         let em = font.em as i64;
-        let mut width = 0i64;
+        // Accumulate in 1/em px to stay exactly consistent with `font_text`,
+        // which matters for `text_centered` alignment of small text.
+        let mut width_fp = 0i64;
         for ch in text.chars() {
             match font.glyph_for(ch as u32) {
-                Some(g) => width += g.advance as i64 * size / em,
-                None => width += size * 4 / 10,
+                Some(g) => width_fp += advance_units(font, ch, g) * size,
+                None => width_fp += (size * 4 / 10) * em,
             }
         }
-        width
+        width_fp / em
     }
 
     pub fn text_centered(&self, cx: i64, y: i64, text: &str, scale: i64, color: u32) {
