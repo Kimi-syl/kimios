@@ -1078,6 +1078,23 @@ struct Block {
 static mut FREE: *mut Block = core::ptr::null_mut();
 static NEXT: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 static END: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+/// First address returned by `brk`, i.e. the low bound of the heap.
+static HEAP_BASE: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+/// True when `[address, address + size)` lies inside the heap we grew.
+///
+/// Free-list links live in-band, so a stale or corrupt link would otherwise be
+/// followed into an arbitrary address. Every node is range-checked before use.
+fn heap_range_ok(address: usize, size: usize) -> bool {
+    let base = HEAP_BASE.load(core::sync::atomic::Ordering::Relaxed);
+    let end = END.load(core::sync::atomic::Ordering::Relaxed);
+    base != 0
+        && end > base
+        && address >= base
+        && address
+            .checked_add(size)
+            .map_or(false, |last| last <= end)
+}
 
 fn align_up(value: usize, align: usize) -> Option<usize> {
     value.checked_add(align - 1).map(|sum| sum & !(align - 1))
@@ -1088,17 +1105,29 @@ impl Heap {
         let mut previous: *mut Block = core::ptr::null_mut();
         let mut current = FREE;
         while !current.is_null() {
-            let block = &mut *current;
-            if block.size >= size + HEADER {
+            // Reject a free-list link that is not a header inside the heap
+            // before reading it.
+            if !heap_range_ok(current as usize, HEADER) {
+                return None;
+            }
+            let block_size = (*current).size;
+            let block_next = (*current).next;
+            if block_size >= size + HEADER {
                 if previous.is_null() {
-                    FREE = block.next;
+                    FREE = block_next;
                 } else {
-                    (*previous).next = block.next;
+                    if !heap_range_ok(previous as usize, HEADER) {
+                        return None;
+                    }
+                    (*previous).next = block_next;
                 }
-                let used = align_up(size + HEADER, ALIGN).unwrap_or(block.size);
-                if block.size >= used + HEADER + ALIGN {
+                let used = align_up(size + HEADER, ALIGN).unwrap_or(block_size);
+                if block_size >= used + HEADER + ALIGN {
                     let rest = (current as usize + used) as *mut Block;
-                    (*rest).size = block.size - used;
+                    if !heap_range_ok(rest as usize, HEADER) {
+                        return None;
+                    }
+                    (*rest).size = block_size - used;
                     (*rest).next = FREE;
                     FREE = rest;
                     (*current).size = used;
@@ -1106,7 +1135,7 @@ impl Heap {
                 return Some((current as usize + HEADER) as *mut u8);
             }
             previous = current;
-            current = block.next;
+            current = block_next;
         }
         None
     }
@@ -1115,6 +1144,8 @@ impl Heap {
         let mut start = NEXT.load(core::sync::atomic::Ordering::Relaxed);
         if start == 0 {
             start = brk() as usize;
+            // Record the heap origin so `heap_range_ok` can validate links.
+            HEAP_BASE.store(start, core::sync::atomic::Ordering::Relaxed);
         }
         let payload = align_up(start + HEADER, align)?;
         let wanted = payload.checked_add(size)?;
@@ -1154,6 +1185,11 @@ unsafe impl core::alloc::GlobalAlloc for Heap {
             return;
         }
         let block = (pointer as usize - HEADER) as *mut Block;
+        // Ignore frees of memory we never handed out: linking a bogus block
+        // would corrupt the free list for every later allocation.
+        if !heap_range_ok(block as usize, HEADER) {
+            return;
+        }
         (*block).next = FREE;
         FREE = block;
     }

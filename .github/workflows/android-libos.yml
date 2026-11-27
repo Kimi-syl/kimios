@@ -1,5 +1,10 @@
 name: Android libOS APK
 
+# Least privilege: checkout/build, plus actions: write for upload-artifact.
+permissions:
+  contents: read
+  actions: write
+
 on:
   workflow_dispatch:
   push:

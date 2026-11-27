@@ -1,5 +1,9 @@
 name: iOS iSH smoke
 
+# Least privilege: this workflow only checks out and builds.
+permissions:
+  contents: read
+
 # Runtime smoke for the embedded iSH Linux guest. Builds the iSH CLI NATIVELY on
 # the Apple-Silicon runner (the CLI only exists in non-cross builds), boots an
 # Alpine aarch64 rootfs, and runs real commands inside the emulated guest. This
