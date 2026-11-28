@@ -16,6 +16,8 @@ mod ai;
 mod chat;
 mod opencode;
 mod pet;
+mod k3d;
+mod pet3d;
 
 use core::panic::PanicInfo;
 use core::sync::atomic::{AtomicU64, Ordering};
@@ -623,6 +625,8 @@ struct Settings {
     brightness: i64,
     animations: bool,
     pet: bool,
+    /// Render the pet as real-time 3D instead of the sprite pack.
+    pet3d: bool,
 }
 
 impl Settings {
@@ -636,6 +640,7 @@ impl Settings {
             brightness: 70,
             animations: false,
             pet: true,
+            pet3d: true,
         }
     }
 }
@@ -713,6 +718,9 @@ struct Ui {
     /// True while waiting for the file picker to copy a pack in.
     pet_pending: bool,
     pet_poll_ms: u64,
+    /// True while waiting for the picker to deliver a 3D model.
+    pet3d_busy: bool,
+    pet3d_poll_ms: u64,
 }
 
 impl Ui {
@@ -754,6 +762,8 @@ impl Ui {
             pet_msg: 0,
             pet_pending: false,
             pet_poll_ms: 0,
+            pet3d_busy: false,
+            pet3d_poll_ms: 0,
         }
     }
 
@@ -1058,7 +1068,14 @@ pub extern "C" fn kimi_test_pet_pack(jp: u64, jl: u64, pp: u64, pl: u64) -> u64 
     pet::test_pack(json, png)
 }
 
-/// Host-only test hook: fetch+cache the kpkg repo (1 = success).
+#[no_mangle]
+    #[cfg(not(target_os = "none"))]
+    pub extern "C" fn kimi_test_pet3d(gp: u64, gl: u64) -> u64 {
+        let bytes = unsafe { core::slice::from_raw_parts(gp as *const u8, gl as usize) };
+        pet3d::test_render(bytes)
+    }
+
+    /// Host-only test hook: fetch+cache the kpkg repo (1 = success).
 #[no_mangle]
 #[cfg(not(target_os = "none"))]
 pub extern "C" fn kimi_test_kpkg() -> u64 {
@@ -1348,7 +1365,7 @@ pub extern "C" fn kimi_test_weather(json: u64, len: u64, mode: u64, out: u64) ->
     apps::weather_parse_test(data, mode, out) as u64
 }
 
-/// Host-only test hook: bounds-checked RGBA→XRGB blit; returns rows written.
+/// Host-only test hook: bounds-checked RGBA????????B blit; returns rows written.
 #[no_mangle]
 #[cfg(not(target_os = "none"))]
 pub extern "C" fn kimi_test_blit(
@@ -1922,18 +1939,35 @@ fn tapped(screen: &Screen, ui: &mut Ui, point: (i64, i64), clock: [u64; 7]) {
                 }
                 return;
             }
-            if ui.settings.pet && ui.pet.valid {
-                let (px, py) = ui.pet.clamped_anchor(
-                    screen,
-                    screen.width() - 46,
-                    screen.height() - 128,
-                    crate::theme::pet_size() as i64,
-                );
-                if ui.pet.hit(px, py, point.0, point.1) {
-                    ui.pet.tap(k::uptime_ms(), point.0 < px);
-                    ui.paint_bg = true;
-                    render(screen, ui, clock);
-                    return;
+            if ui.settings.pet {
+                // 3D and sprite pets occupy different areas, so each has its own
+                // hit test; both must agree with what is actually drawn.
+                if ui.settings.pet3d {
+                    let (rx, ry, rw, rh) = pet3d_rect(screen.width(), screen.height(), 0);
+                    if point.0 >= rx
+                        && point.0 < rx + rw
+                        && point.1 >= ry
+                        && point.1 < ry + rh
+                    {
+                        ui.pet.tap(k::uptime_ms(), point.0 < rx + rw / 2);
+                        pet3d::bounce();
+                        ui.paint_bg = true;
+                        render(screen, ui, clock);
+                        return;
+                    }
+                } else if ui.pet.valid {
+                    let (px, py) = ui.pet.clamped_anchor(
+                        screen,
+                        screen.width() - 46,
+                        screen.height() - 128,
+                        crate::theme::pet_size() as i64,
+                    );
+                    if ui.pet.hit(px, py, point.0, point.1) {
+                        ui.pet.tap(k::uptime_ms(), point.0 < px);
+                        ui.paint_bg = true;
+                        render(screen, ui, clock);
+                        return;
+                    }
                 }
             }
             if let Some(page) = home_page_hit(screen, point) {
@@ -2402,6 +2436,15 @@ fn present_dirty(screen: &Screen) {
     }
 }
 
+/// Rect (logical) that the 3D pet occupies on Home. Shared by the renderer and
+/// the tap test so the visible character and its hit area cannot drift apart.
+fn pet3d_rect(width: i64, height: i64, y_offset: i64) -> (i64, i64, i64, i64) {
+    let pct = crate::theme::pet_size() as i64;
+    let hgt = (110 * pct.min(160) / 100).clamp(60, 190);
+    let wid = hgt * 3 / 4;
+    (width - 40 - wid, height - 110 - hgt + y_offset, wid, hgt)
+}
+
 fn draw_scene(screen: &Screen, ui: &mut Ui, clock: [u64; 7], paint_bg: bool) {
     match ui.scene {
         Scene::Lock => {
@@ -2816,14 +2859,25 @@ fn draw_home(
         }
     }
 
-    if ui.settings.pet && ui.pet.valid && ui.folder_view.is_none() {
-        let (ax, ay) = ui.pet.clamped_anchor(
-            screen,
-            width - 46,
-            height - 128 + y_offset,
-            crate::theme::pet_size() as i64,
-        );
-        ui.pet.draw(screen, ax, ay);
+    if ui.settings.pet && ui.folder_view.is_none() {
+        if ui.settings.pet3d {
+            // Offscreen 3D render blitted 1:1 into the pet's rect.
+            let (px, py, wid, hgt) = pet3d_rect(width, height, y_offset);
+            let t = k::uptime_ms();
+            pet3d::update_pose(ui.pet.state(), (t as f32) * 0.001);
+            pet3d::update_expressions((t as f32) * 0.001);
+            // Gentle sway around the front instead of a constant spin, so the face stays visible.
+            let yaw = crate::k3d::sin((t as f32) * 0.0004) * 0.34;
+            pet3d::draw(screen, px, py, wid, hgt, yaw, 0.02);
+        } else if ui.pet.valid {
+            let (ax, ay) = ui.pet.clamped_anchor(
+                screen,
+                width - 46,
+                height - 128 + y_offset,
+                crate::theme::pet_size() as i64,
+            );
+            ui.pet.draw(screen, ax, ay);
+        }
     }
     draw_home_indicator(screen);
 }
@@ -3418,6 +3472,16 @@ fn draw_centered_pair(screen: &Screen, cx: i64, y: i64, a: &str, b: &str, color:
 fn draw_pet_app(screen: &Screen, ui: &mut Ui, x_offset: i64) {
     // After the user picks files the host copies them in asynchronously, so poll
     // until both halves are present and then install without another tap.
+    if ui.pet3d_busy {
+        let now = k::uptime_ms();
+        if now.saturating_sub(ui.pet3d_poll_ms) >= 400 {
+            ui.pet3d_poll_ms = now;
+            if pet3d::install_model_from("/disk/pet/import") {
+                ui.pet3d_busy = false;
+                ui.pet_msg = 1;
+            }
+        }
+    }
     if ui.pet_pending {
         let now = k::uptime_ms();
         if now.saturating_sub(ui.pet_poll_ms) >= 400 {
@@ -3483,7 +3547,17 @@ fn draw_pet_app(screen: &Screen, ui: &mut Ui, x_offset: i64) {
     // Actions: pick files straight from the device, or re-install what is already there.
     pet_pill(screen, x + 20, 560, 270, 52, "Pick pack files", RED(), TEXT());
     pet_pill(screen, x + 302, 560, 158, 52, "Install", SURFACE_HI(), TEXT());
-    pet_pill(screen, x + 20, 622, 200, 46, "Remove pack", SURFACE_HI(), TEXT());
+    pet_pill(screen, x + 20, 622, 190, 46, "Remove pack", SURFACE_HI(), TEXT());
+    pet_pill(
+        screen,
+        x + 220,
+        622,
+        240,
+        46,
+        if ui.pet3d_busy { "Picking..." } else { "Pick 3D model" },
+        RED_DIM(),
+        TEXT(),
+    );
     let installed = pet::Pet::pack_present();
     screen.text(
         x + 44,
@@ -3551,12 +3625,27 @@ fn pet_app_hit(ui: &mut Ui, point: (i64, i64)) {
         }
     }
     if py < 560 || py >= 612 {
-        if py >= 622 && py < 668 && px >= 20 && px < 220 {
-            if pet::Pet::uninstall() {
-                ui.pet = pet::Pet::load_default();
-                ui.pet_msg = 2;
-            } else {
-                ui.pet_msg = 3;
+        if py >= 622 && py < 668 {
+            if px >= 20 && px < 210 {
+                if pet::Pet::uninstall() {
+                    ui.pet = pet::Pet::load_default();
+                    ui.pet_msg = 2;
+                } else {
+                    ui.pet_msg = 3;
+                }
+                return;
+            }
+            if px >= 220 && px < 460 {
+                // Pick a .glb/.vrm from anywhere on the device.
+                ui.pet_msg = 0;
+                k::mkdir("/disk/pet/import");
+                if k::import_file("/disk/pet/import") {
+                    ui.pet3d_busy = true;
+                    ui.pet3d_poll_ms = 0;
+                } else {
+                    ui.pet_msg = 3;
+                }
+                return;
             }
         }
         return;

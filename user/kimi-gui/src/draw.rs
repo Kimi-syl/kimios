@@ -125,11 +125,11 @@ impl Screen {
         unsafe { self.pixels.add((py * self.stride + px) as usize).read() }
     }
 
-    fn map_x(&self, x: i64) -> i64 {
+    pub fn map_x(&self, x: i64) -> i64 {
         x * self.physical_width / LOGICAL_WIDTH
     }
 
-    fn map_y(&self, y: i64) -> i64 {
+    pub fn map_y(&self, y: i64) -> i64 {
         y * self.physical_height / self.height()
     }
 
@@ -201,7 +201,7 @@ impl Screen {
         }
     }
 
-    /// Blit an RGBA8 sprite sub-cell (`cw`×`ch` at `sx,sy` inside a `sw`×`sh`
+    /// Blit an RGBA8 sprite sub-cell (`cw`?`ch` at `sx,sy` inside a `sw`?`sh`
     /// atlas) at logical `(dx,dy)`, nearest-neighbour scaled by `scale`
     /// art-pixels and alpha-blended. `mirror` flips horizontally. Used by the
     /// pet overlay; pixel-art stays crisp because each art pixel maps to an
