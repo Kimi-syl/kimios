@@ -68,12 +68,12 @@ BONES = [
     ("chest", "spine", (0.0, 0.0, 0.865), (0.0, 0.0, 1.005)),
     ("neck", "chest", (0.0, 0.0, 1.005), (0.0, 0.0, 1.090)),
     ("head", "neck", (0.0, 0.0, 1.090), (0.0, 0.0, 1.455)),
-    ("leftUpperArm", "chest", (0.138, 0.0, 1.005), (0.290, 0.0, 1.005)),
-    ("leftLowerArm", "leftUpperArm", (0.290, 0.0, 1.005), (0.435, 0.0, 1.005)),
-    ("leftHand", "leftLowerArm", (0.435, 0.0, 1.005), (0.530, 0.0, 1.005)),
-    ("rightUpperArm", "chest", (-0.138, 0.0, 1.005), (-0.290, 0.0, 1.005)),
-    ("rightLowerArm", "rightUpperArm", (-0.290, 0.0, 1.005), (-0.435, 0.0, 1.005)),
-    ("rightHand", "rightLowerArm", (-0.435, 0.0, 1.005), (-0.530, 0.0, 1.005)),
+    ("leftUpperArm", "chest", (0.140, 0.0, 1.005), (0.385, 0.0, 1.005)),
+    ("leftLowerArm", "leftUpperArm", (0.385, 0.0, 1.005), (0.585, 0.0, 1.005)),
+    ("leftHand", "leftLowerArm", (0.585, 0.0, 1.005), (0.735, 0.0, 1.005)),
+    ("rightUpperArm", "chest", (-0.140, 0.0, 1.005), (-0.385, 0.0, 1.005)),
+    ("rightLowerArm", "rightUpperArm", (-0.385, 0.0, 1.005), (-0.585, 0.0, 1.005)),
+    ("rightHand", "rightLowerArm", (-0.585, 0.0, 1.005), (-0.735, 0.0, 1.005)),
     ("leftUpperLeg", "hips", (0.085, 0.0, 0.620), (0.085, 0.0, 0.350)),
     ("leftLowerLeg", "leftUpperLeg", (0.085, 0.0, 0.350), (0.085, 0.0, 0.100)),
     ("leftFoot", "leftLowerLeg", (0.085, 0.0, 0.100), (0.085, -0.135, 0.045)),
@@ -146,6 +146,8 @@ C = {
 # and the eyes (96x120): the runtime box-downsamples the PNG to 128x128 before
 # sampling it, so chunkier features survive far better than fine line work.
 TEX_SIZE = 256
+PAINT_SCALE = 3
+PAINT_SIZE = TEX_SIZE * PAINT_SCALE
 REGIONS = {
     "face":     (0 / 256, 112 / 256, 136 / 256, 144 / 256),
     "eye":      (136 / 256, 136 / 256, 88 / 256, 120 / 256),
@@ -278,29 +280,29 @@ def paint_eye(u, v):
     c = _mix(C["sclera"], C["sclera_lo"], _sstep(0.40, 1.0, v) * 0.85)
     c = _mix(c, C["sclera_lo"], _sstep(0.16, 0.0, v) * 0.35)
     # iris: vertical amber gradient with a dark limbal ring
-    ix, iy = (u - 0.5) / 0.335, (v - 0.545) / 0.335
+    ix, iy = (u - 0.5) / 0.385, (v - 0.555) / 0.380
     di = math.hypot(ix, iy)
     if di < 1.06:
-        t = (v - 0.210) / 0.670
+        t = (v - 0.180) / 0.755
         ic = _grad([(0.0, C["iris_hi"]), (0.34, C["iris_mid"]),
                     (0.74, C["iris_deep"]), (1.0, C["iris_deep"])], t)
         ic = _mix(ic, C["iris_ring"], _sstep(0.84, 1.03, di))
         # a warm crescent of bounced light at the bottom of the iris
         ic = _mix(ic, C["iris_hi"], 0.55 * math.exp(
-            -(((u - 0.5) / 0.20) ** 2 + ((v - 0.30) / 0.10) ** 2) * 2.0))
+            -(((u - 0.5) / 0.22) ** 2 + ((v - 0.30) / 0.11) ** 2) * 2.0))
         c = _mix(c, ic, 1.0)
     # pupil
-    dp = math.hypot((u - 0.5) / 0.150, (v - 0.545) / 0.172)
+    dp = math.hypot((u - 0.5) / 0.165, (v - 0.555) / 0.190)
     c = _mix(c, C["pupil"], _sstep(1.05, 0.90, dp))
     # two hard white highlights (the classic anime catch-light)
-    for (hu, hv, hr) in ((0.395, 0.685, 0.105), (0.615, 0.445, 0.052)):
+    for (hu, hv, hr) in ((0.392, 0.700, 0.108), (0.618, 0.440, 0.054)):
         dd = math.hypot((u - hu) / hr, (v - hv) / hr)
         c = _mix(c, C["white"], _sstep(1.0, 0.80, dd))
         if dd < 1.0:
             c = C["white"]
     # upper lash line: thick arc that follows the eye top
-    th = 0.755 - 0.055 * (abs(ex) ** 2)
-    c = _mix(c, C["lash"], _sstep(th, th + 0.045, v))
+    th = 0.742 + 0.020 * (abs(ex) ** 2)
+    c = _mix(c, C["lash"], _sstep(th, th + 0.040, v))
     # thin dark rim all around so the eye never reads as a sticker
     c = _mix(c, C["lash"], _sstep(0.955, 1.02, d) * 0.72)
     return c
@@ -317,9 +319,9 @@ def paint_mouth(u, v):
 
 
 def paint_brow(u, v):
-    c = _mix(C["hair_deep"], C["hair_lo"], _sstep(0.0, 1.0, v) * 0.75)
+    c = _mix(C["hair_lo"], C["hair"], 0.35 + 0.55 * _sstep(0.0, 1.0, v))
     t = abs(u - 0.5) * 2.0
-    c = _mix(c, C["hair_deep"], t * t * 0.30)
+    c = _mix(c, C["hair_lo"], t * t * 0.35)
     return c
 
 
@@ -350,11 +352,11 @@ def paint_hair_top(u, v):
 
 def paint_hair_lock(u, v):
     # v=1 root (dark), v=0 tip (light)
-    c = _grad([(0.0, C["hair_shine"]), (0.12, C["hair_hi"]), (0.55, C["hair"]),
-               (0.85, C["hair_lo"]), (1.0, C["hair_deep"])], v)
-    c = _mix(c, C["hair_shine"], 0.60 * math.exp(-((u - 0.5) / 0.17) ** 2)
-             * _sstep(0.20, 0.52, v) * _sstep(0.98, 0.70, v))
-    c = _mix(c, C["hair_lo"], 0.13 * (0.5 + 0.5 * math.cos(u * TAU * 3.0 + 0.4)))
+    c = _grad([(0.0, C["hair"]), (0.30, C["hair"]), (0.72, C["hair"]),
+               (0.90, C["hair_lo"]), (1.0, C["hair_deep"])], v)
+    c = _mix(c, C["hair_shine"], 0.55 * math.exp(-((u - 0.5) / 0.18) ** 2)
+             * _sstep(0.15, 0.50, v) * _sstep(0.99, 0.72, v))
+    c = _mix(c, C["hair_lo"], 0.12 * (0.5 + 0.5 * math.cos(u * TAU * 3.0 + 0.4)))
     return c
 
 
@@ -448,12 +450,18 @@ def paint_shoe(u, v):
 
 
 def make_atlas(size, path):
-    """Draw the atlas and save it as a PNG; returns the packed bpy image."""
-    global TEX_SIZE
+    """Draw the atlas and save it as a PNG; returns the packed bpy image.
+
+    The art is painted at PAINT_SCALE x resolution and box-filtered down, which
+    anti-aliases every painted edge (the runtime samples the texture with
+    nearest-neighbour, so jagged source pixels would stay jagged on screen).
+    """
+    global TEX_SIZE, PAINT_SIZE
     TEX_SIZE = size
-    cv = Canvas(size, size)
+    PAINT_SIZE = size * PAINT_SCALE
+    cv = Canvas(PAINT_SIZE, PAINT_SIZE)
     # neutral ground so mip bleed never shows black
-    for i in range(size * size):
+    for i in range(PAINT_SIZE * PAINT_SIZE):
         j = i * 4
         cv.buf[j], cv.buf[j + 1], cv.buf[j + 2] = C["cream"]
     for name in REGIONS:
@@ -468,32 +476,43 @@ def make_atlas(size, path):
         }[name]
         r.paint(fn)
 
+    s = PAINT_SCALE
     img = bpy.data.images.new("testchar_basecolor", size, size, alpha=True)
     px = [0.0] * (size * size * 4)
-    for i in range(size * size):
-        j = i * 4
-        px[j] = _srgb_to_linear(cv.buf[j])
-        px[j + 1] = _srgb_to_linear(cv.buf[j + 1])
-        px[j + 2] = _srgb_to_linear(cv.buf[j + 2])
-        px[j + 3] = 1.0
+    inv = 1.0 / (s * s)
+    for y in range(size):
+        for x in range(size):
+            r = g = b = 0
+            for dy in range(s):
+                row = ((y * s + dy) * PAINT_SIZE + x * s) * 4
+                for dx in range(s):
+                    j = row + dx * 4
+                    r += cv.buf[j]
+                    g += cv.buf[j + 1]
+                    b += cv.buf[j + 2]
+            i = (y * size + x) * 4
+            px[i] = _srgb_to_linear(r * inv)
+            px[i + 1] = _srgb_to_linear(g * inv)
+            px[i + 2] = _srgb_to_linear(b * inv)
+            px[i + 3] = 1.0
     img.pixels.foreach_set(px)
     img.filepath_raw = path
     img.file_format = 'PNG'
     img.save()
     img.pack()
-    print("TESTCHAR|atlas %dx%d -> %s (%d bytes)"
-          % (size, size, path, os.path.getsize(path)))
+    print("TESTCHAR|atlas %dx%d painted at %dx then downsampled -> %s (%d bytes)"
+          % (size, size, PAINT_SIZE, path, os.path.getsize(path)))
     return img
 
 
 # --------------------------------------------------------------------------- UV
 def region_uv(name, u, v):
-    """Map region-normalised (u,v) to atlas UVs with a one-texel inset."""
+    """Map region-normalised (u,v) to atlas UVs with a one-texel inset so
+    bilinear/mip sampling never bleeds across the region border."""
     x0, y0, w, h = REGIONS[name]
-    iu = 1.0 / TEX_SIZE / w
-    iv = 1.0 / TEX_SIZE / h
-    return (x0 + iu + max(0.0, min(1.0, u)) * (w - 2.0 * iu),
-            y0 + iv + max(0.0, min(1.0, v)) * (h - 2.0 * iv))
+    tx = 1.0 / TEX_SIZE
+    return (x0 + tx + max(0.0, min(1.0, u)) * (w - 2.0 * tx),
+            y0 + tx + max(0.0, min(1.0, v)) * (h - 2.0 * tx))
 
 
 # --------------------------------------------------------------------------- mesh
@@ -549,13 +568,18 @@ def _frame(tangent, ref_dir):
 
 
 def sweep(b, stations, part, sides, region_of_band, ref_dir=Vector((0.0, -1.0, 0.0)),
-          cap_start=True, cap_end=True, tip_end=None, smooth=True, open_shell=True):
+          cap_start=True, cap_end=True, tip_end=None, smooth=True, open_shell=True,
+          ang_off=0.0, tip_uv=None, cap_uv=None):
     """Lofted tube through `stations` = [(centre, radius_a, radius_b, v_param)].
 
     Rings are built with a tangent frame, so winding is outward for any path
     direction. `region_of_band(k)` picks the atlas region of the k-th band.
     `open_shell=False` marks the result as a closed volume (normals may be
     recalculated later); open tubes keep their constructed winding.
+    `ang_off` rotates the cross-section (a 45 deg phase turns a 4-gon blade so
+    a flat face, not a crease, points forward).
+    `tip_uv` / `cap_uv` pin the pole/cap UV instead of using the region centre,
+    which otherwise samples the wrong colour for e.g. a shoe toe.
     """
     n = len(stations)
     cols = []
@@ -569,7 +593,7 @@ def sweep(b, stations, part, sides, region_of_band, ref_dir=Vector((0.0, -1.0, 0
         ua, va, a_ref = _frame(tan, ref_dir)
         ring = []
         for i in range(sides):
-            a = TAU * i / sides
+            a = TAU * i / sides + ang_off
             p = Vector(pos) + ua * (math.cos(a) * ra) + va * (math.sin(a) * rb)
             ring.append((b.vert(tuple(p), part), a, vp))
         cols.append(ring)
@@ -595,13 +619,15 @@ def sweep(b, stations, part, sides, region_of_band, ref_dir=Vector((0.0, -1.0, 0
     if cap_start:
         region = region_of_band(0)
         ids = [c[0] for c in cols[0]]
-        b.face(list(reversed(ids)), region, [region_uv(region, 0.5, 0.5)] * len(ids),
+        solid = cap_uv if cap_uv is not None else region_uv(region, 0.5, 0.5)
+        b.face(list(reversed(ids)), region, [solid] * len(ids),
                smooth=False, open_shell=open_shell)
     if tip_end is not None:
         region = region_of_band(n - 2)
         tip = b.vert(tuple(tip_end), part)
         last = cols[-1]
-        tip_uv = region_uv(region, 0.5, 0.0)      # one UV => the pole stays merged
+        # one shared UV keeps the pole merged (no split copies)
+        pole_uv = tip_uv if tip_uv is not None else region_uv(region, 0.5, 0.0)
         for i in range(sides):
             j = (i + 1) % sides
             u0 = (last[i][1] - a_ref + math.pi) % TAU / TAU
@@ -610,13 +636,13 @@ def sweep(b, stations, part, sides, region_of_band, ref_dir=Vector((0.0, -1.0, 0
                 u1 += 1.0
             v = last[i][2]
             b.face((last[i][0], last[j][0], tip), region,
-                   [region_uv(region, u0, v), region_uv(region, u1, v), tip_uv],
+                   [region_uv(region, u0, v), region_uv(region, u1, v), pole_uv],
                    smooth, open_shell)
     elif cap_end:
         region = region_of_band(n - 2)
         ids = [c[0] for c in cols[-1]]
-        b.face(ids, region, [region_uv(region, 0.5, 0.5)] * len(ids), smooth=False,
-               open_shell=open_shell)
+        solid = cap_uv if cap_uv is not None else region_uv(region, 0.5, 0.5)
+        b.face(ids, region, [solid] * len(ids), smooth=False, open_shell=open_shell)
     return cols
 
 
@@ -624,16 +650,16 @@ def sweep(b, stations, part, sides, region_of_band, ref_dir=Vector((0.0, -1.0, 0
 HEAD_SIDES = 16
 HEAD_BOT, HEAD_TOP = 1.080, 1.548          # chin underside .. crown
 HEAD_CZ = 1.315
-HEAD_HX = 0.211                            # planar UV half-width of the face patch
+HEAD_HX = 0.206                            # planar UV half-width of the face patch
 HEAD_HZ = HEAD_TOP - HEAD_BOT
 HEAD_RINGS = [
-    (1.092, 0.088, 0.086),
-    (1.135, 0.158, 0.156),
-    (1.195, 0.194, 0.194),
-    (1.262, 0.209, 0.211),
-    (1.330, 0.210, 0.213),
-    (1.400, 0.199, 0.204),
-    (1.468, 0.166, 0.173),
+    (1.092, 0.072, 0.076),
+    (1.135, 0.142, 0.150),
+    (1.195, 0.181, 0.192),
+    (1.262, 0.200, 0.211),
+    (1.330, 0.205, 0.215),
+    (1.400, 0.195, 0.206),
+    (1.468, 0.162, 0.175),
 ]
 
 
@@ -726,8 +752,10 @@ def build_head(b):
 HC_CX = HEAD_CZ
 HC_RX, HC_RY, HC_RZ = 0.248, 0.244, 0.290
 HC_TOP = 1.605
+HC_SIDES = 24
 HC_ROWS = (0.10, 0.40, 0.72, 1.0)
-HC_HAIRLINE_FRONT, HC_HAIRLINE_BACK = 1.452, 1.118
+HC_HAIRLINE_FRONT, HC_HAIRLINE_BACK = 1.462, 1.118
+HC_TOOTH = 0.034
 
 
 def hair_cap_radii(z):
@@ -736,13 +764,19 @@ def hair_cap_radii(z):
 
 
 def hairline_z(a):
-    # front (-Y, sin(a) = -1) is high; the nape is low
+    """High at the brow, low at the nape, with a sawtooth fringe across the
+    front so the hair shell's own lower edge reads as pointed bangs."""
     t = (1.0 - math.sin(a)) / 2.0
-    return HC_HAIRLINE_BACK + (HC_HAIRLINE_FRONT - HC_HAIRLINE_BACK) * (t ** 0.80)
+    base = HC_HAIRLINE_BACK + (HC_HAIRLINE_FRONT - HC_HAIRLINE_BACK) * (t ** 0.80)
+    front = _sstep(0.46, 0.80, t)
+    if front > 0.0:
+        i = int(round((a % TAU) / TAU * HC_SIDES)) % HC_SIDES
+        base -= (HC_TOOTH if i % 2 == 0 else 0.0) * front
+    return base
 
 
 def build_hair_cap(b):
-    sides = HEAD_SIDES
+    sides = HC_SIDES
     cols = []
     for s in HC_ROWS:
         ring = []
@@ -791,25 +825,6 @@ def build_hair_locks(b):
     tapered flattened sweeps closed with a single tip pole."""
     ref = Vector((0.0, -1.0, 0.0))
 
-    # front fringe: five overlapping pointed locks that cover the forehead down
-    # to just above the brows (and the cap's front rim edge)
-    fringe = [(-0.174, 1.392), (-0.087, 1.406), (0.0, 1.420),
-              (0.087, 1.406), (0.174, 1.392)]
-    for (x0, tip_z) in fringe:
-        z_top = 1.492
-        y_top = head_front_y(x0, z_top, 0.030)
-        mid_z = 0.5 * (z_top + tip_z)
-        mid_x = x0 * 1.02
-        y_tip = head_front_y(x0 * 1.04, tip_z, 0.016)
-        stations = [
-            (Vector((x0, y_top, z_top)), 0.040, 0.018, 1.0),
-            (Vector((mid_x, head_front_y(mid_x, mid_z, 0.024), mid_z)),
-             0.034, 0.015, 0.55),
-            (Vector((x0 * 1.04, y_tip, tip_z)), 0.0060, 0.0038, 0.06),
-        ]
-        sweep(b, stations, "head", 4, lambda k: "hair_lock", ref_dir=ref,
-              cap_start=False, tip_end=(x0 * 1.05, y_tip - 0.001, tip_z - 0.005))
-
     # side locks: thin strands framing the cheeks, hugging the head silhouette
     for sgn in (-1.0, 1.0):
         pts = [(1.446, 0.192, 0.016, 0.014), (1.368, 0.205, 0.021, 0.012),
@@ -821,7 +836,7 @@ def build_hair_locks(b):
             stations.append((Vector((xx, y, z)), ra, rb, 1.0 - k / (len(pts) - 1.0)))
         tip = (sgn * 0.190, head_front_y(sgn * 0.190, 1.170, 0.010), 1.168)
         sweep(b, stations, "head", 4, lambda k: "hair_lock", ref_dir=ref,
-              cap_start=False, tip_end=tip)
+              cap_start=False, tip_end=tip, ang_off=math.pi / 4.0)
 
     # ahoge: one playful strand off the crown, curling forward
     st = [
@@ -830,13 +845,13 @@ def build_hair_locks(b):
         (Vector((0.020, -0.058, 1.626)), 0.0028, 0.0022, 0.12),
     ]
     sweep(b, st, "head", 4, lambda k: "hair_lock", ref_dir=ref,
-          cap_start=False, tip_end=(0.024, -0.080, 1.616))
+          cap_start=False, tip_end=(0.024, -0.080, 1.616), ang_off=math.pi / 4.0)
 
 
 # ---- face ------------------------------------------------------------------
 EYE_X, EYE_Z, EYE_HW, EYE_HH = 0.090, 1.312, 0.054, 0.074
 EYE_SIDES = 16
-BROW_X, BROW_Z = 0.095, 1.402
+BROW_X, BROW_Z = 0.096, 1.398
 MOUTH_Z, MOUTH_HALF = 1.190, 0.046
 
 
@@ -876,11 +891,11 @@ def build_face(b):
         for x in xs:
             t = x / half
             zc = BROW_Z + 0.0045 * (1.0 - t * t) - 0.0015
-            hh = 0.0042 * (1.0 - 0.30 * t * t) + 0.0010
+            hh = 0.0035 * (1.0 - 0.30 * t * t) + 0.0008
             xx = cx + x
             top.append(b.vert((xx, head_front_y(xx, zc + hh, 0.006), zc + hh), "head", name))
             bot.append(b.vert((xx, head_front_y(xx, zc - hh, 0.006), zc - hh), "head", name))
-        z0, z1 = BROW_Z - 0.008, BROW_Z + 0.010
+        z0, z1 = BROW_Z - 0.007, BROW_Z + 0.009
         for i in range(len(xs) - 1):
             ids = (bot[i], bot[i + 1], top[i + 1], top[i])
             uvs = []
@@ -933,33 +948,42 @@ SKIRT_RINGS = [
     (0.700, 0.172, 0.136),
     (0.748, 0.152, 0.118),
 ]
+# The T-pose arm span is deliberately close to human proportions: the KimiOS
+# rasteriser frames the model by fitting its *rest* bounding-sphere at 2.2x with
+# a 0.62 rad vertical FOV, so a narrow chibi T-pose would make the camera crop
+# the head and feet. Arms hang down in every posed frame, so the extra span is
+# invisible in the app -- it just widens the rest bbox enough for the whole
+# character to fit the phone's render target.
 ARM_STATIONS = [
     (0.130, 0.070),
-    (0.200, 0.078),
-    (0.285, 0.060),
-    (0.315, 0.048),
-    (0.390, 0.0435),
-    (0.450, 0.0455),
-    (0.490, 0.052),
-    (0.520, 0.050),
+    (0.228, 0.078),
+    (0.297, 0.070),
+    (0.362, 0.056),
+    (0.404, 0.043),
+    (0.517, 0.0405),
+    (0.607, 0.0435),
+    (0.666, 0.052),
+    (0.711, 0.050),
 ]
-ARM_TIP = 0.552
+ARM_TIP = 0.759
 LEG_STATIONS = [
     (0.705, 0.082),
     (0.600, 0.080),
     (0.470, 0.072),
     (0.340, 0.063),
     (0.200, 0.057),
-    (0.095, 0.049),
+    (0.060, 0.048),
 ]
 LEG_X = 0.085
+# flatter and longer than a circle, so it reads as a little shoe on the ground
 SHOE_STATIONS = [
-    (0.050, 0.044, 0.046, 0.044),
-    (0.005, 0.047, 0.054, 0.047),
-    (-0.070, 0.043, 0.054, 0.043),
-    (-0.120, 0.035, 0.044, 0.035),
+    (0.052, 0.034, 0.046, 0.034),
+    (0.004, 0.037, 0.055, 0.037),
+    (-0.076, 0.034, 0.055, 0.034),
+    (-0.128, 0.028, 0.045, 0.028),
 ]
-SHOE_TIP = (-0.152, 0.030)
+SHOE_TIP = (-0.165, 0.024)
+LEG_Z0, LEG_Z1 = 0.060, 0.705
 
 
 def _lathe_band(b, cols, part, region, v_of_ring, smooth=True, open_shell=False):
@@ -1050,7 +1074,7 @@ def build_legs(b):
         part = "leg_" + side
         stations = []
         for (z, r) in LEG_STATIONS:
-            v = 1.0 - (z - 0.095) / (0.705 - 0.095)
+            v = 1.0 - (z - LEG_Z0) / (LEG_Z1 - LEG_Z0)
             stations.append((Vector((sx * LEG_X, 0.0, z)), r, r * 1.02, v))
         sweep(b, stations, part, 8, lambda k: "leg",
               ref_dir=Vector((0.0, -1.0, 0.0)), cap_start=False, cap_end=False)
@@ -1062,7 +1086,9 @@ def build_legs(b):
             st.append((Vector((sx * LEG_X, y, cz)), rx, rz, v))
         sweep(b, st, part, 8, lambda k: "shoe",
               ref_dir=Vector((0.0, 0.0, -1.0)), cap_start=True,
-              tip_end=(sx * LEG_X, SHOE_TIP[0], SHOE_TIP[1]), open_shell=False)
+              tip_end=(sx * LEG_X, SHOE_TIP[0], SHOE_TIP[1]), open_shell=False,
+              tip_uv=region_uv("shoe", 0.16, 0.0),
+              cap_uv=region_uv("shoe", 0.84, 0.5))
 
 
 def _front_quad(b, ids, region, uvs):
@@ -1091,36 +1117,40 @@ def _trim_uv(u0, u1, v_of_z, z):
 
 def build_collar(b):
     """Sailor neckerchief V on the blouse plus a coral bow -- real surface
-    decals so the crisp V shape does not depend on the torso texture density."""
-    z_top, z_tip = 1.036, 0.926
-    z_in = z_tip + 0.030
-    x_out, x_in = 0.088, 0.047
+    decals so the crisp V shape does not depend on the torso texture density.
+    The strip is split into segments because a single flat quad would cut
+    inside the convex chest."""
+    lift = 0.008
 
-    def pt(x, z, lift=0.005):
+    def pt(x, z):
         return b.vert((x, torso_front_y(x, z, lift), z), "torso")
 
-    def nuv(z):
-        return 0.12 + 0.76 * (z - z_tip) / (z_top - z_tip)
+    outer = [(-0.106, 1.004), (-0.054, 0.966), (0.0, 0.924)]
+    inner = [(-0.062, 1.030), (-0.027, 0.974), (0.0, 0.950)]
 
-    tip_out = pt(0.0, z_tip)
-    tip_in = pt(0.0, z_in)
+    def nuv(z):
+        return 0.10 + 0.80 * (z - 0.920) / 0.115
+
     for sgn in (-1.0, 1.0):
-        a = pt(sgn * x_out, z_top)
-        bb = pt(sgn * x_in, z_top)
-        ids = [a, tip_out, tip_in, bb]
-        uvs = [region_uv("trim", 0.56 + 0.02 * sgn, nuv(b.verts[i].z)) for i in ids]
-        _front_quad(b, ids, "trim", uvs)
+        cols = []
+        for k in range(3):
+            cols.append((pt(sgn * outer[k][0], outer[k][1]),
+                         pt(sgn * inner[k][0], inner[k][1])))
+        for k in range(2):
+            (a, bb), (c, d) = cols[k], cols[k + 1]
+            ids = [a, c, d, bb]
+            uvs = [region_uv("trim", 0.60, nuv(b.verts[i].z)) for i in ids]
+            _front_quad(b, ids, "trim", uvs)
 
     # bow: knot + two lifted loop tips
-    bz, bx = 0.952, 0.014
-    kx0, kx1, kz0, kz1 = -bx, bx, bz - 0.012, bz + 0.014
-    knot = [pt(-bx, kz0, 0.008), pt(bx, kz0, 0.008),
-            pt(bx, kz1, 0.008), pt(-bx, kz1, 0.008)]
-    ltip = pt(-0.062, bz - 0.010, 0.016)
-    rtip = pt(0.062, bz - 0.010, 0.016)
+    bz = 0.932
+    knot = [pt(-0.013, bz - 0.012), pt(0.013, bz - 0.012),
+            pt(0.013, bz + 0.014), pt(-0.013, bz + 0.014)]
     uvs_knot = [region_uv("trim", 0.10, 0.30), region_uv("trim", 0.10, 0.30),
                 region_uv("trim", 0.12, 0.72), region_uv("trim", 0.12, 0.72)]
     _front_quad(b, knot, "trim", uvs_knot)
+    ltip = b.vert((-0.058, torso_front_y(-0.058, bz - 0.004, 0.016), bz - 0.004), "torso")
+    rtip = b.vert((0.058, torso_front_y(0.058, bz - 0.004, 0.016), bz - 0.004), "torso")
     for (tip, ids) in ((ltip, [knot[0], knot[3], ltip]), (rtip, [knot[1], knot[2], rtip])):
         uvs = [region_uv("trim", 0.06, 0.45), region_uv("trim", 0.06, 0.55),
                region_uv("trim", 0.20, 0.50)]
@@ -1129,17 +1159,17 @@ def build_collar(b):
 
 def build_hair_clip(b):
     """A small coral ribbon clip on the crown: a signature accessory."""
-    cx, cz = -0.132, 1.496
+    cx, cz = -0.128, 1.492
 
     def pt(x, z, lift):
         return b.vert((x, hair_cap_front_y(x, z, lift), z), "head")
 
-    knot = [pt(cx - 0.010, cz - 0.010, 0.014), pt(cx + 0.010, cz - 0.010, 0.014),
-            pt(cx + 0.010, cz + 0.012, 0.014), pt(cx - 0.010, cz + 0.012, 0.014)]
+    knot = [pt(cx - 0.009, cz - 0.009, 0.010), pt(cx + 0.009, cz - 0.009, 0.010),
+            pt(cx + 0.009, cz + 0.011, 0.010), pt(cx - 0.009, cz + 0.011, 0.010)]
     uvs_knot = [region_uv("trim", 0.10, 0.30)] * 2 + [region_uv("trim", 0.12, 0.72)] * 2
     _front_quad(b, knot, "trim", uvs_knot)
     for (dx, ids) in ((-1.0, [knot[0], knot[3]]), (1.0, [knot[1], knot[2]])):
-        tip = pt(cx + dx * 0.042, cz + 0.002, 0.024)
+        tip = pt(cx + dx * 0.040, cz + 0.004, 0.015)
         uvs = [region_uv("trim", 0.06, 0.42), region_uv("trim", 0.06, 0.52),
                region_uv("trim", 0.19, 0.47)]
         _front_tri(b, ids + [tip], "trim", uvs)
@@ -1150,7 +1180,6 @@ def build_geometry():
     build_head(b)
     build_hair_cap(b)
     build_hair_locks(b)
-    build_hair_clip(b)
     feats = build_face(b)
     build_torso(b)
     build_skirt(b)
@@ -1279,6 +1308,7 @@ def add_expression_shape_keys(mob, feats):
     for side in ("brow_l", "brow_r"):
         for i in feats[side]["verts"]:
             keys["surprised"].data[i].co = base[i] + Vector((0.0, 0.0, 0.0165))
+    f = feats["mouth"]
     for i in f["verts"]:
         d = base[i] - Vector((0.0, base[i].y, f["cz"]))
         keys["surprised"].data[i].co = Vector((d.x * 0.58, base[i].y,
@@ -1687,8 +1717,9 @@ def compose_panels(out_path, size, panels, bg_top=(0.90, 0.91, 0.94),
 
 
 CONTACT_RES = (1920, 700)
-CONTACT_ORTHO = 2.05          # vertical world extent (ortho_scale on height)
-CONTACT_CAM_Z = 0.95
+CONTACT_ORTHO = 2.38          # vertical world extent (ortho_scale on height)
+CONTACT_CAM_Z = 0.86
+CONTACT_SPACING = 1.62        # must exceed the T-pose arm span
 
 
 def render_contact_sheet(arm_ob, mesh_ob, out_path, workdir):
@@ -1696,7 +1727,7 @@ def render_contact_sheet(arm_ob, mesh_ob, out_path, workdir):
     _clear_studio()
     arm_ob.location = (0.0, 0.0, 0.0)
     apply_pose(arm_ob, {})
-    spacing = 1.42
+    spacing = CONTACT_SPACING
     xs = [-1.5 * spacing, -0.5 * spacing, 0.5 * spacing, 1.5 * spacing]
     for i, (label, pose) in enumerate(POSES):
         if i == 0:
@@ -1717,8 +1748,9 @@ def render_contact_sheet(arm_ob, mesh_ob, out_path, workdir):
     raw = os.path.join(workdir, "contact_raw.png")
     _render_to(scene, cam, raw, CONTACT_RES[0], CONTACT_RES[1], 48, True)
     scale = CONTACT_RES[1] / CONTACT_ORTHO
-    cy = CONTACT_RES[1] * 0.5 + (CONTACT_CAM_Z - 0.03) * scale
-    shadows = [(CONTACT_RES[0] * 0.5 + x * scale, cy, 0.32 * scale, 0.085 * scale, 0.45)
+    # y=0 in the composite buffer is the bottom row: z=0 (the feet) lands low
+    cy = (CONTACT_ORTHO * 0.5 - CONTACT_CAM_Z + 0.02) * scale
+    shadows = [(CONTACT_RES[0] * 0.5 + x * scale, cy, 0.30 * scale, 0.075 * scale, 0.38)
                for x in xs]
     compose_panels(out_path, CONTACT_RES, [(raw, 0, 0)], shadows=shadows)
     arm_ob.location = (0.0, 0.0, 0.0)
@@ -1760,7 +1792,7 @@ def render_beauty(arm_ob, mesh_ob, out_path, workdir):
 
 def render_expression_proof(arm_ob, mesh_ob, out_path, res=(1600, 500)):
     scene = bpy.context.scene
-    spacing = 0.425
+    spacing = 0.66
     xs = [(-1.5 + i) * spacing for i in range(4)]
     panels = [("NEUTRAL", None)] + [(name.upper(), name) for name in EXPRESSIONS]
     created = []
@@ -1785,16 +1817,16 @@ def render_expression_proof(arm_ob, mesh_ob, out_path, res=(1600, 500)):
                 mod.object = a
         if key:
             m.data.shape_keys.key_blocks[key].value = 1.0
-        created.append(_add_label(label, xs[i], 1.74,
+        created.append(_add_label(label, xs[i], 1.70,
                                   _flat_mat("ExprLabelMat_%d" % i, (0.07, 0.08, 0.11)),
                                   size=0.070))
     mesh_ob.hide_render = True
     bpy.context.view_layer.update()
     _studio_lights(scene, 3.6, 1.2, 2.2)
     _studio_world(scene)
-    cam = _camera(scene, "ExprCam", (0.0, -8.0, 1.52), (0.0, 0.0, 1.52), lens=50.0)
+    cam = _camera(scene, "ExprCam", (0.0, -8.0, 1.30), (0.0, 0.0, 1.30), lens=50.0)
     cam.data.type = 'ORTHO'
-    cam.data.ortho_scale = 1.94
+    cam.data.ortho_scale = 0.92
     cam.rotation_euler = (math.radians(90), 0.0, 0.0)
     _render_to(scene, cam, out_path, res[0], res[1], 48, False)
     for ob in created:
@@ -1835,36 +1867,32 @@ def _runtime_material(atlas_png):
     geo = nt.nodes.new("ShaderNodeNewGeometry")
     geo.location = (-600, -100)
 
-    def dotnode(a_sock, target, x, y):
+    def dotnode(a, target, x, y):
         n = nt.nodes.new("ShaderNodeVectorMath")
         n.operation = 'DOT_PRODUCT'
         n.location = (x, y)
-        nt.links.new(a_sock, n.inputs[0])
-        n.inputs[1].default_value = target
+        nt.links.new(a, n.inputs[0])
+        if isinstance(target, (tuple, list)):
+            n.inputs[1].default_value = target
+        else:
+            nt.links.new(target, n.inputs[1])
         return n.outputs["Value"]
 
-    ndl = dotnode(geo.outputs["Normal"], RUNTIME_LIGHT, -380, -60)
-    ndv = dotnode(geo.outputs["Normal"], geo.outputs["Incoming"], -380, -200)
-
-    def mathnode(op, x, y, a=None, b=None):
+    def mathnode(op, x, y, a, b):
         n = nt.nodes.new("ShaderNodeMath")
         n.operation = op
         n.location = (x, y)
-        if a is not None:
-            if hasattr(a, "default_value") or hasattr(a, "links"):
-                if isinstance(a, (int, float)):
-                    n.inputs[0].default_value = a
-                else:
-                    nt.links.new(a, n.inputs[0])
-        if b is not None:
-            if isinstance(b, (int, float)):
-                n.inputs[1].default_value = b
+        for idx, v in ((0, a), (1, b)):
+            if isinstance(v, (int, float)):
+                n.inputs[idx].default_value = v
             else:
-                nt.links.new(b, n.inputs[1])
+                nt.links.new(v, n.inputs[idx])
         return n.outputs[0]
 
+    ndl = dotnode(geo.outputs["Normal"], tuple(RUNTIME_LIGHT), -380, -60)
+    ndv = dotnode(geo.outputs["Normal"], geo.outputs["Incoming"], -380, -200)
     ndl_pos = mathnode('MAXIMUM', -200, -60, ndl, 0.0)
-    abs_ndv = mathnode('ABSOLUTE', -200, -200, ndv)
+    abs_ndv = mathnode('ABSOLUTE', -200, -200, ndv, 0.0)
     rim = mathnode('SUBTRACT', -20, -200, 1.0, abs_ndv)
     rim2 = mathnode('POWER', 140, -200, rim, 2.0)
     t1 = mathnode('MULTIPLY', 300, -60, ndl_pos, 0.55)
@@ -1885,16 +1913,15 @@ def _runtime_material(atlas_png):
     return mat
 
 
-def _app_framing():
-    """Mirror pet3d::render_frame: fit the bbox sphere, 0.62 rad vertical FOV."""
-    # bbox is known from the generated geometry: x +-0.56, y 0..1.60, z +-0.20
-    mn = Vector((-0.56, 0.0, -0.21))
-    mx = Vector((0.56, 1.60, 0.22))
+def _app_framing(mesh_ob):
+    """Mirror pet3d::render_frame: fit the rest bbox's bounding sphere, 0.62 rad
+    vertical FOV at 2.2x the half-diagonal. Returns (centre, distance, fov)."""
+    co = [v.co for v in mesh_ob.data.vertices]
+    mn = Vector((min(c.x for c in co), min(c.z for c in co), -max(c.y for c in co)))
+    mx = Vector((max(c.x for c in co), max(c.z for c in co), -min(c.y for c in co)))
     centre = (mn + mx) * 0.5
     extent = max(0.5, (mx - mn).length * 0.5)
-    dist = extent * 2.2
-    fov = 0.62
-    return centre, dist, fov
+    return centre, extent * 2.2, 0.62, (mx - mn)
 
 
 def _downscale_box(px, w, h, nw, nh):
@@ -1935,13 +1962,13 @@ def render_app_preview(mesh_ob, atlas_png, out_path, workdir, rt=(384, 512)):
         apply_pose(mesh_ob.parent, {})
     bpy.context.view_layer.update()
 
-    centre, dist, fov = _app_framing()
+    centre, dist, fov, size = _app_framing(mesh_ob)
     # glTF Y-up -> Blender Z-up: blender = (x, -z, y)
     cam_loc = Vector((0.0, -dist, centre.y + 0.02 * dist))
     cam = _camera(scene, "AppCam", cam_loc, (0.0, 0.0, centre.y), lens=50.0)
     cam.data.type = 'PERSP'
     cam.data.sensor_fit = 'VERTICAL'
-    cam.data.angle_y = fov
+    cam.data.angle = fov          # vertical FOV (sensor_fit = VERTICAL)
     try:
         scene.view_settings.view_transform = 'Raw'
     except Exception:
@@ -1949,6 +1976,8 @@ def render_app_preview(mesh_ob, atlas_png, out_path, workdir, rt=(384, 512)):
     rt_path = os.path.join(workdir, "app_rt.png")
     _render_to(scene, cam, rt_path, rt[0], rt[1], 32, True)
     scene.view_settings.view_transform = 'Standard'
+    print("TESTCHAR|app framing: bbox %.3f x %.3f x %.3f, extent=%.3f, cam dist=%.3f"
+          % (size.x, size.y, size.z, (size.length * 0.5), dist))
 
     # Raw view transform + Non-Color image => pixel values are texel*shade, i.e.
     # exactly the bytes the software rasteriser would write.
@@ -1959,10 +1988,41 @@ def render_app_preview(mesh_ob, atlas_png, out_path, workdir, rt=(384, 512)):
     raw.pixels.foreach_get(rpx)
     bpy.data.images.remove(raw)
 
+    # ---- cel outline: the runtime draws an inverted hull in 0xb8c2d8 before the
+    # model, so emulate it by dilating the silhouette mask by ~2 px.
+    oc = (0xb8 / 255.0, 0xc2 / 255.0, 0xd8 / 255.0)
+    outl = [0.0] * (w * h * 4)
+    for y in range(h):
+        for x in range(w):
+            i = (y * w + x) * 4
+            a = rpx[i + 3]
+            if a > 0.02:
+                outl[i] = rpx[i]
+                outl[i + 1] = rpx[i + 1]
+                outl[i + 2] = rpx[i + 2]
+                outl[i + 3] = a
+                continue
+            hit = False
+            for dy in (-2, -1, 1, 2):
+                yy = y + dy
+                if yy < 0 or yy >= h:
+                    continue
+                for dx in (-2, -1, 1, 2):
+                    xx = x + dx
+                    if xx < 0 or xx >= w:
+                        continue
+                    if rpx[(yy * w + xx) * 4 + 3] > 0.02:
+                        hit = True
+                        break
+                if hit:
+                    break
+            if hit:
+                outl[i], outl[i + 1], outl[i + 2], outl[i + 3] = oc[0], oc[1], oc[2], 1.0
+
     def build(scale_h, bg):
         nw = max(40, int(round(w * scale_h / float(h))))
         nh = scale_h
-        small = _downscale_box(rpx, w, h, nw, nh)
+        small = _downscale_box(outl, w, h, nw, nh)
         out = [0.0] * (nw * nh * 4)
         for i in range(nw * nh):
             a = small[i * 4 + 3]

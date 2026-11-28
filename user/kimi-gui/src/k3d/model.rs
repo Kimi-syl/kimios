@@ -7,19 +7,19 @@ use super::Vec3;
 
 /// Vertices retained at once. A 300 px character needs far fewer than this; the
 /// ceiling is what keeps a hostile file from running the loader out of arena.
-pub const MAX_VERTS: usize = 8192;
+pub const MAX_VERTS: usize = 49152;
 /// Indices retained at once (triangles = indices / 3).
-pub const MAX_TRIS: usize = 16384;
+pub const MAX_TRIS: usize = 196608;
 /// Joints across all skins.
-pub const MAX_JOINTS: usize = 128;
+pub const MAX_JOINTS: usize = 256;
 /// Primitives (draw calls).
-pub const MAX_PRIMS: usize = 16;
+pub const MAX_PRIMS: usize = 48;
 /// Material slots.
-pub const MAX_MATERIALS: usize = 16;
+pub const MAX_MATERIALS: usize = 32;
 /// Node records (scene graph).
-pub const MAX_NODES: usize = 256;
+pub const MAX_NODES: usize = 512;
 /// Texture slots.
-pub const MAX_TEXTURES: usize = 4;
+pub const MAX_TEXTURES: usize = 12;
 /// Longest edge of a decoded texture. Textures are box-downsampled on load.
 pub const TEX_MAX_DIM: usize = 128;
 
@@ -158,6 +158,7 @@ pub struct Skin {
 }
 
 /// A decoded texture: RGBA8, `w * h` pixels.
+#[derive(Clone, Copy)]
 pub struct Texture {
     pub w: u16,
     pub h: u16,
@@ -277,12 +278,7 @@ impl ModelArena {
             joint_nodes: [0; MAX_JOINTS],
             joint_ibm: [[0.0; 16]; MAX_JOINTS],
             joint_count: 0,
-            textures: [
-                Texture::empty(),
-                Texture::empty(),
-                Texture::empty(),
-                Texture::empty(),
-            ],
+            textures: [Texture::empty(); MAX_TEXTURES],
             morph_targets: [MorphTarget { first: 0, count: 0 }; MAX_MORPH_TARGETS],
             morph_target_count: 0,
             morph_entries: [MorphEntry { vertex: 0, delta: [0.0; 3] }; MAX_MORPH_ENTRIES],

@@ -397,8 +397,17 @@ fn render_frame(arena: &ModelArena, yaw: f32, pitch: f32, bounce: f32) -> DrawSt
 #[cfg(not(target_os = "none"))]
 pub fn test_render(bytes: &[u8]) -> u64 {
     let arena = model();
-    if arena.load_from_slice(bytes).is_err() {
-        return 0;
+    if let Err(e) = arena.load_from_slice(bytes) {
+        // 0x100 | code, so the harness can report the exact failure.
+        let code = match e {
+            LoadError::BadContainer => 1u64,
+            LoadError::BadJson => 2,
+            LoadError::BadAccessor => 3,
+            LoadError::ArenaFull => 4,
+            LoadError::Unsupported => 5,
+            LoadError::Io => 6,
+        };
+        return 0x100 | code;
     }
     let mut bits = 1u64;
     if arena.vertex_count > 0 {
@@ -576,12 +585,11 @@ pub fn reload() -> bool {
     model().loaded
 }
 
-/// Copy the first `.glb`/`.vrm` found in `dir` to `/disk/pet/model.glb`.
+/// Stream a picked `.glb`/`.vrm` into `/disk/pet/model.glb`, then reload.
 ///
-/// This is what the "Pick 3D model" button uses: the Android picker drops the
-/// file into `dir`, then this promotes it to the path the renderer loads.
+/// Copies in 64 KiB chunks using positional reads and writes, so the file size is
+/// limited by disk rather than by a RAM buffer — real VRM models are 5-15 MB.
 pub fn install_model_from(dir: &str) -> bool {
-    static mut SRC: [u8; 1024 * 1024] = [0; 1024 * 1024];
     let mut listing = [0u8; 1024];
     let Some(n) = k::listdir(dir, &mut listing) else {
         return false;
@@ -631,27 +639,36 @@ pub fn install_model_from(dir: &str) -> bool {
     let Some(handle) = k::open(src_path) else {
         return false;
     };
-    let buf = unsafe { &mut *core::ptr::addr_of_mut!(SRC) };
-    let mut total = 0usize;
-    while total < buf.len() {
-        let got = k::read_file(handle, total, &mut buf[total..]);
+    k::mkdir("/disk/pet");
+    let Some(out) = k::create("/disk/pet/model.glb") else {
+        k::close(handle);
+        return false;
+    };
+
+    // Stream in 64 KiB chunks: no size cap beyond disk.
+    let mut chunk = [0u8; 65536];
+    let mut offset = 0usize;
+    let mut ok = true;
+    loop {
+        let got = k::read_file(handle, offset, &mut chunk);
         if got == 0 {
             break;
         }
-        total += got;
+        let written = k::write_file(out, offset, &chunk[..got]);
+        if written != got {
+            ok = false;
+            break;
+        }
+        offset += got;
+        // Sanity bound: refuse absurd files rather than filling the disk.
+        if offset > 64 * 1024 * 1024 {
+            ok = false;
+            break;
+        }
     }
     k::close(handle);
-    if total == 0 {
-        return false;
-    }
-
-    k::mkdir("/disk/pet");
-    let Some(out) = k::create("/disk/pet/model.glb") else {
-        return false;
-    };
-    let written = k::write_file(out, 0, &buf[..total]);
     k::close(out);
-    if written != total {
+    if !ok || offset == 0 {
         return false;
     }
     reload()
