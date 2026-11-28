@@ -33,6 +33,7 @@ static mut POSE: Pose = Pose {
     rotation: [Quat::IDENTITY; BONE_COUNT],
     root_y: 0.0,
     lean: 0.0,
+    arm_lift: 0.0,
 };
 /// Per-vertex morph deltas for the current frame.
 const MAX_VERTS_USIZE: usize = crate::k3d::MAX_VERTS;
@@ -101,6 +102,7 @@ fn update_morphs() -> Option<&'static [Vec3]> {
 static mut LOAD_ATTEMPTED: bool = false;
 /// Timestamp of the last tap, used for the hop animation.
 static mut BOUNCE_START: u64 = 0;
+static mut ARM_LIFT: f32 = 0.0;
 
 /// Trigger a short hop so tapping the 3D pet visibly responds.
 pub fn bounce() {
@@ -137,6 +139,11 @@ fn ensure_model() {
     }
     if load_from_disk("/disk/pet/model.glb").is_err() {
         build_cube(1.0, Vec3::new(0.0, 1.0, 0.0));
+    }
+    // Measure this rig's arm orientation once, so the pose correction works for
+    // any exporter's bone axes instead of assuming one.
+    unsafe {
+        ARM_LIFT = skin::calibrate_arm_lift(model());
     }
 }
 
@@ -588,7 +595,7 @@ pub fn reload() -> bool {
 /// Stream a picked `.glb`/`.vrm` into `/disk/pet/model.glb`, then reload.
 ///
 /// Copies in 64 KiB chunks using positional reads and writes, so the file size is
-/// limited by disk rather than by a RAM buffer — real VRM models are 5-15 MB.
+/// limited by disk rather than by a RAM buffer ??real VRM models are 5-15 MB.
 pub fn install_model_from(dir: &str) -> bool {
     let mut listing = [0u8; 1024];
     let Some(n) = k::listdir(dir, &mut listing) else {
@@ -719,7 +726,7 @@ pub fn update_pose(state: usize, t_seconds: f32) {
     };
     unsafe {
         let pose = &mut *core::ptr::addr_of_mut!(POSE);
-        skin::procedural_pose(state, t_seconds, pose);
+        skin::procedural_pose(state, t_seconds, ARM_LIFT, pose);
         let sprung = skin::apply_springs(pose, dt);
         *pose = sprung;
     }

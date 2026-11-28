@@ -11,11 +11,12 @@
 //! map; glTF does not require those to be declared before `meshes`, so the
 //! geometry pass runs afterwards with every index table already validated.
 //!
-//! Memory: everything lives in fixed arrays. The one ambient cache is the PNG
-//! scratch (two `static` buffers, ~1.2 MiB, `SharedBuf`) because the inflate
-//! routine in `libkimi` takes a whole output buffer; it is guarded by
-//! `PNG_MAX_DIM` and reused, never reallocated. The loader is therefore not
-//! re-entrant, which is fine for the single-threaded GUI.
+//! Memory: everything lives in fixed arrays. The index table set (`State`,
+//! ~60 KiB) and the PNG scratch (an IDAT read window, a 32 KiB LZ77 window and
+//! two scanline buffers, ~72 KiB) are `static`s, not stack locals: the user
+//! stack is only 64 KiB, so `State` on the stack would overflow it. The loader
+//! is therefore not re-entrant, which is fine for the single-threaded GUI, and
+//! each `load` clears the tables before use.
 //!
 //! Supported beyond the base format:
 //! - sparse accessors (`sparse.indices` + `sparse.values`), including the common
@@ -32,8 +33,12 @@
 //!
 //! Limits / deliberately unsupported (each fails soft or with a `LoadError`):
 //! - interlaced PNG, colour types other than RGB(2)/RGBA(6), 16-bit channels,
-//!   source images larger than `PNG_MAX_DIM` (texture is skipped, the material
-//!   keeps its base colour);
+//!   source images wider than `PNG_MAX_W`, taller than `PNG_MAX_H` or above
+//!   `PNG_MAX_PIXELS` (the texture is skipped and the material keeps its base
+//!   colour). Within those bounds - which include every real VRM texture,
+//!   1024/2048/4096 px wide - the PNG is inflated scanline by scanline and
+//!   box-downsampled to `TEX_MAX_DIM` *during* the decode, so loader memory is
+//!   constant instead of scaling with the source image;
 //! - JPEG / external-URI images (texture skipped);
 //! - animations, MToon shading (materials get a flat "unlit" flag instead),
 //!   non-triangle primitive modes (skipped);
@@ -59,26 +64,30 @@ use super::skin::{
     BONE_RIGHT_SHOULDER, BONE_RIGHT_UPPER_ARM, BONE_RIGHT_UPPER_LEG, BONE_SPINE,
 };
 use super::{sqrt, Vec3};
-use libkimi::apk::inflate;
 
 // ---------------------------------------------------------------------------
 // Loader-internal fixed capacities
 // ---------------------------------------------------------------------------
 
-/// bufferViews kept. Accessors may refer to views beyond this; such accessors
-/// are then reported as `Unsupported` instead of failing the whole load.
-const MAX_VIEWS: usize = 256;
+/// bufferViews kept. Real production VRMs routinely carry hundreds (a 10 MB
+/// sample in `tools/blender/_work` has 898), so the table is sized for the
+/// largest plausible asset. Accessors may refer to views beyond this; such
+/// accessors are then reported as `Unsupported` instead of failing the load.
+const MAX_VIEWS: usize = 1024;
 /// accessors kept. Morph-target accessors typically sit after the geometry
 /// ones; an accessor beyond the cap is reported as `Unsupported`, which for a
 /// morph target means that target is recorded with zero deltas rather than
-/// failing the model.
-const MAX_ACC: usize = 384;
-/// sparse accessor descriptors kept. Sparse accessors are rare (morph targets
-/// use them one per target); past the cap the accessor is treated as
-/// unsupported, which again only costs a morph target.
-const MAX_SPARSE: usize = 32;
-/// images kept (each is one PNG blob).
-const MAX_IMAGES: usize = 8;
+/// failing the model. The same 10 MB sample has 717 accessors.
+const MAX_ACC: usize = 1024;
+/// sparse accessor descriptors kept. VRM 1.0 expression samples can carry one
+/// sparse accessor per morph target (the sample above has 162), so keep room
+/// for a full facial set; past the cap the accessor is treated as unsupported,
+/// which again only costs a morph target.
+const MAX_SPARSE: usize = 256;
+/// images kept (each is one PNG blob). Texture slots are the real limit
+/// (`MAX_TEXTURES`); this only has to be big enough that every image a kept
+/// texture can point at survives, including files that order images oddly.
+const MAX_IMAGES: usize = 32;
 /// Flat node->children storage (each parent's list is contiguous).
 const MAX_CHILD: usize = 512;
 /// Humanoid bone assignments collected before nodes are indexed.
@@ -89,14 +98,24 @@ const KEY_MAX: usize = 40;
 const MAX_DEPTH: u32 = 32;
 /// Bytes of JSON kept in the sliding window.
 const JSON_WIN: usize = 1024;
-/// Source PNG edge limit (the decoded texture is box-downsampled to <=128).
-/// 384 matches the sprite-atlas ceiling `pet.rs` already spends memory on; a
-/// larger source would need a much bigger inflate buffer and is skipped.
-const PNG_MAX_DIM: usize = 384;
-/// Compressed IDAT bytes buffered per image.
-const PNG_IDAT_CAP: usize = 640_000;
-/// Inflated PNG bytes buffered per image (384 * (1 + 384*4) = 590_208).
-const PNG_RAW_CAP: usize = PNG_MAX_DIM * (1 + PNG_MAX_DIM * 4);
+/// Largest source PNG width accepted. The unfiltered scanline has to be kept
+/// (the Up/Average/Paeth filters reference it), so this bounds two static row
+/// buffers; 4096 covers every real VRM texture (1024-2048 is the common size).
+const PNG_MAX_W: usize = 4096;
+/// Largest source PNG height accepted. Height costs no memory (rows are
+/// streamed straight into the accumulator) but bounds the work one file can
+/// make the GUI do.
+const PNG_MAX_H: usize = 65535;
+/// Largest source pixel count accepted, for the same reason as `PNG_MAX_H`:
+/// bounds decode time, not memory. 4096x4096 is ~16.8 M pixels.
+const PNG_MAX_PIXELS: usize = 32 * 1024 * 1024;
+/// Compressed IDAT bytes buffered at once while inflating. The compressed
+/// stream is pulled from the file on demand, so this is the only copy of it.
+const PNG_IN_CAP: usize = 8192;
+/// DEFLATE LZ77 history window (the RFC 1951 maximum distance).
+const PNG_WIN: usize = 32768;
+/// One unfiltered scanline at the widest accepted source (RGBA8).
+const PNG_ROW_CAP: usize = PNG_MAX_W * 4;
 
 /// One `static` buffer that is only touched from the single GUI thread.
 struct SharedBuf<const N: usize>(UnsafeCell<[u8; N]>);
@@ -111,8 +130,15 @@ impl<const N: usize> SharedBuf<N> {
     }
 }
 
-static PNG_IDAT: SharedBuf<PNG_IDAT_CAP> = SharedBuf(UnsafeCell::new([0; PNG_IDAT_CAP]));
-static PNG_RAW: SharedBuf<PNG_RAW_CAP> = SharedBuf(UnsafeCell::new([0; PNG_RAW_CAP]));
+/// Compressed IDAT input window (walked chunk by chunk from the file).
+static PNG_IN: SharedBuf<PNG_IN_CAP> = SharedBuf(UnsafeCell::new([0; PNG_IN_CAP]));
+/// DEFLATE 32 KiB history, kept as a ring so back-references work while the
+/// decompressed image is streamed past the accumulator.
+static PNG_WIN_BUF: SharedBuf<PNG_WIN> = SharedBuf(UnsafeCell::new([0; PNG_WIN]));
+/// Current unfiltered scanline.
+static PNG_ROW: SharedBuf<PNG_ROW_CAP> = SharedBuf(UnsafeCell::new([0; PNG_ROW_CAP]));
+/// Previous unfiltered scanline (filter types 2/3/4 reference it).
+static PNG_PREV: SharedBuf<PNG_ROW_CAP> = SharedBuf(UnsafeCell::new([0; PNG_ROW_CAP]));
 
 // ---------------------------------------------------------------------------
 // Morph-target bookkeeping (names and VRM expression bindings)
@@ -949,31 +975,42 @@ const EMPTY_BONE: BonePair = BonePair {
     fallback: false,
 };
 
-impl State {
-    fn new() -> State {
-        State {
-            views: [EMPTY_VIEW; MAX_VIEWS],
-            nviews: 0,
-            views_total: 0,
-            accs: [EMPTY_ACC; MAX_ACC],
-            naccs: 0,
-            accs_total: 0,
-            sparses: [EMPTY_SPARSE; MAX_SPARSE],
-            nsparse: 0,
-            images: [EMPTY_IMG; MAX_IMAGES],
-            nimages: 0,
-            tex_src: [-1; MAX_TEXTURES],
-            ntex: 0,
-            child_off: [0; MAX_NODES],
-            child_num: [0; MAX_NODES],
-            children: [0; MAX_CHILD],
-            nchildren: 0,
-            bone_pairs: [EMPTY_BONE; MAX_BONE_PAIRS],
-            nbone: 0,
-            skin_ibm: -1,
-            morph: MorphBook::empty(),
-        }
-    }
+/// A freshly reset [`State`]; every load starts from this.
+const EMPTY_STATE: State = State {
+    views: [EMPTY_VIEW; MAX_VIEWS],
+    nviews: 0,
+    views_total: 0,
+    accs: [EMPTY_ACC; MAX_ACC],
+    naccs: 0,
+    accs_total: 0,
+    sparses: [EMPTY_SPARSE; MAX_SPARSE],
+    nsparse: 0,
+    images: [EMPTY_IMG; MAX_IMAGES],
+    nimages: 0,
+    tex_src: [-1; MAX_TEXTURES],
+    ntex: 0,
+    child_off: [0; MAX_NODES],
+    child_num: [0; MAX_NODES],
+    children: [0; MAX_CHILD],
+    nchildren: 0,
+    bone_pairs: [EMPTY_BONE; MAX_BONE_PAIRS],
+    nbone: 0,
+    skin_ibm: -1,
+    morph: MorphBook::empty(),
+};
+
+/// The one `State` record, kept in `.bss` instead of on the stack: at
+/// real-world table sizes it is ~60 KiB and the user stack is only 64 KiB.
+struct StateStore(UnsafeCell<State>);
+
+// SAFETY: the loader runs on the single GUI thread and never re-enters, the
+// same contract as the `SharedBuf` scratch above.
+unsafe impl Sync for StateStore {}
+
+static STATE: StateStore = StateStore(UnsafeCell::new(EMPTY_STATE));
+
+fn state_store() -> &'static mut State {
+    unsafe { &mut *STATE.0.get() }
 }
 
 // ---------------------------------------------------------------------------
@@ -994,7 +1031,10 @@ pub fn load(read: &mut dyn ReadAt, size: u64, arena: &mut ModelArena) -> Result<
         return Err(LoadError::BadContainer);
     }
 
-    let mut st = State::new();
+    // The index tables live in `.bss` (see `StateStore`), so every load must
+    // start from a clean slate rather than the previous model's tables.
+    let st = state_store();
+    *st = EMPTY_STATE;
     // The morph metadata table outlives `load` (the Lead queries it), so start
     // every load from an empty one rather than leaving a previous model's names.
     *morph_book() = MorphBook::empty();
@@ -1003,14 +1043,14 @@ pub fn load(read: &mut dyn ReadAt, size: u64, arena: &mut ModelArena) -> Result<
     // exist yet because node indices are just integers).
     {
         let mut s = Src::new(&mut *read, glb.json_off, glb.json_len);
-        parse_pass1(&mut s, &mut st, arena)?;
+        parse_pass1(&mut s, st, arena)?;
     }
 
-    resolve_parents(&st, arena)?;
-    apply_bones(&st, arena);
-    validate_joints(&st, arena)?;
-    read_ibm(read, &st, arena, &glb)?;
-    decode_textures(read, &st, arena, &glb);
+    resolve_parents(&*st, arena)?;
+    apply_bones(&*st, arena);
+    validate_joints(&*st, arena)?;
+    read_ibm(read, &*st, arena, &glb)?;
+    decode_textures(read, &*st, arena, &glb);
 
     // The rasteriser needs at least one material slot to draw anything.
     if arena.material_count == 0 {
@@ -1022,7 +1062,7 @@ pub fn load(read: &mut dyn ReadAt, size: u64, arena: &mut ModelArena) -> Result<
     // Pass 2: geometry. Accessor nodes point into the validated tables.
     {
         let mut s = Src::new(&mut *read, glb.json_off, glb.json_len);
-        parse_pass2(&mut s, &mut st, arena, &glb)?;
+        parse_pass2(&mut s, st, arena, &glb)?;
     }
 
     // Morph targets parsed in pass 2 are now addressable; resolve the VRM
@@ -3167,7 +3207,15 @@ fn fabs_i32(x: i32) -> i32 {
 }
 
 /// Read a PNG blob through `read` (never materialised) and box-downsample it
-/// into `out`. Returns false for anything outside the supported subset.
+/// into `out`, which is at most `TEX_MAX_DIM` square.
+///
+/// Returns false for anything outside the supported subset; the caller then
+/// keeps the material's base colour. The zlib stream is inflated one scanline
+/// at a time: compressed bytes are pulled from the IDAT chunks on demand, a
+/// 32 KiB LZ77 ring supplies back-references, each scanline is unfiltered into
+/// a static row buffer, and every pixel is accumulated straight into the
+/// 128x128 destination. Memory is constant (the four `PNG_*` statics plus one
+/// row accumulator) whether the source is 256 px or 4096 px wide.
 fn decode_png(read: &mut dyn ReadAt, base: u64, len: u64, out: &mut Texture) -> bool {
     const SIG: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
     let end = base.saturating_add(len);
@@ -3179,23 +3227,22 @@ fn decode_png(read: &mut dyn ReadAt, base: u64, len: u64, out: &mut Texture) -> 
         return false;
     }
 
-    // --- chunk walk: keep the IHDR fields and concatenate the IDAT payloads ---
-    let idat = PNG_IDAT.get();
-    let mut idat_len = 0usize;
+    // --- chunk walk: keep the IHDR fields and remember where IDAT starts ---
     let mut w = 0usize;
     let mut h = 0usize;
     let mut depth = 0u8;
     let mut colour = 0u8;
     let mut interlace = 0u8;
+    let mut idat_hdr = 0u64;
     let mut off = base.saturating_add(8);
     let mut hdr = [0u8; 8];
-    while off.saturating_add(8) <= end {
+    while off.saturating_add(12) <= end {
         if read.read_at(off, &mut hdr) != 8 {
             return false;
         }
         let clen = u32::from_be_bytes([hdr[0], hdr[1], hdr[2], hdr[3]]) as u64;
         let data = off.saturating_add(8);
-        if data.saturating_add(clen) > end {
+        if data.saturating_add(clen).saturating_add(4) > end {
             return false;
         }
         let kind = [hdr[4], hdr[5], hdr[6], hdr[7]];
@@ -3213,24 +3260,16 @@ fn decode_png(read: &mut dyn ReadAt, base: u64, len: u64, out: &mut Texture) -> 
             colour = b[9];
             interlace = b[12];
         } else if kind == *b"IDAT" {
-            let n = clen as usize;
-            if n == 0 || idat_len.saturating_add(n) > idat.len() {
-                return false;
+            if idat_hdr == 0 {
+                idat_hdr = off;
             }
-            if read.read_at(data, &mut idat[idat_len..idat_len + n]) != n {
-                return false;
-            }
-            idat_len += n;
         } else if kind == *b"IEND" {
             break;
         }
         off = data.saturating_add(clen).saturating_add(4);
     }
 
-    if w == 0 || h == 0 || w > PNG_MAX_DIM || h > PNG_MAX_DIM {
-        return false;
-    }
-    if depth != 8 || interlace != 0 {
+    if w == 0 || h == 0 || depth != 8 || interlace != 0 {
         return false;
     }
     let bpp = match colour {
@@ -3238,84 +3277,63 @@ fn decode_png(read: &mut dyn ReadAt, base: u64, len: u64, out: &mut Texture) -> 
         6 => 4usize, // RGBA
         _ => return false,
     };
-    let stride = w.saturating_mul(bpp);
-    let raw_need = h.saturating_mul(1 + stride);
-    if idat_len < 2 || raw_need == 0 || raw_need > PNG_RAW_CAP {
+    if idat_hdr == 0 || w > PNG_MAX_W || h > PNG_MAX_H {
         return false;
     }
-
-    // --- inflate the zlib stream (skip the 2-byte zlib header) ---
-    let raw = PNG_RAW.get();
-    let inflated = inflate(&idat[2..idat_len], &mut raw[..raw_need]);
-    if inflated != raw_need {
+    if w.saturating_mul(h) > PNG_MAX_PIXELS {
         return false;
     }
-
-    // --- unfilter in place, then box-downsample into RGBA8 ---
+    let stride = w * bpp;
     let dw = if w < TEX_MAX_DIM { w } else { TEX_MAX_DIM };
     let dh = if h < TEX_MAX_DIM { h } else { TEX_MAX_DIM };
-    if dw == 0 || dh == 0 {
+    if dw == 0 || dh == 0 || stride == 0 || stride > PNG_ROW_CAP {
         return false;
     }
-    let mut acc = [[0u32; 4]; TEX_MAX_DIM];
-    let mut cnt = [0u32; TEX_MAX_DIM];
-    let mut cur_dy = usize::MAX;
-    for y in 0..h {
-        let row = y * (1 + stride);
-        let prev = if y > 0 { (y - 1) * (1 + stride) } else { row };
-        let ft = raw[row];
-        if ft > 4 {
-            return false;
-        }
-        let mut x = 0usize;
-        while x < stride {
-            let a = if x >= bpp { raw[row + 1 + x - bpp] } else { 0 };
-            let b = if y > 0 { raw[prev + 1 + x] } else { 0 };
-            let c = if y > 0 && x >= bpp {
-                raw[prev + 1 + x - bpp]
-            } else {
-                0
-            };
-            let v = raw[row + 1 + x];
-            let o = match ft {
-                0 => v,
-                1 => v.wrapping_add(a),
-                2 => v.wrapping_add(b),
-                3 => v.wrapping_add(((a as u16 + b as u16) / 2) as u8),
-                _ => v.wrapping_add(paeth(a, b, c)),
-            };
-            raw[row + 1 + x] = o;
-            x += 1;
-        }
 
-        let dy = y * dh / h;
-        if dy != cur_dy {
-            if cur_dy < dh {
-                flush_row(out, dw, cur_dy, &acc, &cnt);
-            }
-            cur_dy = dy;
-            for slot in acc.iter_mut() {
-                *slot = [0; 4];
-            }
-            for slot in cnt.iter_mut() {
-                *slot = 0;
-            }
-        }
-        let mut x = 0usize;
-        while x < w {
-            let dx = x * dw / w;
-            let s = row + 1 + x * bpp;
-            let p = &mut acc[dx];
-            p[0] = p[0].saturating_add(raw[s] as u32);
-            p[1] = p[1].saturating_add(raw[s + 1] as u32);
-            p[2] = p[2].saturating_add(raw[s + 2] as u32);
-            p[3] = p[3].saturating_add(if bpp == 4 { raw[s + 3] as u32 } else { 255 });
-            cnt[dx] = cnt[dx].saturating_add(1);
-            x += 1;
-        }
+    let mut dec = PngDec {
+        read,
+        next_hdr: idat_hdr,
+        end,
+        payload_off: 0,
+        chunk_left: 0,
+        inbuf: PNG_IN.get(),
+        in_pos: 0,
+        in_len: 0,
+        inp_eof: false,
+        bitbuf: 0,
+        bitcnt: 0,
+        win: PNG_WIN_BUF.get(),
+        win_pos: 0,
+        win_written: 0,
+        row: PNG_ROW.get(),
+        prev: PNG_PREV.get(),
+        w,
+        h,
+        dw,
+        dh,
+        stride,
+        bpp,
+        y: 0,
+        xi: 0,
+        filt: 0,
+        in_row: false,
+        cur_dy: usize::MAX,
+        acc: [[0u32; 4]; TEX_MAX_DIM],
+        cnt: [0u32; TEX_MAX_DIM],
+        out,
+    };
+    // Skip the 2-byte zlib header; the CMF/FLG check rejects non-deflate data.
+    let z = dec.bits(16);
+    if dec.inp_eof {
+        return false;
     }
-    if cur_dy < dh {
-        flush_row(out, dw, cur_dy, &acc, &cnt);
+    let cmf = (z & 0xff) as u32;
+    let flg = (z >> 8) as u32;
+    if (cmf & 0x0f) != 8 || (cmf * 256 + flg) % 31 != 0 {
+        return false;
+    }
+    if !dec.inflate() {
+        return false;
     }
     out.w = dw as u16;
     out.h = dh as u16;
@@ -3323,22 +3341,510 @@ fn decode_png(read: &mut dyn ReadAt, base: u64, len: u64, out: &mut Texture) -> 
     true
 }
 
-fn flush_row(
-    out: &mut Texture,
-    dw: usize,
-    dy: usize,
-    acc: &[[u32; 4]; TEX_MAX_DIM],
-    cnt: &[u32; TEX_MAX_DIM],
-) {
-    for dx in 0..dw {
-        let n = if cnt[dx] == 0 { 1 } else { cnt[dx] };
-        let o = (dy * dw + dx) * 4;
-        if o + 3 >= out.rgba.len() {
-            return;
+/// `emit` result: the byte was consumed and more are expected.
+const PNG_OK: u8 = 1;
+/// `emit` result: the last source scanline is complete, stop inflating.
+const PNG_DONE: u8 = 2;
+
+/// Canonical DEFLATE Huffman table.
+struct Huff {
+    counts: [u16; 16],
+    symbols: [u16; 288],
+    /// False for an empty code (a malformed block, not a panic).
+    valid: bool,
+}
+
+/// Build the canonical Huffman table for `lengths` (code length per symbol).
+fn build_huff(lengths: &[u8]) -> Huff {
+    let mut h = Huff {
+        counts: [0; 16],
+        symbols: [0; 288],
+        valid: false,
+    };
+    for &l in lengths {
+        let l = l as usize;
+        if l != 0 && l < 16 {
+            h.counts[l] += 1;
+            h.valid = true;
         }
-        out.rgba[o] = (acc[dx][0] / n).min(255) as u8;
-        out.rgba[o + 1] = (acc[dx][1] / n).min(255) as u8;
-        out.rgba[o + 2] = (acc[dx][2] / n).min(255) as u8;
-        out.rgba[o + 3] = (acc[dx][3] / n).min(255) as u8;
+    }
+    let mut offsets = [0u16; 16];
+    let mut len = 1usize;
+    while len < 16 {
+        offsets[len] = offsets[len - 1].saturating_add(h.counts[len - 1]);
+        len += 1;
+    }
+    let mut sym = 0usize;
+    while sym < lengths.len() && sym < 288 {
+        let l = lengths[sym] as usize;
+        if l != 0 && l < 16 {
+            let o = offsets[l] as usize;
+            if o < 288 {
+                h.symbols[o] = sym as u16;
+            }
+            offsets[l] = offsets[l].saturating_add(1);
+        }
+        sym += 1;
+    }
+    h
+}
+
+/// Streaming PNG decoder: pulls the IDAT zlib stream from the file on demand
+/// and inflates it one byte at a time into a 32 KiB history ring, a scanline
+/// buffer and the 128x128 destination accumulator.
+struct PngDec<'r> {
+    // --- compressed input (chunk walk, on demand) ---
+    read: &'r mut dyn ReadAt,
+    /// File offset of the next chunk header to inspect.
+    next_hdr: u64,
+    /// End of this image's blob.
+    end: u64,
+    /// Offset of the next byte of the current IDAT payload.
+    payload_off: u64,
+    /// Bytes left in the current IDAT payload.
+    chunk_left: u64,
+    inbuf: &'r mut [u8],
+    in_pos: usize,
+    in_len: usize,
+    inp_eof: bool,
+    // --- bit reader ---
+    bitbuf: u32,
+    bitcnt: u32,
+    // --- DEFLATE history ring ---
+    win: &'r mut [u8],
+    win_pos: usize,
+    win_written: usize,
+    // --- scanline state ---
+    row: &'r mut [u8],
+    prev: &'r mut [u8],
+    w: usize,
+    h: usize,
+    dw: usize,
+    dh: usize,
+    stride: usize,
+    bpp: usize,
+    /// Source row being assembled.
+    y: usize,
+    /// Next byte position inside `row`.
+    xi: usize,
+    /// Filter type of the row being assembled.
+    filt: u8,
+    /// False while the next decompressed byte is a filter type.
+    in_row: bool,
+    /// Destination row currently accumulating, or `usize::MAX` for none.
+    cur_dy: usize,
+    acc: [[u32; 4]; TEX_MAX_DIM],
+    cnt: [u32; TEX_MAX_DIM],
+    out: &'r mut Texture,
+}
+
+impl<'r> PngDec<'r> {
+    /// Make sure at least one compressed byte is buffered, walking IDAT chunks
+    /// as needed. Returns false at end of stream or on a malformed chunk.
+    fn fill(&mut self) -> bool {
+        while self.in_pos >= self.in_len {
+            if self.chunk_left > 0 {
+                let want = if (self.chunk_left as usize) < self.inbuf.len() {
+                    self.chunk_left as usize
+                } else {
+                    self.inbuf.len()
+                };
+                let got = self.read.read_at(self.payload_off, &mut self.inbuf[..want]);
+                if got == 0 {
+                    self.inp_eof = true;
+                    return false;
+                }
+                self.payload_off = self.payload_off.saturating_add(got as u64);
+                self.chunk_left -= got as u64;
+                self.in_pos = 0;
+                self.in_len = got;
+                return true;
+            }
+            // No payload left: read the next chunk header.
+            if self.next_hdr.saturating_add(12) > self.end {
+                self.inp_eof = true;
+                return false;
+            }
+            let mut hdr = [0u8; 8];
+            if self.read.read_at(self.next_hdr, &mut hdr) != 8 {
+                self.inp_eof = true;
+                return false;
+            }
+            let clen = u32::from_be_bytes([hdr[0], hdr[1], hdr[2], hdr[3]]) as u64;
+            let data = self.next_hdr.saturating_add(8);
+            let next = data.saturating_add(clen).saturating_add(4);
+            if next > self.end {
+                self.inp_eof = true;
+                return false;
+            }
+            let kind = [hdr[4], hdr[5], hdr[6], hdr[7]];
+            self.next_hdr = next;
+            if kind == *b"IEND" {
+                self.inp_eof = true;
+                return false;
+            }
+            if kind == *b"IDAT" && clen > 0 {
+                self.payload_off = data;
+                self.chunk_left = clen;
+            }
+        }
+        true
+    }
+
+    /// Read `need` (1..=16) bits LSB-first from the DEFLATE stream.
+    fn bits(&mut self, need: u32) -> u32 {
+        while self.bitcnt < need {
+            if !self.fill() {
+                self.inp_eof = true;
+                return 0;
+            }
+            self.bitbuf |= (self.inbuf[self.in_pos] as u32) << self.bitcnt;
+            self.in_pos += 1;
+            self.bitcnt += 8;
+        }
+        let v = self.bitbuf & ((1u32 << need) - 1);
+        self.bitbuf >>= need;
+        self.bitcnt -= need;
+        v
+    }
+
+    /// Decode one Huffman symbol; the caller must check `inp_eof`.
+    fn symbol(&mut self, h: &Huff) -> u16 {
+        let mut code = 0i32;
+        let mut first = 0i32;
+        let mut index = 0i32;
+        let mut len = 1usize;
+        while len < 16 {
+            code |= self.bits(1) as i32;
+            if self.inp_eof {
+                return 0;
+            }
+            let count = h.counts[len] as i32;
+            if code - first < count {
+                let o = index + (code - first);
+                if o < 0 || o >= 288 {
+                    return 0;
+                }
+                return h.symbols[o as usize];
+            }
+            index += count;
+            first += count;
+            first <<= 1;
+            code <<= 1;
+            len += 1;
+        }
+        0
+    }
+
+    /// Push one decompressed byte through the filter and downsampler.
+    fn emit(&mut self, byte: u8) -> u8 {
+        self.win[self.win_pos] = byte;
+        self.win_pos = (self.win_pos + 1) & (PNG_WIN - 1);
+        self.win_written = self.win_written.saturating_add(1);
+        if !self.in_row {
+            // Scanline start: the first byte is the filter type.
+            if byte > 4 {
+                return 0;
+            }
+            self.filt = byte;
+            self.xi = 0;
+            self.in_row = true;
+            return PNG_OK;
+        }
+        let x = self.xi;
+        if x >= self.stride {
+            return 0;
+        }
+        let bpp = self.bpp;
+        let left = if x >= bpp { self.row[x - bpp] } else { 0 };
+        let up = if self.y > 0 { self.prev[x] } else { 0 };
+        let upleft = if self.y > 0 && x >= bpp {
+            self.prev[x - bpp]
+        } else {
+            0
+        };
+        let v = match self.filt {
+            0 => byte,
+            1 => byte.wrapping_add(left),
+            2 => byte.wrapping_add(up),
+            3 => byte.wrapping_add(((left as u16 + up as u16) >> 1) as u8),
+            _ => byte.wrapping_add(paeth(left, up, upleft)),
+        };
+        self.row[x] = v;
+        self.xi = x + 1;
+        if self.xi >= self.stride {
+            return self.end_row();
+        }
+        PNG_OK
+    }
+
+    /// Accumulate the finished scanline, then swap it into `prev`.
+    fn end_row(&mut self) -> u8 {
+        let dy = self.y.saturating_mul(self.dh) / self.h;
+        if dy != self.cur_dy {
+            if self.cur_dy < self.dh {
+                self.flush(self.cur_dy);
+            }
+            let mut i = 0usize;
+            while i < TEX_MAX_DIM {
+                self.acc[i] = [0; 4];
+                self.cnt[i] = 0;
+                i += 1;
+            }
+            self.cur_dy = dy;
+        }
+        let mut x = 0usize;
+        while x < self.w {
+            let dx = x * self.dw / self.w;
+            let s = x * self.bpp;
+            let a = &mut self.acc[dx];
+            a[0] = a[0].saturating_add(self.row[s] as u32);
+            a[1] = a[1].saturating_add(self.row[s + 1] as u32);
+            a[2] = a[2].saturating_add(self.row[s + 2] as u32);
+            a[3] = a[3].saturating_add(if self.bpp == 4 {
+                self.row[s + 3] as u32
+            } else {
+                255
+            });
+            self.cnt[dx] = self.cnt[dx].saturating_add(1);
+            x += 1;
+        }
+        core::mem::swap(&mut self.row, &mut self.prev);
+        self.y += 1;
+        self.in_row = false;
+        if self.y >= self.h {
+            if self.cur_dy < self.dh {
+                self.flush(self.cur_dy);
+            }
+            return PNG_DONE;
+        }
+        PNG_OK
+    }
+
+    /// Write one accumulator row into the texture, averaging exactly with an
+    /// integer divide over every source pixel mapped to that cell.
+    fn flush(&mut self, dy: usize) {
+        let dw = self.dw;
+        let mut dx = 0usize;
+        while dx < dw {
+            let n = if self.cnt[dx] == 0 { 1 } else { self.cnt[dx] };
+            let o = (dy * dw + dx) * 4;
+            if o + 3 >= self.out.rgba.len() {
+                return;
+            }
+            self.out.rgba[o] = (self.acc[dx][0] / n).min(255) as u8;
+            self.out.rgba[o + 1] = (self.acc[dx][1] / n).min(255) as u8;
+            self.out.rgba[o + 2] = (self.acc[dx][2] / n).min(255) as u8;
+            self.out.rgba[o + 3] = (self.acc[dx][3] / n).min(255) as u8;
+            dx += 1;
+        }
+    }
+
+    /// One stored (uncompressed) DEFLATE block.
+    fn stored_block(&mut self) -> u8 {
+        self.bitbuf = 0;
+        self.bitcnt = 0;
+        let len = self.bits(16) as usize;
+        let nlen = self.bits(16);
+        if self.inp_eof {
+            return 0;
+        }
+        if (len as u32) ^ nlen != 0xffff {
+            return 0;
+        }
+        let mut i = 0usize;
+        while i < len {
+            let b = self.bits(8) as u8;
+            if self.inp_eof {
+                return 0;
+            }
+            let r = self.emit(b);
+            if r != PNG_OK {
+                return r;
+            }
+            i += 1;
+        }
+        PNG_OK
+    }
+
+    /// One Huffman-coded block (fixed or dynamic tables), up to end-of-block.
+    fn coded_block(&mut self, lit: &Huff, dist: &Huff) -> u8 {
+        if !lit.valid {
+            return 0;
+        }
+        loop {
+            let sym = self.symbol(lit);
+            if self.inp_eof {
+                return 0;
+            }
+            if sym < 256 {
+                let r = self.emit(sym as u8);
+                if r != PNG_OK {
+                    return r;
+                }
+            } else if sym == 256 {
+                return PNG_OK;
+            } else {
+                let idx = sym as usize - 257;
+                if idx >= 29 || !dist.valid {
+                    return 0;
+                }
+                let length = LEN_BASE[idx] as usize + self.bits(LEN_EXTRA[idx] as u32) as usize;
+                let dsym = self.symbol(dist) as usize;
+                if self.inp_eof || dsym >= 30 {
+                    return 0;
+                }
+                let distance =
+                    DIST_BASE[dsym] as usize + self.bits(DIST_EXTRA[dsym] as u32) as usize;
+                if self.inp_eof || distance == 0 || distance > self.win_written {
+                    return 0;
+                }
+                let mut i = 0usize;
+                while i < length {
+                    let b = self.win[(self.win_pos.wrapping_sub(distance)) & (PNG_WIN - 1)];
+                    let r = self.emit(b);
+                    if r != PNG_OK {
+                        return r;
+                    }
+                    i += 1;
+                }
+            }
+        }
+    }
+
+    fn fixed_block(&mut self) -> u8 {
+        let mut lengths = [0u8; 288];
+        let mut i = 0usize;
+        while i < 288 {
+            lengths[i] = if i < 144 {
+                8
+            } else if i < 256 {
+                9
+            } else if i < 280 {
+                7
+            } else {
+                8
+            };
+            i += 1;
+        }
+        let lit = build_huff(&lengths);
+        let dist = build_huff(&[5u8; 30]);
+        self.coded_block(&lit, &dist)
+    }
+
+    fn dynamic_block(&mut self) -> u8 {
+        let hlit = self.bits(5) as usize + 257;
+        let hdist = self.bits(5) as usize + 1;
+        let hclen = self.bits(4) as usize + 4;
+        if self.inp_eof || hlit > 286 || hdist > 30 {
+            return 0;
+        }
+        const ORDER: [usize; 19] = [
+            16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15,
+        ];
+        let mut code_lengths = [0u8; 19];
+        let mut i = 0usize;
+        while i < hclen {
+            let v = self.bits(3) as u8;
+            if self.inp_eof {
+                return 0;
+            }
+            code_lengths[ORDER[i]] = v;
+            i += 1;
+        }
+        let code_huff = build_huff(&code_lengths);
+        let mut lengths = [0u8; 320];
+        let total = hlit + hdist;
+        let mut i = 0usize;
+        while i < total {
+            let sym = self.symbol(&code_huff);
+            if self.inp_eof {
+                return 0;
+            }
+            if sym < 16 {
+                lengths[i] = sym as u8;
+                i += 1;
+            } else if sym == 16 {
+                if i == 0 {
+                    return 0;
+                }
+                let prev = lengths[i - 1];
+                let repeat = 3 + self.bits(2) as usize;
+                if self.inp_eof {
+                    return 0;
+                }
+                let mut k = 0usize;
+                while k < repeat && i < total {
+                    lengths[i] = prev;
+                    i += 1;
+                    k += 1;
+                }
+            } else if sym == 17 || sym == 18 {
+                let repeat = if sym == 17 {
+                    3 + self.bits(3) as usize
+                } else {
+                    11 + self.bits(7) as usize
+                };
+                if self.inp_eof {
+                    return 0;
+                }
+                let mut k = 0usize;
+                while k < repeat && i < total {
+                    lengths[i] = 0;
+                    i += 1;
+                    k += 1;
+                }
+            } else {
+                return 0;
+            }
+        }
+        let lit = build_huff(&lengths[..hlit]);
+        let dist = build_huff(&lengths[hlit..total]);
+        self.coded_block(&lit, &dist)
+    }
+
+    /// Inflate until the last scanline has been consumed. True only when every
+    /// source row arrived: a truncated stream leaves the texture unloaded.
+    fn inflate(&mut self) -> bool {
+        loop {
+            let final_block = self.bits(1);
+            let typ = self.bits(2);
+            if self.inp_eof {
+                return false;
+            }
+            let r = match typ {
+                0 => self.stored_block(),
+                1 => self.fixed_block(),
+                2 => self.dynamic_block(),
+                _ => return false,
+            };
+            if r == PNG_DONE {
+                return true;
+            }
+            if r != PNG_OK {
+                return false;
+            }
+            if final_block == 1 {
+                return false;
+            }
+        }
     }
 }
+
+/// DEFLATE length bases and extra-bit counts (RFC 1951 section 3.2.5).
+const LEN_BASE: [u16; 29] = [
+    3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31, 35, 43, 51, 59, 67, 83, 99, 115, 131,
+    163, 195, 227, 258,
+];
+const LEN_EXTRA: [u8; 29] = [
+    0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0,
+];
+/// DEFLATE distance bases and extra-bit counts (RFC 1951 section 3.2.5).
+const DIST_BASE: [u16; 30] = [
+    1, 2, 3, 4, 5, 7, 9, 13, 17, 25, 33, 49, 65, 97, 129, 193, 257, 385, 513, 769, 1025, 1537,
+    2049, 3073, 4097, 6145, 8193, 12289, 16385, 24577,
+];
+const DIST_EXTRA: [u8; 30] = [
+    0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13,
+    13,
+];

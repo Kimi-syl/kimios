@@ -201,7 +201,8 @@ def read_gltf_json(path):
 def parse_source_meta(path):
     """Pull the humanoid map, expression binds and morph names out of the file."""
     meta = {"vrm_version": None, "facing": "+Z", "humanoid": {}, "expressions": {},
-            "morph_names": {}, "mesh_names": [], "error": None}
+            "morph_names": {}, "mesh_names": [], "material_colors": {},
+            "error": None}
     gltf, err = read_gltf_json(path)
     if gltf is None:
         meta["error"] = err
@@ -236,6 +237,26 @@ def parse_source_meta(path):
                     pass
             if preset:
                 meta["expressions"].setdefault(preset, []).extend(binds)
+        # VRM 0.x stores the real colour in MToon's _Color, not in the glTF pbr
+        # baseColorFactor. Without it a converted VRoid face comes out white.
+        # VRM 0.x keeps the real colour in MToon's _Color (a Vector4 under
+        # vectorProperties, keyed by material name). Plain glTF has no equivalent,
+        # so without this a converted VRoid face flattens to plain white.
+        mat_names = [m.get("name", "") for m in gltf.get("materials", [])]
+        for prop in (vrm0.get("materialProperties") or []):
+            name = prop.get("name")
+            if not name:
+                mi = prop.get("material")
+                if isinstance(mi, int) and 0 <= mi < len(mat_names):
+                    name = mat_names[mi]
+            color = (prop.get("vectorProperties") or {}).get("_Color") \
+                or (prop.get("floatProperties") or {}).get("_Color")
+            if name and color:
+                try:
+                    meta["material_colors"][name] = (
+                        float(color[0]), float(color[1]), float(color[2]))
+                except Exception:
+                    pass
     elif vrm1:
         meta["vrm_version"] = 1
         meta["facing"] = "+Z"                      # VRM 1.0 faces +Z
@@ -679,6 +700,68 @@ def detect_facing(src, mapping, meta, warns):
     return spec_rot
 
 
+def used_color_stats(obj, mat, img, max_faces=6000):
+    """Mean colour and spread of the texels a material's UVs actually cover.
+
+    Character face/cloth textures are mostly unused white canvas; a naive average
+    makes the whole face white. Sampling only the texels under the UV islands
+    gives the colour the eye actually sees on the model.
+    """
+    try:
+        w, h = img.size
+        px = [0.0] * (w * h * 4)
+        img.pixels.foreach_get(px)
+    except Exception:
+        return (0.5, 0.5, 0.5), 1.0
+    me = obj.data
+    if not me.uv_layers.active:
+        return (0.5, 0.5, 0.5), 1.0
+    uvl = me.uv_layers.active.data
+    mats = list(me.materials)
+    samples = []
+    faces = 0
+    for poly in me.polygons:
+        if poly.material_index >= len(mats) or mats[poly.material_index] != mat:
+            continue
+        faces += 1
+        if faces > max_faces:
+            break
+        loops = list(poly.loop_indices)
+        for k in range(1, len(loops) - 1):
+            tri = [uvl[loops[0]].uv, uvl[loops[k]].uv, uvl[loops[k + 1]].uv]
+            xs = [t[0] * w for t in tri]
+            ys = [t[1] * h for t in tri]
+            x0 = max(0, int(min(xs)) - 1)
+            x1 = min(w - 1, int(max(xs)) + 1)
+            y0 = max(0, int(min(ys)) - 1)
+            y1 = min(h - 1, int(max(ys)) + 1)
+            ax = tri[1][0] - tri[0][0]
+            ay = tri[1][1] - tri[0][1]
+            bx = tri[2][0] - tri[0][0]
+            by = tri[2][1] - tri[0][1]
+            den = ax * by - ay * bx
+            if abs(den) < 1e-12:
+                continue
+            for yy in range(y0, y1 + 1):
+                for xx in range(x0, x1 + 1):
+                    u = (xx + 0.5) / w
+                    v = (yy + 0.5) / h
+                    dx = u - tri[0][0]
+                    dy = v - tri[0][1]
+                    s = (dx * by - dy * bx) / den
+                    t = (ax * dy - ay * dx) / den
+                    if s < -0.02 or t < -0.02 or s + t > 1.02:
+                        continue
+                    i = (yy * w + xx) * 4
+                    samples.append((px[i], px[i + 1], px[i + 2]))
+    if not samples:
+        return (0.5, 0.5, 0.5), 1.0
+    n = float(len(samples))
+    mean = tuple(sum(s[c] for s in samples) / n for c in range(3))
+    var = sum((s[c] - mean[c]) ** 2 for s in samples for c in range(3))
+    return mean, (var / (n * 3.0)) ** 0.5
+
+
 def set_flat_material(mat, rgb):
     """Rebuild a material as one Principled BSDF of a flat colour. VRM MToon
     materials import with exotic node trees (often unlit), so poking at a
@@ -798,8 +881,20 @@ def import_source(path, workdir, warns):
     return meshes
 
 
-def render_preview(out_path, arm_obj, body_obj):
-    """Plain studio render of the converted avatar so the result can be judged."""
+def render_preview(out_path, glb_path):
+    """Render the *exported* GLB (fresh import) so the picture is exactly the
+    deliverable, framed from the KimiOS front (+Z in glTF = -Y in Blender)."""
+    reset_scene()
+    bpy.ops.import_scene.gltf(filepath=os.path.abspath(glb_path), disable_bone_shape=True)
+    meshes = [o for o in bpy.context.scene.objects if o.type == 'MESH'
+              and not any(c.name == "glTF_not_exported" for c in o.users_collection)]
+    if not meshes:
+        raise RuntimeError("preview import found no mesh")
+    co = [ob.matrix_world @ v.co for ob in meshes for v in ob.data.vertices]
+    mn = Vector((min(c.x for c in co), min(c.y for c in co), min(c.z for c in co)))
+    mx = Vector((max(c.x for c in co), max(c.y for c in co), max(c.z for c in co)))
+    centre = (mn + mx) * 0.5
+    height = max(0.5, mx.z - mn.z)
     scene = bpy.context.scene
     world = bpy.data.worlds.new("PreviewWorld")
     world.use_nodes = True
@@ -821,16 +916,11 @@ def render_preview(out_path, arm_obj, body_obj):
     cd.sensor_height = 24.0
     cam = bpy.data.objects.new("PreviewCam", cd)
     scene.collection.objects.link(cam)
-    # frame the converted mesh
-    co = [arm_obj.matrix_world @ v.co for v in body_obj.data.vertices]
-    mn = Vector((min(c.x for c in co), min(c.y for c in co), min(c.z for c in co)))
-    mx = Vector((max(c.x for c in co), max(c.y for c in co), max(c.z for c in co)))
-    centre = (mn + mx) * 0.5
-    height = max(0.5, mx.z - mn.z)
     dist = (height * 1.18) / (2.0 * math.tan(math.radians(19.5) * 0.5))
     yaw = math.radians(28.0)
+    # camera in front: KimiOS front is glTF +Z -> Blender -Y
     cam.location = (centre.x + dist * math.sin(yaw), centre.y - dist * math.cos(yaw),
-                    centre.z + height * 0.06)
+                    centre.z + height * 0.05)
     d = centre - Vector(cam.location)
     cam.rotation_euler = d.to_track_quat('-Z', 'Y').to_euler()
     scene.render.engine = 'BLENDER_EEVEE'
@@ -856,6 +946,9 @@ def main(argv):
     ap.add_argument("--out", default=None)
     ap.add_argument("--report", default=None)
     ap.add_argument("--check-only", action="store_true")
+    ap.add_argument("--facing", default="auto", choices=("auto", "front", "back"),
+                    help="override the front-axis detection: front = no rotation,"
+                         " back = rotate 180 degrees")
     ap.add_argument("--tex-size", type=int, default=256)
     ap.add_argument("--max-tris", type=int, default=4000)
     ap.add_argument("--max-verts", type=int, default=5000)
@@ -944,8 +1037,13 @@ def main(argv):
     # ---- orientation + feet at Y=0 -------------------------------------
     # Everything is brought into world space once, then rotated once, then
     # grounded once -- mesh vertices and skeleton stay in lock-step.
-    rot = (Matrix.Rotation(math.pi, 4, 'Z')
-           if detect_facing(src, mapping, meta, warns) else Matrix.Identity(4))
+    if args.facing == "back":
+        rotate = True
+    elif args.facing == "front":
+        rotate = False
+    else:
+        rotate = bool(detect_facing(src, mapping, meta, warns))
+    rot = Matrix.Rotation(math.pi, 4, 'Z') if rotate else Matrix.Identity(4)
     for ob in meshes:
         bake_world(ob)
         if rot != Matrix.Identity(4):
@@ -1086,31 +1184,37 @@ def main(argv):
 
     textured = [m for m in slots if base_tex(m) is not None]
 
-    def image_stats(img):
+    def image_stats(img, mat=None):
+        # stats over the texels the material actually samples (not the unused
+        # white canvas), which is what the flat colour must match
+        if mat is not None:
+            return used_color_stats(body, mat, img)
         try:
             w, h = img.size
             px = [0.0] * (w * h * 4)
             img.pixels.foreach_get(px)
             n = w * h
-            step = max(1, n // 2048)
-            vals = []
-            for i in range(0, n, step):
-                vals.append((px[i * 4], px[i * 4 + 1], px[i * 4 + 2]))
-            if not vals:
-                return (0.5, 0.5, 0.5), 1.0
-            mean = tuple(sum(v[c] for v in vals) / len(vals) for c in range(3))
-            var = sum((v[c] - mean[c]) ** 2 for v in vals for c in range(3))
-            var = (var / (len(vals) * 3.0)) ** 0.5
-            return mean, var
+            mean = (sum(px[0::4]) / n, sum(px[1::4]) / n, sum(px[2::4]) / n)
+            return mean, 1.0
         except Exception:
             return (0.5, 0.5, 0.5), 1.0
 
     # a near-uniform texture (eye white, highlight, plain skin) is safely
-    # replaced by its average colour -- that saves a slot with no visible loss
+    # replaced by its average colour -- that saves a slot with no visual loss
+    def flatten(mat, mean):
+        # VRM 0.x keeps the real colour in MToon's _Color, not in the glTF pbr
+        # factor; without the tint a VRoid face flattens to plain white.
+        tint = (meta.get("material_colors") or {}).get(mat.name)
+        if tint and max(tint) > 0.001:
+            mean = (mean[0] * tint[0], mean[1] * tint[1], mean[2] * tint[2])
+            log("applying VRM MToon _Color tint %s to %r"
+                % (tuple(round(t, 3) for t in tint), mat.name))
+        set_flat_material(mat, mean)
+
     for mat in list(textured):
-        mean, var = image_stats(base_tex(mat))
+        mean, var = image_stats(base_tex(mat), mat)
         if var < 0.055:
-            set_flat_material(mat, mean)
+            flatten(mat, mean)
             textured.remove(mat)
             log("material %r is near-uniform (std %.3f) -> flat colour, slot freed"
                 % (mat.name, var))
@@ -1162,8 +1266,8 @@ def main(argv):
         ranked = keep + leftover
         log("texture slots: keeping %s" % ", ".join(repr(m.name) for m in keep))
         for mat in ranked[CAP_TEXTURES:]:
-            mean, _var = image_stats(base_tex(mat))
-            set_flat_material(mat, mean)
+            mean, _var = image_stats(base_tex(mat), mat)
+            flatten(mat, mean)
             warn("material %r flattened to its average colour (texture slot budget)"
                  % mat.name, warns)
         warn("%d textured materials, device keeps %d -- extra ones flattened"
@@ -1283,7 +1387,7 @@ def main(argv):
     }, sort_keys=True))
     if args.preview:
         try:
-            render_preview(args.preview, new_arm, body)
+            render_preview(args.preview, out_path)
         except Exception as exc:
             warn("preview render failed: %r" % (exc,), warns)
     if args.save_blend:

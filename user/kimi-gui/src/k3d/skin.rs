@@ -39,6 +39,8 @@ pub struct Pose {
     pub root_y: f32,
     /// Whole-body lean, radians around Z.
     pub lean: f32,
+    /// Calibrated arm-down rotation for this rig (see calibrate_arm_lift).
+    pub arm_lift: f32,
 }
 
 impl Default for Pose {
@@ -47,6 +49,7 @@ impl Default for Pose {
             rotation: [Quat::IDENTITY; BONE_COUNT],
             root_y: 0.0,
             lean: 0.0,
+            arm_lift: 0.0,
         }
     }
 }
@@ -61,14 +64,16 @@ impl Pose {
 }
 
 /// Procedural idle/working/thinking pose at time `t` (seconds).
-pub fn procedural_pose(state: usize, t: f32, out: &mut Pose) {
+pub fn procedural_pose(state: usize, t: f32, arm_lift: f32, out: &mut Pose) {
     *out = Pose::default();
+    out.arm_lift = arm_lift;
     // Rest-pose correction: the bind pose is a T-pose, which looks wrong for a
     // desktop pet. Drop the arms to a relaxed A-pose and add a slight elbow bend.
-    out.set(BONE_LEFT_UPPER_ARM, 0.0, 0.0, 0.55);
-    out.set(BONE_RIGHT_UPPER_ARM, 0.0, 0.0, -0.55);
-    out.set(BONE_LEFT_LOWER_ARM, 0.0, 0.0, 0.05);
-    out.set(BONE_RIGHT_LOWER_ARM, 0.0, 0.0, -0.05);
+    let lift = arm_lift;
+    out.set(BONE_LEFT_UPPER_ARM, 0.0, 0.0, lift);
+    out.set(BONE_RIGHT_UPPER_ARM, 0.0, 0.0, -lift);
+    out.set(BONE_LEFT_LOWER_ARM, 0.0, 0.0, lift * 0.1);
+    out.set(BONE_RIGHT_LOWER_ARM, 0.0, 0.0, -lift * 0.1);
 
     // Breathing: gentle vertical bob plus a small spine pitch.
     let breath = sin(t * 1.6);
@@ -85,8 +90,8 @@ pub fn procedural_pose(state: usize, t: f32, out: &mut Pose) {
     out.set(BONE_HEAD, hx * 0.5, hy * 0.5, 0.0);
     // Arms: small counter-sway.
     let sway = sin(t * 1.1) * 0.06;
-    out.set(BONE_LEFT_UPPER_ARM, 0.0, sway * 0.5, 0.55 - sway * 0.3);
-    out.set(BONE_RIGHT_UPPER_ARM, 0.0, -sway * 0.5, -0.55 + sway * 0.3);
+    out.set(BONE_LEFT_UPPER_ARM, 0.0, sway * 0.5, lift - sway * 0.3);
+    out.set(BONE_RIGHT_UPPER_ARM, 0.0, -sway * 0.5, -lift + sway * 0.3);
 }
 
 /// Compute world matrices for every node: `world[i] = parent_world * local(i)`,
@@ -180,6 +185,53 @@ pub fn compute_joint_matrices(
     n
 }
 
+/// Measure the rig's arm orientation and work out how far to rotate the upper
+/// arms down to reach a relaxed A-pose.
+///
+/// Bone local axes differ per exporter, so rather than hard-coding a sign this
+/// tries both directions, evaluates the hand position for each, and keeps the
+/// one that actually lowers the hands. Returns 0 when the rest pose is already
+/// relaxed (arms clearly below horizontal), so authored A-pose VRMs are left
+/// alone.
+pub fn calibrate_arm_lift(arena: &ModelArena) -> f32 {
+    const CANDIDATE: f32 = 0.95;
+    let mut world = [Mat4::IDENTITY; MAX_NODES];
+
+    let rest = compute_world(arena, &Pose::default(), &mut world);
+    if rest == 0 {
+        return 0.0;
+    }
+    let hand_y = |arena: &ModelArena, world: &[Mat4; MAX_NODES], bone: u8| -> Option<f32> {
+        let node = (0..arena.node_count.min(MAX_NODES)).find(|&i| arena.nodes[i].bone == bone)?;
+        let p = world[node].transform_point(Vec3::ZERO);
+        Some(p.y)
+    };
+    let shoulder = hand_y(arena, &world, BONE_LEFT_UPPER_ARM);
+    let hand_rest = hand_y(arena, &world, BONE_LEFT_HAND);
+    if let (Some(sh), Some(hand)) = (shoulder, hand_rest) {
+        // Arms already hanging down by more than ~12 degrees of the arm length.
+        if hand < sh - 0.12 {
+            return 0.0;
+        }
+    }
+
+    let mut best = 0.0f32;
+    let mut best_y = f32::MAX;
+    for sign in [CANDIDATE, -CANDIDATE] {
+        let mut pose = Pose::default();
+        pose.set(BONE_LEFT_UPPER_ARM, 0.0, 0.0, sign);
+        pose.set(BONE_RIGHT_UPPER_ARM, 0.0, 0.0, -sign);
+        compute_world(arena, &pose, &mut world);
+        if let Some(y) = hand_y(arena, &world, BONE_LEFT_HAND) {
+            if y < best_y {
+                best_y = y;
+                best = sign;
+            }
+        }
+    }
+    best
+}
+
 /// Distance helper reused by spring bones.
 pub fn damped_spring(
     current: Vec3,
@@ -198,8 +250,8 @@ pub fn damped_spring(
 // Secondary motion ("spring bones")
 // ---------------------------------------------------------------------------
 //
-// A VRM carries explicit spring-bone chains, but the same visual result — parts
-// of the body lagging behind the rest — can be produced generically: treat each
+// A VRM carries explicit spring-bone chains, but the same visual result ??parts
+// of the body lagging behind the rest ??can be produced generically: treat each
 // secondary bone's rotation as a damped spring chasing its target rotation from
 // the pose. That gives follow-through on any rig, including plain glTF exports,
 // without needing authored spring data.
