@@ -305,28 +305,21 @@ pub fn model_stats() -> (usize, usize, bool) {
 
 /// Render the model and blit it into the screen rectangle `(x, y, w, h)` in
 /// logical coordinates. Pixels the rasteriser did not touch stay transparent.
-pub fn draw(screen: &Screen, x: i64, y: i64, w: i64, h: i64, yaw: f32, pitch: f32) -> bool {
-    ensure_model();
-    let arena = model();
-    if !arena.loaded || w <= 0 || h <= 0 {
-        return false;
-    }
-
+/// Render one frame of the loaded model into the offscreen target.
+///
+/// Shared by the on-screen path and the host test hook, so both exercise exactly
+/// the same camera, skinning, morph and raster code.
+fn render_frame(arena: &ModelArena, yaw: f32, pitch: f32, bounce: f32) -> DrawStats {
     let color = unsafe { &mut *core::ptr::addr_of_mut!(COLOR) };
     let depth = unsafe { &mut *core::ptr::addr_of_mut!(DEPTH) };
 
     // Frame the model: fit its bounding sphere into the target's vertical FOV.
     let centre = arena.min.add(arena.max).scale(0.5);
-    let extent = arena
-        .max
-        .sub(arena.min)
-        .scale(0.5)
-        .length()
-        .max(0.5);
+    let extent = arena.max.sub(arena.min).scale(0.5).length().max(0.5);
     let fov = 0.62f32; // ~35 degrees
     let mut cam = Camera::new(fov, RT_W as f32 / RT_H as f32);
     cam.target = centre;
-    cam.target.y -= bounce_offset();
+    cam.target.y -= bounce;
     cam.distance = extent * 2.2;
     cam.yaw = yaw;
     cam.pitch = pitch;
@@ -350,26 +343,108 @@ pub fn draw(screen: &Screen, x: i64, y: i64, w: i64, h: i64, yaw: f32, pitch: f3
         None
     };
 
-    {
-        let mut target = match Target::new(color, depth, RT_W, RT_H) {
-            Some(t) => t,
-            None => return false,
-        };
-        target.clear(0);
-        let stats = raster::draw(DrawParams {
-            target: &mut target,
-            arena,
-            mvp,
-            skin: skin_slice,
-            light: Vec3::new(0.35, 0.62, 0.70).normalised(),
-            ambient: 0.80,
-            flat_color: None,
-            morph: update_morphs(),
-        });
-        unsafe {
-            LAST_STATS = stats;
-        }
+    let mut target = match Target::new(color, depth, RT_W, RT_H) {
+        Some(t) => t,
+        None => return DrawStats::default(),
+    };
+    target.clear(0);
+    let stats = raster::draw(DrawParams {
+        target: &mut target,
+        arena,
+        mvp,
+        skin: skin_slice,
+        light: Vec3::new(0.35, 0.62, 0.70).normalised(),
+        ambient: 0.80,
+        flat_color: None,
+        morph: update_morphs(),
+    });
+    unsafe {
+        LAST_STATS = stats;
     }
+    stats
+}
+
+/// Host-harness hook: load a GLB from a byte slice, render one frame, and report
+/// what the pipeline actually produced as a bitmask.
+///
+/// Bits: 0 loaded, 1 vertices, 2 triangles, 3 skin/joints, 4 morph targets,
+/// 5 rasteriser saw triangles, 6 something was drawn, 7 pixels covered,
+/// 8 the framebuffer is not blank, 9 a morph actually changed the image.
+#[cfg(not(target_os = "none"))]
+pub fn test_render(bytes: &[u8]) -> u64 {
+    let arena = model();
+    if arena.load_from_slice(bytes).is_err() {
+        return 0;
+    }
+    let mut bits = 1u64;
+    if arena.vertex_count > 0 {
+        bits |= 1 << 1;
+    }
+    if arena.triangle_count() > 0 {
+        bits |= 1 << 2;
+    }
+    if arena.joint_count > 0 {
+        bits |= 1 << 3;
+    }
+    if arena.morph_target_count > 0 {
+        bits |= 1 << 4;
+    }
+
+    let stats = render_frame(arena, 0.0, 0.02, 0.0);
+    if stats.triangles > 0 {
+        bits |= 1 << 5;
+    }
+    if stats.drawn > 0 {
+        bits |= 1 << 6;
+    }
+    if stats.pixels > 0 {
+        bits |= 1 << 7;
+    }
+
+    let hash = framebuffer_hash();
+    if hash != 0 {
+        bits |= 1 << 8;
+    }
+
+    // Prove the morph path reaches the framebuffer: set every expression to full
+    // weight, re-render, and require the image to change.
+    if arena.morph_target_count > 0 {
+        for i in 0..arena.morph_target_count.min(arena.morph_weights.len()) {
+            set_morph(i, 1.0);
+        }
+        render_frame(arena, 0.0, 0.02, 0.0);
+        if framebuffer_hash() != hash {
+            bits |= 1 << 9;
+        }
+        clear_morphs();
+    }
+    bits
+}
+
+/// Cheap FNV-ish hash of the colour target, used to detect a changed frame.
+fn framebuffer_hash() -> u64 {
+    unsafe {
+        let colour = &*core::ptr::addr_of!(COLOR);
+        let mut h = 0xcbf2_9ce4_8422_2325u64;
+        let mut i = 0usize;
+        while i < colour.len() {
+            h ^= colour[i] as u64;
+            h = h.wrapping_mul(0x0000_0100_0000_01b3);
+            i += 16;
+        }
+        h
+    }
+}
+
+/// Blit the offscreen target into a screen rectangle.
+pub fn draw(screen: &Screen, x: i64, y: i64, w: i64, h: i64, yaw: f32, pitch: f32) -> bool {
+    ensure_model();
+    let arena = model();
+    if !arena.loaded || w <= 0 || h <= 0 {
+        return false;
+    }
+
+    render_frame(arena, yaw, pitch, bounce_offset());
 
     // Blit, treating "depth untouched" as transparent.
     let dst = screen.back_ptr();

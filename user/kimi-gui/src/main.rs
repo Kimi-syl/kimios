@@ -1063,7 +1063,14 @@ pub extern "C" fn kimi_test_pet_pack(jp: u64, jl: u64, pp: u64, pl: u64) -> u64 
     pet::test_pack(json, png)
 }
 
-/// Host-only test hook: fetch+cache the kpkg repo (1 = success).
+#[no_mangle]
+    #[cfg(not(target_os = "none"))]
+    pub extern "C" fn kimi_test_pet3d(gp: u64, gl: u64) -> u64 {
+        let bytes = unsafe { core::slice::from_raw_parts(gp as *const u8, gl as usize) };
+        pet3d::test_render(bytes)
+    }
+
+    /// Host-only test hook: fetch+cache the kpkg repo (1 = success).
 #[no_mangle]
 #[cfg(not(target_os = "none"))]
 pub extern "C" fn kimi_test_kpkg() -> u64 {
