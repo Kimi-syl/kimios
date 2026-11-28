@@ -672,6 +672,43 @@ fn read_disk(path: &str, buf: &mut [u8]) -> Option<usize> {
     Some(total)
 }
 
+/// Join `dir` and `name` into `out`, returning the resulting slice.
+fn join_path<'a>(dir: &str, name: &str, out: &'a mut [u8; 128]) -> Option<&'a str> {
+    let mut n = 0usize;
+    for &b in dir.as_bytes() {
+        if n >= out.len() {
+            return None;
+        }
+        out[n] = b;
+        n += 1;
+    }
+    if n > 0 && out[n - 1] != b'/' {
+        if n >= out.len() {
+            return None;
+        }
+        out[n] = b'/';
+        n += 1;
+    }
+    for &b in name.as_bytes() {
+        if n >= out.len() {
+            return None;
+        }
+        out[n] = b;
+        n += 1;
+    }
+    core::str::from_utf8(&out[..n]).ok()
+}
+
+/// Write `data` to `path`, truncating via create. False on short write.
+fn write_disk(path: &str, data: &[u8]) -> bool {
+    let Some(handle) = k::create(path) else {
+        return false;
+    };
+    let written = k::write_file(handle, 0, data);
+    k::close(handle);
+    written == data.len()
+}
+
 /// Map app activity to a pet state: streaming -> thinking, an open app ->
 /// working, otherwise idle. Pure so it can be unit-tested.
 pub fn activity_state(app_open: bool, streaming: bool) -> usize {
@@ -691,6 +728,9 @@ pub fn activity_state(app_open: bool, streaming: bool) -> usize {
 pub struct Pet {
     pub pack: PetPack,
     pub valid: bool,
+    /// True when the active pack came from `/disk/pet/` rather than the
+    /// built-in whale.
+    pub imported: bool,
     state: usize,
     frame: usize,
     frame_ms: i64,
@@ -707,6 +747,7 @@ impl Pet {
         Pet {
             pack: PetPack::empty(),
             valid: false,
+            imported: false,
             state: S_IDLE,
             frame: 0,
             frame_ms: 0,
@@ -744,14 +785,72 @@ impl Pet {
             let dp = core::slice::from_raw_parts_mut(DP.as_mut_ptr(), DP.len());
             if let (Some(jn), Some(pn)) = (read_disk("/disk/pet/pack.json", dj), read_disk("/disk/pet/atlas.png", dp)) {
                 if jn > 0 && pn > 0 {
-                    let pet = Pet::from_pack(&dj[..jn], &dp[..pn]);
+                    let mut pet = Pet::from_pack(&dj[..jn], &dp[..pn]);
                     if pet.valid {
+                        pet.imported = true;
                         return pet;
                     }
                 }
             }
         }
         Pet::from_pack(include_bytes!("pet_default.json"), include_bytes!("pet_default.png"))
+    }
+
+    /// Human-readable name of the current animation state.
+    pub fn state_name(&self) -> &'static str {
+        match self.state {
+            S_WORKING => "Working",
+            S_THINKING => "Thinking",
+            _ => "Idle",
+        }
+    }
+
+    /// Source label for the manager UI.
+    pub fn source_name(&self) -> &'static str {
+        if self.imported { "Imported pack" } else { "Built-in whale" }
+    }
+
+    /// Install a pack from `dir` (expects `pack.json` + `atlas.png`) into
+    /// `/disk/pet/`. The candidate is validated before anything is written, so a
+    /// bad pack never replaces a working one.
+    pub fn install_from(dir: &str) -> bool {
+        static mut SRC_JSON: [u8; 65536] = [0; 65536];
+        static mut SRC_PNG: [u8; 262144] = [0; 262144];
+        let mut jb = [0u8; 128];
+        let mut pb = [0u8; 128];
+        let (Some(jpath), Some(ppath)) = (
+            join_path(dir, "pack.json", &mut jb),
+            join_path(dir, "atlas.png", &mut pb),
+        ) else {
+            return false;
+        };
+        unsafe {
+            let dj = core::slice::from_raw_parts_mut(SRC_JSON.as_mut_ptr(), SRC_JSON.len());
+            let dp = core::slice::from_raw_parts_mut(SRC_PNG.as_mut_ptr(), SRC_PNG.len());
+            let (Some(jn), Some(pn)) = (read_disk(jpath, dj), read_disk(ppath, dp)) else {
+                return false;
+            };
+            if jn == 0 || pn == 0 {
+                return false;
+            }
+            if !Pet::from_pack(&dj[..jn], &dp[..pn]).valid {
+                return false;
+            }
+            k::mkdir("/disk/pet");
+            write_disk("/disk/pet/pack.json", &dj[..jn]) && write_disk("/disk/pet/atlas.png", &dp[..pn])
+        }
+    }
+
+    /// Drop the imported pack, falling back to the built-in whale.
+    pub fn uninstall() -> bool {
+        let a = k::unlink("/disk/pet/pack.json");
+        let b = k::unlink("/disk/pet/atlas.png");
+        a || b
+    }
+
+    /// True when an imported pack is installed on disk.
+    pub fn pack_present() -> bool {
+        k::stat("/disk/pet/pack.json").is_some() && k::stat("/disk/pet/atlas.png").is_some()
     }
 
     fn display_anim(&self) -> usize {
