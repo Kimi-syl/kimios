@@ -128,6 +128,10 @@ pub fn alloc(layout: Layout) -> Option<NonNull<u8>> {
             if previous.is_null() {
                 list.head = next;
             } else {
+                // Validate the predecessor before writing through it.
+                if !in_heap(previous as usize, HEADER) {
+                    return None;
+                }
                 unsafe {
                     (*previous).next = next;
                 }
@@ -137,12 +141,18 @@ pub fn alloc(layout: Layout) -> Option<NonNull<u8>> {
             let block_size = start + used - header as usize;
             if total >= used + MIN_SPLIT {
                 let rest = (start + used) as *mut Block;
+                if !in_heap(rest as usize, HEADER) {
+                    return None;
+                }
                 unsafe {
                     (*rest).size = total - used;
                     if previous.is_null() {
                         (*rest).next = list.head;
                         list.head = rest;
                     } else {
+                        if !in_heap(previous as usize, HEADER) {
+                            return None;
+                        }
                         (*rest).next = (*previous).next;
                         (*previous).next = rest;
                     }
@@ -183,6 +193,12 @@ pub fn dealloc(pointer: NonNull<u8>) {
         }
         previous = current;
         current = unsafe { (*current).next };
+    }
+
+    // Validate the insertion point before writing through it: a corrupt list
+    // would otherwise be followed into an arbitrary address.
+    if !previous.is_null() && !in_heap(previous as usize, HEADER) {
+        return;
     }
 
     unsafe {
