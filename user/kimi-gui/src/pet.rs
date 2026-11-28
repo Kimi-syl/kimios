@@ -1010,7 +1010,7 @@ impl Pet {
         if anim.nframes == 0 {
             return;
         }
-        let k = pct.clamp(10, 400);
+        let k = pct.clamp(10, crate::theme::MAX_PET_SIZE as i64 * 2);
         let f = anim.frames[self.frame.min(anim.nframes - 1)];
         let cols = anim.cols.max(1);
         let sx = (f.i % cols) * anim.fw;
@@ -1034,6 +1034,28 @@ impl Pet {
             anim.fh,
             false,
         );
+    }
+
+    /// Clamp the anchor so the sprite stays fully on screen at large sizes.
+    ///
+    /// The pet is anchored bottom-right on Home, so scaling it up would push it
+    /// past the edge; both the renderer and the tap test use this so the visible
+    /// sprite and the hit box stay together.
+    pub fn clamped_anchor(&self, screen: &Screen, x: i64, y: i64, pct: i64) -> (i64, i64) {
+        if !self.valid {
+            return (x, y);
+        }
+        let k = pct.clamp(10, 800);
+        let scale_num = self.pack.scale.max(1) * k;
+        let w = self.pack.canvas_w * scale_num / 100;
+        let h = self.pack.canvas_h * scale_num / 100;
+        let off_x = self.pack.anchor_x * k / 100;
+        let off_y = self.pack.baseline * k / 100;
+        let max_dx = (screen.width() - w).max(0);
+        let max_dy = (screen.logical_height() - h).max(0);
+        let dx = (x - off_x).clamp(0, max_dx);
+        let dy = (y - off_y).clamp(0, max_dy);
+        (dx + off_x, dy + off_y)
     }
 
     /// Logical hit-box for tap routing (content box at the draw position),

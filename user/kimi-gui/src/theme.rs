@@ -203,8 +203,11 @@ pub fn set_pet_size(pct: usize) {
 }
 
 pub const MIN_PET_SIZE: usize = 50;
-pub const MAX_PET_SIZE: usize = 250;
-const PET_SIZE_STEP: usize = 10;
+/// The pet is anchored in a corner and clamped to stay on screen, so a large
+/// ceiling is safe: 800% is roughly a quarter of the screen width on a 1080p
+/// phone.
+pub const MAX_PET_SIZE: usize = 800;
+const PET_SIZE_STEP: usize = 25;
 
 /// Next size up/down, in fixed steps within the allowed range.
 pub fn pet_size_step(up: bool) -> usize {

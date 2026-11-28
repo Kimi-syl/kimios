@@ -1918,8 +1918,12 @@ fn tapped(screen: &Screen, ui: &mut Ui, point: (i64, i64), clock: [u64; 7]) {
                 return;
             }
             if ui.settings.pet && ui.pet.valid {
-                let px = screen.width() - 46;
-                let py = screen.height() - 128;
+                let (px, py) = ui.pet.clamped_anchor(
+                    screen,
+                    screen.width() - 46,
+                    screen.height() - 128,
+                    crate::theme::pet_size() as i64,
+                );
                 if ui.pet.hit(px, py, point.0, point.1) {
                     ui.pet.tap(k::uptime_ms(), point.0 < px);
                     ui.paint_bg = true;
@@ -2808,7 +2812,13 @@ fn draw_home(
     }
 
     if ui.settings.pet && ui.pet.valid && ui.folder_view.is_none() {
-        ui.pet.draw(screen, width - 46, height - 128 + y_offset);
+        let (ax, ay) = ui.pet.clamped_anchor(
+            screen,
+            width - 46,
+            height - 128 + y_offset,
+            crate::theme::pet_size() as i64,
+        );
+        ui.pet.draw(screen, ax, ay);
     }
     draw_home_indicator(screen);
 }
@@ -3410,7 +3420,10 @@ fn draw_pet_app(screen: &Screen, ui: &Ui, x_offset: i64) {
     screen.text(x + 44, 136, "Desktop pet", 2, TEXT());
     screen.text(x + 44, 174, "Tap the pet on Home to play", 1, MUTED());
     if ui.pet.valid {
-        ui.pet.draw_scaled(screen, x + width - 116, 226, crate::theme::pet_size() as i64);
+        // Cap the preview so a very large pet cannot spill out of the card; the
+        // real size is what Home shows.
+        let cap = (crate::theme::pet_size() as i64).min(200);
+        ui.pet.draw_scaled(screen, x + width - 116, 226, cap);
     }
     let lx = x + 44;
     let state_label = "State:";
@@ -3436,29 +3449,34 @@ fn draw_pet_app(screen: &Screen, ui: &Ui, x_offset: i64) {
     let label = format_i64(crate::theme::pet_size() as i64, &mut num);
     draw_centered_pair(screen, x + width - 166, 424, label, "%", TEXT());
 
+    // Presets: jump straight to small / medium / large.
+    pet_pill(screen, x + 20, 492, 130, 48, "S", SURFACE_HI(), TEXT());
+    pet_pill(screen, x + 175, 492, 130, 48, "M", SURFACE_HI(), TEXT());
+    pet_pill(screen, x + 330, 492, 130, 48, "L", SURFACE_HI(), TEXT());
+
     // Pack actions.
-    pet_pill(screen, x + 20, 496, 150, 52, "Import", RED(), TEXT());
-    pet_pill(screen, x + 190, 496, 150, 52, "Remove", SURFACE_HI(), TEXT());
+    pet_pill(screen, x + 20, 560, 150, 52, "Import", RED(), TEXT());
+    pet_pill(screen, x + 190, 560, 150, 52, "Remove", SURFACE_HI(), TEXT());
     let installed = pet::Pet::pack_present();
     screen.text(
         x + 44,
-        564,
+        628,
         if installed { "Imported pack installed" } else { "Using the built-in whale" },
         1,
         MUTED(),
     );
-    screen.text(x + 44, 590, "Put pack.json + atlas.png in", 1, MUTED());
-    screen.text(x + 44, 612, "/disk/import/pet, then tap Import", 1, MUTED());
+    screen.text(x + 44, 654, "Put pack.json + atlas.png in", 1, MUTED());
+    screen.text(x + 44, 676, "/disk/import/pet, then tap Import", 1, MUTED());
 
     match ui.pet_msg {
         1 => {
-            screen.text(x + 44, 656, "Pack imported", 1, GREEN());
+            screen.text(x + 44, 712, "Pack imported", 1, GREEN());
         }
         2 => {
-            screen.text(x + 44, 656, "Pack removed", 1, GREEN());
+            screen.text(x + 44, 712, "Pack removed", 1, GREEN());
         }
         3 => {
-            screen.text(x + 44, 656, "Import failed - check the pack files", 1, RED());
+            screen.text(x + 44, 712, "Import failed - check the pack files", 1, RED());
         }
         _ => {}
     }
@@ -3487,7 +3505,22 @@ fn pet_app_hit(ui: &mut Ui, point: (i64, i64)) {
             return;
         }
     }
-    if py < 496 || py >= 548 {
+    // Presets: S / M / L.
+    if py >= 492 && py < 540 {
+        if px >= 20 && px < 150 {
+            crate::theme::set_pet_size(100);
+            return;
+        }
+        if px >= 175 && px < 305 {
+            crate::theme::set_pet_size(300);
+            return;
+        }
+        if px >= 330 && px < 460 {
+            crate::theme::set_pet_size(crate::theme::MAX_PET_SIZE);
+            return;
+        }
+    }
+    if py < 560 || py >= 612 {
         return;
     }
     if px >= 20 && px < 170 {
