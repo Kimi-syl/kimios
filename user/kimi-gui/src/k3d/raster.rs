@@ -51,6 +51,8 @@ pub struct DrawParams<'a> {
     pub ambient: f32,
     /// Overrides material colour, for flat debug shading.
     pub flat_color: Option<u32>,
+    /// Per-vertex morph deltas for this frame (expressions), indexed by vertex.
+    pub morph: Option<&'a [Vec3]>,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -71,6 +73,7 @@ pub fn draw(params: DrawParams<'_>) -> DrawStats {
         light,
         ambient,
         flat_color,
+        morph,
     } = params;
 
     let mut stats = DrawStats::default();
@@ -105,9 +108,9 @@ pub fn draw(params: DrawParams<'_>) -> DrawStats {
                 continue;
             };
 
-            let (pa, na) = skinned(va.pos, va.normal, va.joints, va.weights, skin);
-            let (pb, nb) = skinned(vb.pos, vb.normal, vb.joints, vb.weights, skin);
-            let (pc, nc) = skinned(vc.pos, vc.normal, vc.joints, vc.weights, skin);
+            let (pa, na) = skinned(morphed(va.pos, ia, morph), va.normal, va.joints, va.weights, skin);
+            let (pb, nb) = skinned(morphed(vb.pos, ib, morph), vb.normal, vb.joints, vb.weights, skin);
+            let (pc, nc) = skinned(morphed(vc.pos, ic, morph), vc.normal, vc.joints, vc.weights, skin);
 
             let tri = [
                 clip(mvp, pa, na, va.uv),
@@ -162,6 +165,19 @@ pub fn draw(params: DrawParams<'_>) -> DrawStats {
         }
     }
     stats
+}
+
+
+/// Apply this frame's morph deltas (facial expressions) to a base position.
+#[inline]
+fn morphed(pos: [f32; 3], vertex: usize, morph: Option<&[Vec3]>) -> [f32; 3] {
+    match morph {
+        Some(deltas) => match deltas.get(vertex) {
+            Some(d) => [pos[0] + d.x, pos[1] + d.y, pos[2] + d.z],
+            None => pos,
+        },
+        None => pos,
+    }
 }
 
 #[inline]

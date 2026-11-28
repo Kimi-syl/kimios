@@ -30,6 +30,69 @@ static mut POSE: Pose = Pose {
     root_y: 0.0,
     lean: 0.0,
 };
+/// Per-vertex morph deltas for the current frame.
+const MAX_VERTS_USIZE: usize = crate::k3d::MAX_VERTS;
+static mut MORPH_DELTA: [Vec3; MAX_VERTS_USIZE] = [Vec3::ZERO; MAX_VERTS_USIZE];
+static mut MORPH_ACTIVE: bool = false;
+
+/// Set a morph target weight (0..1), e.g. a facial expression.
+pub fn set_morph(index: usize, weight: f32) {
+    let arena = model();
+    if index < arena.morph_weights.len() {
+        arena.morph_weights[index] = crate::k3d::clamp(weight, 0.0, 1.0);
+    }
+}
+
+/// Clear every expression weight.
+pub fn clear_morphs() {
+    for w in model().morph_weights.iter_mut() {
+        *w = 0.0;
+    }
+}
+
+/// Recompute the per-vertex morph delta buffer from the current weights.
+/// Cheap when nothing is active: one flag check.
+fn update_morphs() -> Option<&'static [Vec3]> {
+    let arena = model();
+    if arena.morph_target_count == 0 {
+        unsafe { MORPH_ACTIVE = false };
+        return None;
+    }
+    let any = arena.morph_weights[..arena.morph_target_count]
+        .iter()
+        .any(|w| *w > 0.001);
+    if !any {
+        unsafe { MORPH_ACTIVE = false };
+        return None;
+    }
+    unsafe {
+        let deltas = &mut *core::ptr::addr_of_mut!(MORPH_DELTA);
+        for d in deltas.iter_mut() {
+            *d = Vec3::ZERO;
+        }
+        for t in 0..arena.morph_target_count {
+            let weight = arena.morph_weights[t];
+            if weight <= 0.001 {
+                continue;
+            }
+            let target = arena.morph_targets[t];
+            let start = target.first as usize;
+            let end = (start + target.count as usize).min(arena.morph_entry_count);
+            for e in &arena.morph_entries[start..end] {
+                let vi = e.vertex as usize;
+                if vi < deltas.len() {
+                    deltas[vi] = deltas[vi].add(Vec3::new(
+                        e.delta[0] * weight,
+                        e.delta[1] * weight,
+                        e.delta[2] * weight,
+                    ));
+                }
+            }
+        }
+        MORPH_ACTIVE = true;
+        Some(&(&*core::ptr::addr_of!(MORPH_DELTA))[..arena.vertex_count.min(MAX_VERTS_USIZE)])
+    }
+}
 /// Guards the one-shot model load so a missing file is not retried every frame.
 static mut LOAD_ATTEMPTED: bool = false;
 /// Timestamp of the last tap, used for the hop animation.
@@ -40,6 +103,8 @@ pub fn bounce() {
     unsafe {
         BOUNCE_START = k::uptime_ms();
     }
+    // Kick the secondary motion so limbs swing from the tap.
+    skin::spring_impulse(2.5, -1.5);
 }
 
 /// Vertical offset (metres) of the current hop, 0 when idle.
@@ -299,6 +364,7 @@ pub fn draw(screen: &Screen, x: i64, y: i64, w: i64, h: i64, yaw: f32, pitch: f3
             light: Vec3::new(0.35, 0.62, 0.70).normalised(),
             ambient: 0.80,
             flat_color: None,
+            morph: update_morphs(),
         });
         unsafe {
             LAST_STATS = stats;
@@ -354,11 +420,23 @@ pub fn draw(screen: &Screen, x: i64, y: i64, w: i64, h: i64, yaw: f32, pitch: f3
     true
 }
 
-/// Advance the procedural pose for the given pet state and time.
+/// Advance the procedural pose for the given pet state and time, then run the
+/// secondary-motion spring so limbs and head follow through.
 pub fn update_pose(state: usize, t_seconds: f32) {
+    static mut LAST_MS: u64 = 0;
+    let now = k::uptime_ms();
+    let last = unsafe { LAST_MS };
+    unsafe { LAST_MS = now };
+    let dt = if last == 0 {
+        0.016
+    } else {
+        (now.saturating_sub(last) as f32 / 1000.0).clamp(0.0, 0.1)
+    };
     unsafe {
         let pose = &mut *core::ptr::addr_of_mut!(POSE);
         skin::procedural_pose(state, t_seconds, pose);
+        let sprung = skin::apply_springs(pose, dt);
+        *pose = sprung;
     }
 }
 

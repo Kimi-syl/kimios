@@ -23,6 +23,25 @@ pub const MAX_TEXTURES: usize = 4;
 /// Longest edge of a decoded texture. Textures are box-downsampled on load.
 pub const TEX_MAX_DIM: usize = 128;
 
+/// Morph targets (facial expressions) retained at once.
+pub const MAX_MORPH_TARGETS: usize = 16;
+/// Total sparse (vertex, delta) entries across all morph targets.
+pub const MAX_MORPH_ENTRIES: usize = 16384;
+
+/// One morph target: a contiguous run of [`MorphEntry`] records.
+#[derive(Clone, Copy, Default)]
+pub struct MorphTarget {
+    pub first: u32,
+    pub count: u32,
+}
+
+/// A sparse position delta for one vertex, as glTF morph targets store them.
+#[derive(Clone, Copy, Default)]
+pub struct MorphEntry {
+    pub vertex: u16,
+    pub delta: [f32; 3],
+}
+
 /// One skinned vertex. 56 bytes, so the vertex arena is ~448 KB.
 #[derive(Clone, Copy)]
 pub struct Vertex {
@@ -199,6 +218,12 @@ pub struct ModelArena {
     pub joint_ibm: [[f32; 16]; MAX_JOINTS],
     pub joint_count: usize,
     pub textures: [Texture; MAX_TEXTURES],
+    pub morph_targets: [MorphTarget; MAX_MORPH_TARGETS],
+    pub morph_target_count: usize,
+    pub morph_entries: [MorphEntry; MAX_MORPH_ENTRIES],
+    pub morph_entry_count: usize,
+    /// Per-target weights, driven by the expression system each frame.
+    pub morph_weights: [f32; MAX_MORPH_TARGETS],
     /// Model-space bounds, used to frame the camera.
     pub min: Vec3,
     pub max: Vec3,
@@ -258,6 +283,11 @@ impl ModelArena {
                 Texture::empty(),
                 Texture::empty(),
             ],
+            morph_targets: [MorphTarget { first: 0, count: 0 }; MAX_MORPH_TARGETS],
+            morph_target_count: 0,
+            morph_entries: [MorphEntry { vertex: 0, delta: [0.0; 3] }; MAX_MORPH_ENTRIES],
+            morph_entry_count: 0,
+            morph_weights: [0.0; MAX_MORPH_TARGETS],
             min: Vec3::new(0.0, 0.0, 0.0),
             max: Vec3::new(0.0, 1.0, 0.0),
             loaded: false,
@@ -272,6 +302,11 @@ impl ModelArena {
         self.node_count = 0;
         self.skin_count = 0;
         self.joint_count = 0;
+        self.morph_target_count = 0;
+        self.morph_entry_count = 0;
+        for w in self.morph_weights.iter_mut() {
+            *w = 0.0;
+        }
         self.loaded = false;
         for t in self.textures.iter_mut() {
             t.loaded = false;

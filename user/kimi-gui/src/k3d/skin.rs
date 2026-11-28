@@ -194,6 +194,90 @@ pub fn damped_spring(
     current.add(velocity.scale(dt))
 }
 
+// ---------------------------------------------------------------------------
+// Secondary motion ("spring bones")
+// ---------------------------------------------------------------------------
+//
+// A VRM carries explicit spring-bone chains, but the same visual result — parts
+// of the body lagging behind the rest — can be produced generically: treat each
+// secondary bone's rotation as a damped spring chasing its target rotation from
+// the pose. That gives follow-through on any rig, including plain glTF exports,
+// without needing authored spring data.
+
+/// Per-bone angular lag state (xyz = euler lag, xyz velocity).
+static mut LAG: [[f32; 3]; BONE_COUNT] = [[0.0; 3]; BONE_COUNT];
+static mut LAG_VEL: [[f32; 3]; BONE_COUNT] = [[0.0; 3]; BONE_COUNT];
+
+/// Bones that should carry follow-through: limbs, head, neck. Core bones (hips,
+/// spine, chest) stay rigid so the body does not feel rubbery.
+fn is_secondary(bone: usize) -> bool {
+    matches!(
+        bone as u8,
+        BONE_HEAD
+            | BONE_NECK
+            | BONE_LEFT_UPPER_ARM
+            | BONE_LEFT_LOWER_ARM
+            | BONE_LEFT_HAND
+            | BONE_RIGHT_UPPER_ARM
+            | BONE_RIGHT_LOWER_ARM
+            | BONE_RIGHT_HAND
+            | BONE_LEFT_LOWER_LEG
+            | BONE_RIGHT_LOWER_LEG
+    )
+}
+
+/// Advance the spring state for `dt` seconds and return a pose with lag applied.
+///
+/// The lag is additive on top of the pose rotation, so the primary animation is
+/// unchanged and only the follow-through differs.
+pub fn apply_springs(pose: &Pose, dt: f32) -> Pose {
+    let dt = dt.clamp(0.0, 0.1);
+    let mut out = *pose;
+    if dt <= 0.0 {
+        return out;
+    }
+    // Stiffness/damping tuned for a small character: visible but not floaty.
+    const STIFFNESS: f32 = 90.0;
+    const DAMPING: f32 = 12.0;
+
+    unsafe {
+        let lag = &mut *core::ptr::addr_of_mut!(LAG);
+        let vel = &mut *core::ptr::addr_of_mut!(LAG_VEL);
+        for b in 0..BONE_COUNT {
+            if !is_secondary(b) {
+                continue;
+            }
+            for axis in 0..3 {
+                // Target lag is zero: the spring returns to the pose rotation.
+                let x = lag[b][axis];
+                let v = vel[b][axis];
+                let accel = -STIFFNESS * x - DAMPING * v;
+                let nv = v + accel * dt;
+                lag[b][axis] = x + nv * dt;
+                vel[b][axis] = nv;
+            }
+            let base = pose.rotation[b];
+            let extra = Quat::from_euler(lag[b][0], lag[b][1], lag[b][2]);
+            out.rotation[b] = base.mul(extra).normalised();
+        }
+    }
+    out
+}
+
+/// Feed an impulse into the spring state, e.g. when the pet is tapped.
+pub fn spring_impulse(x: f32, y: f32) {
+    unsafe {
+        let vel = &mut *core::ptr::addr_of_mut!(LAG_VEL);
+        for b in 0..BONE_COUNT {
+            if !is_secondary(b) {
+                continue;
+            }
+            vel[b][0] += x;
+            vel[b][1] += y;
+        }
+    }
+}
+
 #[allow(dead_code)]
 fn _unused(_: u8) -> u8 {
     BONE_NONE
