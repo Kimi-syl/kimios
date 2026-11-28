@@ -13,7 +13,12 @@ Checks (and prints):
   * skins: inverseBindMatrices accessor (MAT4, one per joint)
   * images: embedded in the BIN chunk (bufferView, no URI), mimeType, PNG size
   * nodes: humanoid bone names survived export
+  * morph targets: meshes[].primitives[].targets[], extras.targetNames order,
+    dense (non-sparse) POSITION deltas and how many vertices each target moves
 Exit code 0 if every required feature is present, 1 otherwise.
+
+    python tools/blender/verify_glb.py assets/models/testchar.glb \
+        --expect-morphs blink,happy,surprised
 """
 import json
 import os
@@ -100,7 +105,7 @@ def png_size(blob):
 
 
 # --------------------------------------------------------------------------- audit
-def audit(path, verbose=True):
+def audit(path, verbose=True, expect_morphs=None):
     rep = {"path": path, "errors": [], "warnings": [], "ok": False}
     g = parse_glb(path)
     gltf, binc, hdr = g["json"], g["bin"], g["header"]
@@ -245,6 +250,62 @@ def audit(path, verbose=True):
     if not rep["images"]:
         rep["errors"].append("no embedded texture image")
 
+    # ---- morph targets (facial expressions) --------------------------------
+    rep["morph"] = {"count": 0, "names": [], "targets": [], "weights": None}
+    for mi, mesh in enumerate(meshes):
+        names = (mesh.get("extras") or {}).get("targetNames")
+        prim_list = mesh.get("primitives", [])
+        ntargets = max([len(p.get("targets", [])) for p in prim_list] or [0])
+        if ntargets:
+            rep["morph"]["count"] = max(rep["morph"]["count"], ntargets)
+            rep["morph"]["names"] = list(names or [])
+        if names is not None and len(names) != ntargets:
+            rep["errors"].append("mesh %d: extras.targetNames has %d entries but %d morph targets"
+                                 % (mi, len(names), ntargets))
+        if mesh.get("weights") is not None:
+            rep["morph"]["weights"] = mesh["weights"]
+        for pi, prim in enumerate(prim_list):
+            attrs = prim.get("attributes", {})
+            base_count = gltf["accessors"][attrs["POSITION"]]["count"] if "POSITION" in attrs else 0
+            for ti, target in enumerate(prim.get("targets", [])):
+                entry = {"mesh": mi, "prim": pi, "index": ti,
+                         "name": names[ti] if names and ti < len(names) else None,
+                         "attrs": sorted(target.keys()), "sparse": False,
+                         "accessor": None, "count": None,
+                         "delta_count": None, "max_delta": None}
+                if "POSITION" not in target:
+                    rep["errors"].append("mesh %d prim %d target %d has no POSITION"
+                                         % (mi, pi, ti))
+                    rep["morph"]["targets"].append(entry)
+                    continue
+                ai = target["POSITION"]
+                acc = gltf["accessors"][ai]
+                entry.update(accessor=ai, type=acc["type"], count=acc["count"],
+                             sparse="sparse" in acc)
+                if acc["count"] != base_count:
+                    rep["errors"].append(
+                        "mesh %d prim %d target %d delta count %d != POSITION count %d"
+                        % (mi, pi, ti, acc["count"], base_count))
+                if entry["sparse"]:
+                    rep["errors"].append(
+                        "mesh %d prim %d target %d is a SPARSE accessor (simple loaders cannot decode it)"
+                        % (mi, pi, ti))
+                else:
+                    data = accessor_data(gltf, binc, ai)
+                    entry["delta_count"] = sum(
+                        1 for d in data if d[0] or d[1] or d[2])
+                    entry["max_delta"] = max(
+                        (max(abs(v) for v in d) for d in data), default=0.0)
+                rep["morph"]["targets"].append(entry)
+    if expect_morphs:
+        want = list(expect_morphs)
+        got = rep["morph"]["names"]
+        if got != want:
+            rep["errors"].append("expected morph target names %r, got %r" % (want, got))
+        if rep["morph"]["count"] < len(want):
+            rep["errors"].append("expected >= %d morph targets, found %d"
+                                 % (len(want), rep["morph"]["count"]))
+
     # ---- humanoid bone names
     rep["missing_bones"] = [b for b in HUMANOID_BONES if b not in node_names]
     rep["humanoid_bones_found"] = [b for b in HUMANOID_BONES if b in node_names]
@@ -272,10 +333,10 @@ def print_report(rep):
     print("chunks      : %s" % ", ".join(
         "%s(%d)" % (CHUNK_NAMES.get(c[0], c[0].decode("ascii", "replace").strip("\x00 ")), c[1])
         for c in rep.get("chunks", [])))
-    print("counts      : meshes=%d primitives=%d vertices=%d triangles=%d accessors=%d skins=%d images=%d nodes=%d"
+    print("counts      : meshes=%d primitives=%d vertices=%d triangles=%d accessors=%d skins=%d images=%d nodes=%d morph_targets=%d"
           % (len(rep["gltf"].get("meshes", [])), len(rep.get("prims", [])), rep.get("vertices", 0),
              rep.get("triangles", 0), rep["accessors"], len(rep["skins"]),
-             len(rep.get("images", [])), len(rep["node_names"])))
+             len(rep.get("images", [])), len(rep["node_names"]), rep.get("morph", {}).get("count", 0)))
     if rep.get("bbox_min"):
         print("bbox        : min=(%.3f, %.3f, %.3f) max=(%.3f, %.3f, %.3f)"
               % (tuple(rep["bbox_min"]) + tuple(rep["bbox_max"])))
@@ -305,6 +366,20 @@ def print_report(rep):
               % (im["index"], im.get("mimeType"), im.get("bufferView") is not None,
                  im.get("width", 0), im.get("height", 0), im.get("bytes"), im.get("name")))
     print("-" * 78)
+    print("morph targets")
+    m = rep.get("morph", {})
+    if m.get("count"):
+        print("  count=%d  extras.targetNames=%r  mesh.weights=%r"
+              % (m["count"], m["names"], m.get("weights")))
+        for t in m["targets"]:
+            print("  target %d %-10s attrs=%s  POSITION accessor=%s count=%s  "
+                  "non-zero deltas=%s  max_delta=%.5f%s"
+                  % (t["index"], t.get("name"), ",".join(t["attrs"]), t.get("accessor"),
+                     t.get("count"), t.get("delta_count"), t.get("max_delta") or 0.0,
+                     "  SPARSE!" if t.get("sparse") else ""))
+    else:
+        print("  none")
+    print("-" * 78)
     print("humanoid bones : %d/%d present" % (len(rep["humanoid_bones_found"]), len(HUMANOID_BONES)))
     if rep["missing_bones"]:
         print("  MISSING: %s" % ", ".join(rep["missing_bones"]))
@@ -321,6 +396,14 @@ def print_report(rep):
 
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
+    expect = None
+    if "--expect-morphs" in argv:
+        i = argv.index("--expect-morphs")
+        if i + 1 >= len(argv):
+            print("ERROR: --expect-morphs needs a comma-separated name list")
+            return 2
+        expect = [n.strip() for n in argv[i + 1].split(",") if n.strip()]
+        del argv[i:i + 2]
     if not argv or argv[0] in ("-h", "--help"):
         print(__doc__)
         return 0 if argv else 2
@@ -330,7 +413,7 @@ def main(argv=None):
             print("ERROR: no such file: %s" % path)
             rc = 1
             continue
-        rep = audit(path)
+        rep = audit(path, expect_morphs=expect)
         if not rep["ok"]:
             rc = 1
     return rc

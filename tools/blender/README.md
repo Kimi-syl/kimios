@@ -40,13 +40,17 @@ Outputs, relative to the repo root:
 
 | file | what |
 |---|---|
-| `assets/models/testchar.glb` | 53,776-byte skinned GLB (see contract below) |
+| `assets/models/testchar.glb` | 78,004-byte skinned GLB with 3 facial morph targets (see contract below) |
 | `assets/models/testchar_contact.png` | 1920×600 four-pose proof render (T-pose / wave / walk / kick) |
+| `assets/models/testchar_expressions.png` | *optional* 1600×500 four-panel proof: neutral / blink / happy / surprised |
 
 The character is built entirely from code — no external model, no add-on, no MCP:
 a lofted torso, tapered limb tubes, box head/hands/feet, a hand-drawn 256×256
-palette atlas (face on the front of the head, cyan diamond on the chest), a
-17-bone humanoid armature and distance-to-bone-segment skin weights.
+palette atlas (facial texture atlas plus a cyan diamond on the chest), a 17-bone
+humanoid armature and distance-to-bone-segment skin weights. Eyes and mouth are
+small real quads in front of the face, and three shape keys move them:
+`blink` squashes the eye quads flat onto their lower edge, `happy` lifts the
+mouth corners into a smile, `surprised` opens the mouth and widens the eyes.
 
 Options (all after `--`):
 
@@ -54,6 +58,7 @@ Options (all after `--`):
 |---|---|---|
 | `--out PATH` | `<repo>/assets/models/testchar.glb` | GLB destination |
 | `--contact PATH` | `<repo>/assets/models/testchar_contact.png` | contact-sheet destination |
+| `--expressions PATH` | off | also render the 4-panel shape-key proof (e.g. `assets/models/testchar_expressions.png`) |
 | `--tex-size N` | `256` | atlas size, multiple of 8, ≤ 256 (128 and 256 tested) |
 | `--no-contact` | off | skip the render |
 | `--save-blend PATH` | off | also save the generated `.blend` for inspection |
@@ -66,13 +71,16 @@ and exits non-zero if any contract feature is missing.
 ## 2. Verify a GLB (no Blender required)
 
 ```powershell
-python tools/blender/verify_glb.py assets/models/testchar.glb
+python tools/blender/verify_glb.py assets/models/testchar.glb `
+    --expect-morphs blink,happy,surprised
 ```
 
 Prints the GLB header/chunks, primitive attribute table, skin + joint names,
-influence histogram, embedded texture dimensions, humanoid-bone coverage and a
-PASS/FAIL. Exit code 0 = pass. It accepts several paths at once and is imported
-by `make_test_character.py`, so there is exactly one implementation of the audit.
+influence histogram, embedded texture dimensions, morph targets (count, names,
+delta counts), humanoid-bone coverage and a PASS/FAIL. Exit code 0 = pass.
+`--expect-morphs` makes it fail unless `extras.targetNames` matches that exact
+order. It accepts several paths at once and is imported by
+`make_test_character.py`, so there is exactly one implementation of the audit.
 
 Real output for the shipped asset:
 
@@ -80,26 +88,32 @@ Real output for the shipped asset:
 ==============================================================================
 GLB AUDIT  assets\models\testchar.glb
 ==============================================================================
-container   : magic='glTF' version=2 declared=53776 actual=53776 bytes  OK
-chunks      : JSON(3720), BIN(50028)
-counts      : meshes=1 primitives=1 vertices=600 triangles=524 accessors=7 skins=1 images=1 nodes=19
+container   : magic='glTF' version=2 declared=78004 actual=78004 bytes  OK
+chunks      : JSON(4496), BIN(73480)
+counts      : meshes=1 primitives=1 vertices=616 triangles=534 accessors=10 skins=1 images=1 nodes=19 morph_targets=3
 bbox        : min=(-0.745, 0.000, -0.126) max=(0.745, 1.680, 0.185)
 ------------------------------------------------------------------------------
 primitives
-  mesh 0 prim 0 :  524 tris   600 verts  mode=4  attrs=JOINTS_0,NORMAL,POSITION,TEXCOORD_0,WEIGHTS_0
-      JOINTS_0    accessor 3   VEC4   UNSIGNED_BYTE   count=600
-      NORMAL      accessor 1   VEC3   FLOAT           count=600
-      POSITION    accessor 0   VEC3   FLOAT           count=600
-      TEXCOORD_0  accessor 2   VEC2   FLOAT           count=600
-      WEIGHTS_0   accessor 4   VEC4   FLOAT           count=600
+  mesh 0 prim 0 :  534 tris   616 verts  mode=4  attrs=JOINTS_0,NORMAL,POSITION,TEXCOORD_0,WEIGHTS_0
+      JOINTS_0    accessor 3   VEC4   UNSIGNED_BYTE   count=616
+      NORMAL      accessor 1   VEC3   FLOAT           count=616
+      POSITION    accessor 0   VEC3   FLOAT           count=616
+      TEXCOORD_0  accessor 2   VEC2   FLOAT           count=616
+      WEIGHTS_0   accessor 4   VEC4   FLOAT           count=616
 ------------------------------------------------------------------------------
 skins
-  skin 0 : 17 joints, inverseBindMatrices accessor=6 type=MAT4 count=17
+  skin 0 : 17 joints, inverseBindMatrices accessor=9 type=MAT4 count=17
            joints: hips, leftUpperLeg, leftLowerLeg, leftFoot, rightUpperLeg, rightLowerLeg, rightFoot, spine, chest, leftUpperArm, leftLowerArm, leftHand, neck, head, rightUpperArm, rightLowerArm, rightHand
-  max JOINTS_0 index=16  max influences/vertex=4  histogram={'2': 248, '3': 232, '4': 120}
+  max JOINTS_0 index=16  max influences/vertex=4  histogram={'2': 264, '3': 232, '4': 120}
 ------------------------------------------------------------------------------
 textures
-  image 0 : mimeType=image/png embedded=True size=256x256 bytes=14595 name='testchar_basecolor'
+  image 0 : mimeType=image/png embedded=True size=256x256 bytes=14979 name='testchar_basecolor'
+------------------------------------------------------------------------------
+morph targets
+  count=3  extras.targetNames=['blink', 'happy', 'surprised']  mesh.weights=[0, 0, 0]
+  target 0 blink      attrs=POSITION  POSITION accessor=6 count=616  non-zero deltas=4  max_delta=0.03480
+  target 1 happy      attrs=POSITION  POSITION accessor=7 count=616  non-zero deltas=12  max_delta=0.01400
+  target 2 surprised  attrs=POSITION  POSITION accessor=8 count=616  non-zero deltas=16  max_delta=0.01300
 ------------------------------------------------------------------------------
 humanoid bones : 17/17 present
 nodes          : leftFoot, leftLowerLeg, leftUpperLeg, rightFoot, rightLowerLeg, rightUpperLeg, leftHand, leftLowerArm, leftUpperArm, head, neck, rightHand, rightLowerArm, rightUpperArm, chest, spine, hips, TestCharBody, TestCharRig
@@ -155,17 +169,25 @@ Behaviour:
 
 ## What `testchar.glb` contains
 
-* **Container** — GLB v2, one JSON chunk (3,720 B) + one BIN chunk (50,028 B),
-  one self-contained buffer (`byteLength` 50028, no external URIs, no
+* **Container** — GLB v2, one JSON chunk (4,496 B) + one BIN chunk (73,480 B),
+  one self-contained buffer (`byteLength` 73480, no external URIs, no
   `extensionsUsed`, so no Draco/meshopt decoder is required).
-* **Mesh** — one primitive, `mode` 4 (TRIANGLES), **524 triangles / 1,572
-  indices** (`UNSIGNED_SHORT`), 600 vertices after UV/normal splitting.
+* **Mesh** — one primitive, `mode` 4 (TRIANGLES), **534 triangles / 1,602
+  indices** (`UNSIGNED_SHORT`), 616 vertices after UV/normal splitting.
   Attributes `POSITION`, `NORMAL`, `TEXCOORD_0`, `JOINTS_0`, `WEIGHTS_0`,
   plus `indices`.
+* **Morph targets (facial expressions)** — `primitives[0].targets` has exactly
+  **3 entries**, in this order, with `meshes[0].extras.targetNames` matching:
+  `['blink', 'happy', 'surprised']`. Every target is `{ "POSITION": accessor }`
+  — dense `VEC3 / FLOAT`, 616 deltas each, no `NORMAL` targets and **no sparse
+  accessors** (a plain loader can iterate them). Only the face vertices move:
+  blink = 4 non-zero deltas (max 34.8 mm), happy = 12 (14.3 mm),
+  surprised = 16 (13.6 mm). `meshes[0].weights` is `[0, 0, 0]`, i.e. the asset
+  rest state is neutral; the runtime drives the three weights.
 * **Skin** — one skin, 17 joints, `inverseBindMatrices` = MAT4 × 17.
   `JOINTS_0` is `VEC4 / UNSIGNED_BYTE`; `WEIGHTS_0` is `VEC4 / FLOAT`,
   normalised to 1.0, **up to 4 influences per vertex**
-  (120 vertices use 4, 232 use 3, 248 use 2).
+  (120 vertices use 4, 232 use 3, 264 use 2).
 * **Armature** — the 17 standard humanoid bones survive export with their exact
   names:
   `hips, spine, chest, neck, head, leftUpperArm, leftLowerArm, leftHand,
@@ -199,6 +221,15 @@ Behaviour:
    inside their patch, so mipmaps only soften the edges.
 7. `POSITION`/`NORMAL`/`TEXCOORD_0` are all FLOAT and non-interleaved; accessors
    have no sparse data.
+8. **Morphs**: `extras.targetNames` is on the *mesh* (`meshes[0].extras`), in the
+   same order as `primitives[0].targets`. `targets[i]` is a POSITION delta
+   accessor with the same vertex count as the primitive; evaluate with
+   `pos = base_pos + sum(weight_i * delta_i)` in mesh space, *before* skinning.
+   The three weights are mesh-level defaults `meshes[0].weights = [0,0,0]`
+   (there are no node-level `weights`), so the neutral face is the rest state.
+9. `NORMAL` deltas are deliberately absent (`export_morph_normal` pinned off);
+   a renderer using morphs can keep the base normals, which is fine at these
+   sub-centimetre deltas, or recompute them from the morphed positions.
 
 ---
 
@@ -219,6 +250,16 @@ us up:
   `export_influence_nb` (int) + `export_all_influences`, and there are new
   switches used here: `export_def_bones`, `export_rest_position_armature`,
   `export_try_sparse_sk`, `export_optimize_animation_size`, ….
+* **`shape_key_add()` creates keys at `value = 1.0`** (older Blender defaulted
+  to 0.0). Left alone, all three expressions export as *active* and the glTF
+  carries `meshes[0].weights = [1,1,1]`; the generator explicitly zeroes them so
+  the rest state is `[0,0,0]`. Verified with a probe, not assumed.
+* **Morph exporter defaults are not loader-friendly.** `export_morph_normal`
+  defaults to `True` (adds NORMAL delta accessors) and `export_try_sparse_sk`
+  defaults to `True`, which emits **sparse accessors** whenever only a handful of
+  vertices move — exactly the facial-expression case. Both are pinned off, so
+  targets are dense POSITION-only. `extras.targetNames` is written even with
+  `export_extras=False`; `export_extras` only covers custom properties.
 * **`Object.vertex_groups` is not on `bpy.types.Object`** — a
   `hasattr(bpy.types.Object, "vertex_groups")` capability probe returns `False`,
   while a real object instance has it. Probe instances, not RNA classes.
@@ -256,6 +297,13 @@ us up:
   new parts only need an allow-list entry.
 * **Texture** — `PATCHES` (8×8 grid of sRGB colours) and `make_atlas()`; all
   drawing uses normalised patch coordinates, so `--tex-size 128` works too.
+* **Shape keys** — `EXPRESSIONS` + `add_expression_shape_keys()`. The face is
+  geometry (two eye quads + a 4×2 mouth grid, ~5 mm in front of the head box,
+  weighted to the head bone) precisely so morphs have something to move.
+  Deltas are computed from the basis positions; adding an expression means
+  appending a name to `EXPRESSIONS`, adding a delta block, and storing its rest
+  value at 0. `--expressions PATH` renders the proof panel, and the auditor
+  fails the build unless `extras.targetNames` match `EXPRESSIONS` exactly.
 * **Budgets** — the verifier fails the build if triangles ≥ 4000 or any texture
   edge > 256 px, so regressions cannot slip through silently.
 
@@ -265,8 +313,8 @@ us up:
 
 | file | purpose |
 |---|---|
-| `make_test_character.py` | procedural rig + mesh + atlas; exports GLB and renders the contact sheet |
-| `verify_glb.py` | standalone (or imported) GLB container/accessor/skin/texture audit |
+| `make_test_character.py` | procedural rig + mesh + atlas + facial shape keys; exports the GLB and renders the contact sheet / expression proof |
+| `verify_glb.py` | standalone (or imported) GLB container/accessor/skin/texture/morph audit |
 | `bake_vrm.py` | VRM/glTF/FBX → 16 × 96 px 4×4 sprite pack, camera fitted to all poses |
 | `README.md` | this file |
 

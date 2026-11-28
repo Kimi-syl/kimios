@@ -17,14 +17,29 @@
 //! `PNG_MAX_DIM` and reused, never reallocated. The loader is therefore not
 //! re-entrant, which is fine for the single-threaded GUI.
 //!
+//! Supported beyond the base format:
+//! - sparse accessors (`sparse.indices` + `sparse.values`), including the common
+//!   morph-target case of a sparse accessor with *no* base `bufferView`, whose
+//!   base values are all zero. Substitution happens per element inside
+//!   [`ElemStream`], so every accessor user (positions, normals, UVs, joints,
+//!   weights, indices, IBMs, morph deltas) gets it for free;
+//! - morph targets: `meshes[].primitives[].targets[].POSITION` deltas are
+//!   flattened into `ModelArena::morph_entries`/`morph_targets`, the mesh's
+//!   `extras.targetNames` are kept loader-side for [`morph_index_by_name`], and
+//!   VRM 1.0 `expressions.preset` / VRM 0.x `blendShapeMaster` preset binds are
+//!   resolved for [`morph_preset_index`]. Arena overflow truncates the target
+//!   list instead of failing the load.
+//!
 //! Limits / deliberately unsupported (each fails soft or with a `LoadError`):
 //! - interlaced PNG, colour types other than RGB(2)/RGBA(6), 16-bit channels,
 //!   source images larger than `PNG_MAX_DIM` (texture is skipped, the material
 //!   keeps its base colour);
 //! - JPEG / external-URI images (texture skipped);
-//! - sparse accessors, morph targets, animations, MToon shading (materials get
-//!   a flat "unlit" flag instead), non-triangle primitive modes (skipped);
+//! - animations, MToon shading (materials get a flat "unlit" flag instead),
+//!   non-triangle primitive modes (skipped);
 //! - more than `MAX_VERTS`/`MAX_TRIS`/`MAX_NODES`/... -> `LoadError::ArenaFull`.
+//! - only the first morph target bind of a VRM preset expression is recorded,
+//!   and only six presets (blink/happy/angry/sad/relaxed/surprised) are mapped.
 //!
 //! Every failure path returns a [`LoadError`]; there is no `unwrap`, no
 //! indexing that a bounds check cannot prove safe, and no arithmetic that can
@@ -33,9 +48,9 @@
 use core::cell::UnsafeCell;
 
 use super::model::{
-    AlphaMode, LoadError, Material, ModelArena, Node, Primitive, ReadAt, Skin, Texture, BONE_NONE,
-    MAX_JOINTS, MAX_MATERIALS, MAX_NODES, MAX_PRIMS, MAX_TEXTURES, MAX_TRIS, MAX_VERTS,
-    NO_TEXTURE, TEX_MAX_DIM,
+    AlphaMode, LoadError, Material, ModelArena, MorphEntry, MorphTarget, Node, Primitive, ReadAt,
+    Skin, Texture, BONE_NONE, MAX_JOINTS, MAX_MATERIALS, MAX_MORPH_ENTRIES, MAX_MORPH_TARGETS,
+    MAX_NODES, MAX_PRIMS, MAX_TEXTURES, MAX_TRIS, MAX_VERTS, NO_TEXTURE, TEX_MAX_DIM,
 };
 use super::skin::{
     BONE_CHEST, BONE_HEAD, BONE_HIPS, BONE_LEFT_FOOT, BONE_LEFT_HAND, BONE_LEFT_LOWER_ARM,
@@ -54,8 +69,14 @@ use libkimi::apk::inflate;
 /// are then reported as `Unsupported` instead of failing the whole load.
 const MAX_VIEWS: usize = 256;
 /// accessors kept. Morph-target accessors typically sit after the geometry
-/// ones, so dropping the tail loses nothing the loader needs.
+/// ones; an accessor beyond the cap is reported as `Unsupported`, which for a
+/// morph target means that target is recorded with zero deltas rather than
+/// failing the model.
 const MAX_ACC: usize = 384;
+/// sparse accessor descriptors kept. Sparse accessors are rare (morph targets
+/// use them one per target); past the cap the accessor is treated as
+/// unsupported, which again only costs a morph target.
+const MAX_SPARSE: usize = 32;
 /// images kept (each is one PNG blob).
 const MAX_IMAGES: usize = 8;
 /// Flat node->children storage (each parent's list is contiguous).
@@ -92,6 +113,172 @@ impl<const N: usize> SharedBuf<N> {
 
 static PNG_IDAT: SharedBuf<PNG_IDAT_CAP> = SharedBuf(UnsafeCell::new([0; PNG_IDAT_CAP]));
 static PNG_RAW: SharedBuf<PNG_RAW_CAP> = SharedBuf(UnsafeCell::new([0; PNG_RAW_CAP]));
+
+// ---------------------------------------------------------------------------
+// Morph-target bookkeeping (names and VRM expression bindings)
+// ---------------------------------------------------------------------------
+//
+// The arena has no string storage, so `meshes[].extras.targetNames` and the VRM
+// preset -> target bindings live in this one loader-side set, just like the PNG
+// scratch above. It is filled while `load` runs and read back afterwards through
+// [`morph_index_by_name`] / [`morph_preset_index`].
+
+/// Longest morph-target name retained; longer names are truncated.
+const MORPH_NAME_LEN: usize = 32;
+
+/// Number of VRM preset expressions this loader maps.
+pub const MORPH_PRESET_COUNT: usize = 6;
+/// Preset slot for VRM `blink` (see [`morph_preset_index`]).
+pub const MORPH_PRESET_BLINK: usize = 0;
+/// Preset slot for VRM `happy`.
+pub const MORPH_PRESET_HAPPY: usize = 1;
+/// Preset slot for VRM `angry`.
+pub const MORPH_PRESET_ANGRY: usize = 2;
+/// Preset slot for VRM `sad`.
+pub const MORPH_PRESET_SAD: usize = 3;
+/// Preset slot for VRM `relaxed`.
+pub const MORPH_PRESET_RELAXED: usize = 4;
+/// Preset slot for VRM `surprised`.
+pub const MORPH_PRESET_SURPRISED: usize = 5;
+
+/// Lower-case VRM preset name for a slot; also used as the name fallback when a
+/// file has no VRM expression bindings but does name its targets.
+fn preset_name(slot: usize) -> &'static [u8] {
+    match slot {
+        MORPH_PRESET_BLINK => b"blink",
+        MORPH_PRESET_HAPPY => b"happy",
+        MORPH_PRESET_ANGRY => b"angry",
+        MORPH_PRESET_SAD => b"sad",
+        MORPH_PRESET_RELAXED => b"relaxed",
+        MORPH_PRESET_SURPRISED => b"surprised",
+        _ => b"",
+    }
+}
+
+/// Fixed-capacity morph metadata kept outside the arena.
+#[derive(Clone, Copy)]
+struct MorphBook {
+    /// Named targets, at most one name per flat target.
+    nnames: usize,
+    name: [[u8; MORPH_NAME_LEN]; MAX_MORPH_TARGETS],
+    name_len: [u8; MAX_MORPH_TARGETS],
+    /// Flat arena target index each name belongs to (-1 when unset).
+    name_target: [i16; MAX_MORPH_TARGETS],
+    /// Flat target -> mesh index and target index within that mesh. Needed to
+    /// resolve VRM binds, which address (node/mesh, target index), to the flat
+    /// arena list.
+    flat_mesh: [u16; MAX_MORPH_TARGETS],
+    flat_k: [u8; MAX_MORPH_TARGETS],
+    nflat: usize,
+    /// VRM 1.0 bind: node whose mesh carries the target (-1 unset).
+    preset_node: [i16; MORPH_PRESET_COUNT],
+    /// VRM 0.x bind: mesh index directly (-1 unset).
+    preset_mesh: [i16; MORPH_PRESET_COUNT],
+    /// Target index inside that mesh (-1 unset).
+    preset_k: [i16; MORPH_PRESET_COUNT],
+    /// Resolved flat arena target per preset (-1 unset).
+    preset_flat: [i16; MORPH_PRESET_COUNT],
+}
+
+impl MorphBook {
+    const fn empty() -> Self {
+        MorphBook {
+            nnames: 0,
+            name: [[0u8; MORPH_NAME_LEN]; MAX_MORPH_TARGETS],
+            name_len: [0; MAX_MORPH_TARGETS],
+            name_target: [-1; MAX_MORPH_TARGETS],
+            flat_mesh: [0; MAX_MORPH_TARGETS],
+            flat_k: [0; MAX_MORPH_TARGETS],
+            nflat: 0,
+            preset_node: [-1; MORPH_PRESET_COUNT],
+            preset_mesh: [-1; MORPH_PRESET_COUNT],
+            preset_k: [-1; MORPH_PRESET_COUNT],
+            preset_flat: [-1; MORPH_PRESET_COUNT],
+        }
+    }
+}
+
+struct BookStore(UnsafeCell<MorphBook>);
+
+// SAFETY: same single-GUI-thread contract as `SharedBuf`; the table is written
+// only from `load` and read only from the query helpers below.
+unsafe impl Sync for BookStore {}
+
+static MORPH_BOOK: BookStore = BookStore(UnsafeCell::new(MorphBook::empty()));
+
+fn morph_book() -> &'static mut MorphBook {
+    // SAFETY: see `BookStore`.
+    unsafe { &mut *MORPH_BOOK.0.get() }
+}
+
+#[allow(dead_code)]
+fn bytes_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut i = 0;
+    while i < a.len() {
+        if a[i] != b[i] {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+
+fn name_eq_ci(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut i = 0;
+    while i < a.len() {
+        if a[i].to_ascii_lowercase() != b[i].to_ascii_lowercase() {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+
+/// Look up a flat arena morph-target index by the mesh's `extras.targetNames`
+/// entry, e.g. `gltf::morph_index_by_name(b"blink")`.
+///
+/// The comparison is exact (case-sensitive) on the bytes retained; names longer
+/// than 32 bytes are truncated. Returns `None` when the model has no such
+/// target. Only meaningful after a successful [`load`].
+#[allow(dead_code)] // Public API for the expression driver.
+pub fn morph_index_by_name(name: &[u8]) -> Option<usize> {
+    let book = morph_book();
+    let mut i = 0;
+    while i < book.nnames {
+        let n = book.name_len[i] as usize;
+        let target = book.name_target[i];
+        if target >= 0 && n == name.len() && bytes_eq(&book.name[i][..n], name) {
+            return Some(target as usize);
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Flat arena morph-target index for a VRM preset expression slot (one of the
+/// `MORPH_PRESET_*` constants), or `None` when the model does not carry it.
+///
+/// Resolution order: explicit VRM 1.0 `expressions.preset.<name>` bind, then
+/// VRM 0.x `blendShapeMaster` group bind, then a case-insensitive match against
+/// `extras.targetNames`. Only meaningful after a successful [`load`].
+#[allow(dead_code)] // Public API for the expression driver.
+pub fn morph_preset_index(preset: usize) -> Option<usize> {
+    if preset >= MORPH_PRESET_COUNT {
+        return None;
+    }
+    let target = morph_book().preset_flat[preset];
+    if target >= 0 {
+        Some(target as usize)
+    } else {
+        None
+    }
+}
 
 // ---------------------------------------------------------------------------
 // GLB container
@@ -658,6 +845,23 @@ struct View {
     stride: u32,
 }
 
+/// One glTF `sparse` descriptor, as parsed from `accessors[].sparse`.
+#[derive(Clone, Copy)]
+struct Sparse {
+    /// Number of substituted elements.
+    count: u32,
+    /// View holding the indices, or -1.
+    idx_view: i16,
+    /// Indices component type (5121/5123/5125).
+    idx_comp: u16,
+    /// `sparse.indices.byteOffset`.
+    idx_off: u64,
+    /// View holding the values, or -1.
+    val_view: i16,
+    /// `sparse.values.byteOffset`.
+    val_off: u64,
+}
+
 #[derive(Clone, Copy)]
 struct Acc {
     count: u32,
@@ -667,7 +871,8 @@ struct Acc {
     /// 0 = invalid/unmapped type; otherwise component count.
     comps: u8,
     normalized: bool,
-    sparse: bool,
+    /// Index into [`State::sparses`], -1 for none, -2 when the table was full.
+    sparse: i16,
 }
 
 #[derive(Clone, Copy)]
@@ -693,6 +898,8 @@ struct State {
     accs: [Acc; MAX_ACC],
     naccs: usize,
     accs_total: usize,
+    sparses: [Sparse; MAX_SPARSE],
+    nsparse: usize,
     images: [Img; MAX_IMAGES],
     nimages: usize,
     /// texture slot -> image index.
@@ -706,6 +913,8 @@ struct State {
     nbone: usize,
     /// Accessor index holding the skin's inverse bind matrices, or -1.
     skin_ibm: i32,
+    /// Morph-target names and VRM preset bindings gathered across both passes.
+    morph: MorphBook,
 }
 
 const EMPTY_VIEW: View = View {
@@ -720,7 +929,15 @@ const EMPTY_ACC: Acc = Acc {
     comp: 0,
     comps: 0,
     normalized: false,
-    sparse: false,
+    sparse: -1,
+};
+const EMPTY_SPARSE: Sparse = Sparse {
+    count: 0,
+    idx_view: -1,
+    idx_comp: 0,
+    idx_off: 0,
+    val_view: -1,
+    val_off: 0,
 };
 const EMPTY_IMG: Img = Img {
     view: -1,
@@ -741,6 +958,8 @@ impl State {
             accs: [EMPTY_ACC; MAX_ACC],
             naccs: 0,
             accs_total: 0,
+            sparses: [EMPTY_SPARSE; MAX_SPARSE],
+            nsparse: 0,
             images: [EMPTY_IMG; MAX_IMAGES],
             nimages: 0,
             tex_src: [-1; MAX_TEXTURES],
@@ -752,6 +971,7 @@ impl State {
             bone_pairs: [EMPTY_BONE; MAX_BONE_PAIRS],
             nbone: 0,
             skin_ibm: -1,
+            morph: MorphBook::empty(),
         }
     }
 }
@@ -775,6 +995,9 @@ pub fn load(read: &mut dyn ReadAt, size: u64, arena: &mut ModelArena) -> Result<
     }
 
     let mut st = State::new();
+    // The morph metadata table outlives `load` (the Lead queries it), so start
+    // every load from an empty one rather than leaving a previous model's names.
+    *morph_book() = MorphBook::empty();
 
     // Pass 1: index tables (and the humanoid map, which does not need nodes to
     // exist yet because node indices are just integers).
@@ -799,7 +1022,15 @@ pub fn load(read: &mut dyn ReadAt, size: u64, arena: &mut ModelArena) -> Result<
     // Pass 2: geometry. Accessor nodes point into the validated tables.
     {
         let mut s = Src::new(&mut *read, glb.json_off, glb.json_len);
-        parse_pass2(&mut s, &st, arena, &glb)?;
+        parse_pass2(&mut s, &mut st, arena, &glb)?;
+    }
+
+    // Morph targets parsed in pass 2 are now addressable; resolve the VRM
+    // preset binds collected in pass 1 against them, then publish the table.
+    {
+        let mut book = st.morph;
+        resolve_presets(&mut book, arena);
+        *morph_book() = book;
     }
 
     if arena.primitive_count == 0 || arena.vertex_count == 0 {
@@ -906,8 +1137,17 @@ fn parse_accessors(s: &mut Src, st: &mut State) -> Result<(), LoadError> {
                 }
                 b"normalized" => a.normalized = s.bool_val()?,
                 b"sparse" => {
-                    a.sparse = true;
-                    s.skip_value(MAX_DEPTH)?;
+                    // Keep the descriptor in the shared sparse table rather than
+                    // in `Acc`, so the (mostly sparse-free) accessor table stays
+                    // small enough to live on the loader's stack.
+                    let sp = parse_sparse(s)?;
+                    if st.nsparse < MAX_SPARSE {
+                        st.sparses[st.nsparse] = sp;
+                        a.sparse = st.nsparse as i16;
+                        st.nsparse += 1;
+                    } else {
+                        a.sparse = -2;
+                    }
                 }
                 _ => s.skip_value(MAX_DEPTH)?,
             }
@@ -922,6 +1162,71 @@ fn parse_accessors(s: &mut Src, st: &mut State) -> Result<(), LoadError> {
         }
     }
     Ok(())
+}
+
+/// Clamp an optional glTF index to `i16`, with -1 meaning "absent".
+fn i16_index(v: i64) -> i16 {
+    if v >= 0 && v <= i16::MAX as i64 {
+        v as i16
+    } else {
+        -1
+    }
+}
+
+/// Parse an accessor `sparse` object:
+/// `{ "count": N, "indices": { "bufferView", "byteOffset", "componentType" },
+///    "values": { "bufferView", "byteOffset" } }`.
+///
+/// `values` deliberately has no `componentType` of its own: the values use the
+/// enclosing accessor's component type, which is resolved in [`acc_info`].
+fn parse_sparse(s: &mut Src) -> Result<Sparse, LoadError> {
+    s.expect(b'{')?;
+    let mut sp = EMPTY_SPARSE;
+    let mut key = [0u8; KEY_MAX];
+    loop {
+        let n = match s.obj_key(&mut key)? {
+            Some(n) => n,
+            None => break,
+        };
+        match &key[..n] {
+            b"count" => sp.count = num_u32(s)?,
+            b"indices" => {
+                s.expect(b'{')?;
+                let mut k2 = [0u8; KEY_MAX];
+                loop {
+                    let m = match s.obj_key(&mut k2)? {
+                        Some(m) => m,
+                        None => break,
+                    };
+                    match &k2[..m] {
+                        b"bufferView" => sp.idx_view = i16_index(s.number_i64()?),
+                        b"byteOffset" => sp.idx_off = num_u64(s)?,
+                        b"componentType" => {
+                            sp.idx_comp = num_u32(s)?.min(u16::MAX as u32) as u16
+                        }
+                        _ => s.skip_value(MAX_DEPTH)?,
+                    }
+                }
+            }
+            b"values" => {
+                s.expect(b'{')?;
+                let mut k2 = [0u8; KEY_MAX];
+                loop {
+                    let m = match s.obj_key(&mut k2)? {
+                        Some(m) => m,
+                        None => break,
+                    };
+                    match &k2[..m] {
+                        b"bufferView" => sp.val_view = i16_index(s.number_i64()?),
+                        b"byteOffset" => sp.val_off = num_u64(s)?,
+                        _ => s.skip_value(MAX_DEPTH)?,
+                    }
+                }
+            }
+            _ => s.skip_value(MAX_DEPTH)?,
+        }
+    }
+    Ok(sp)
 }
 
 fn parse_nodes(s: &mut Src, st: &mut State, arena: &mut ModelArena) -> Result<(), LoadError> {
@@ -1430,6 +1735,7 @@ fn parse_vrmc_vrm(s: &mut Src, st: &mut State) -> Result<(), LoadError> {
                     }
                 }
             }
+            b"expressions" => parse_vrm1_expressions(s, st)?,
             _ => s.skip_value(MAX_DEPTH)?,
         }
     }
@@ -1497,6 +1803,7 @@ fn parse_vrm0(s: &mut Src, st: &mut State) -> Result<(), LoadError> {
                     }
                 }
             }
+            b"blendShapeMaster" => parse_vrm0_blendshapes(s, st)?,
             _ => s.skip_value(MAX_DEPTH)?,
         }
     }
@@ -1531,6 +1838,235 @@ fn parse_vrm0_bone(s: &mut Src, st: &mut State) -> Result<(), LoadError> {
         add_bone(st, node, bone, fallback);
     }
     Ok(())
+}
+
+// --- VRM expressions -> morph target bindings -------------------------------
+
+/// Parse `extensions.VRMC_vrm.expressions` (VRM 1.0).
+fn parse_vrm1_expressions(s: &mut Src, st: &mut State) -> Result<(), LoadError> {
+    s.expect(b'{')?;
+    let mut key = [0u8; KEY_MAX];
+    loop {
+        let n = match s.obj_key(&mut key)? {
+            Some(n) => n,
+            None => break,
+        };
+        match &key[..n] {
+            b"preset" => parse_vrm1_presets(s, st)?,
+            _ => s.skip_value(MAX_DEPTH)?,
+        }
+    }
+    Ok(())
+}
+
+/// `expressions.preset` is an object keyed by expression name.
+fn parse_vrm1_presets(s: &mut Src, st: &mut State) -> Result<(), LoadError> {
+    s.expect(b'{')?;
+    let mut key = [0u8; KEY_MAX];
+    loop {
+        let n = match s.obj_key(&mut key)? {
+            Some(n) => n,
+            None => break,
+        };
+        match vrm1_preset_slot(&key[..n]) {
+            Some(slot) => parse_vrm1_expression(s, st, slot)?,
+            None => s.skip_value(MAX_DEPTH)?,
+        }
+    }
+    Ok(())
+}
+
+fn vrm1_preset_slot(name: &[u8]) -> Option<usize> {
+    match name {
+        b"blink" => Some(MORPH_PRESET_BLINK),
+        b"happy" => Some(MORPH_PRESET_HAPPY),
+        b"angry" => Some(MORPH_PRESET_ANGRY),
+        b"sad" => Some(MORPH_PRESET_SAD),
+        b"relaxed" => Some(MORPH_PRESET_RELAXED),
+        b"surprised" => Some(MORPH_PRESET_SURPRISED),
+        _ => None,
+    }
+}
+
+/// One preset expression object; only its `morphTargetBinds` list matters. The
+/// first bind that names a node and a target index wins; additional binds (one
+/// expression driving several targets) are parsed and dropped.
+fn parse_vrm1_expression(s: &mut Src, st: &mut State, slot: usize) -> Result<(), LoadError> {
+    s.expect(b'{')?;
+    let mut key = [0u8; KEY_MAX];
+    loop {
+        let n = match s.obj_key(&mut key)? {
+            Some(n) => n,
+            None => break,
+        };
+        match &key[..n] {
+            b"morphTargetBinds" => {
+                s.expect(b'[')?;
+                while s.arr_next()? {
+                    if st.morph.preset_node[slot] < 0 {
+                        let (node, index) = parse_vrm_bind(s)?;
+                        if node >= 0 && index >= 0 {
+                            st.morph.preset_node[slot] = node;
+                            st.morph.preset_k[slot] = index;
+                        }
+                    } else {
+                        s.skip_value(MAX_DEPTH)?;
+                    }
+                }
+            }
+            _ => s.skip_value(MAX_DEPTH)?,
+        }
+    }
+    Ok(())
+}
+
+/// A VRM expression bind: `{ "node"|"mesh": N, "index": K, "weight": W }`.
+///
+/// VRM 1.0 names the node; VRM 0.x names the mesh directly. The same record
+/// shape is used for both, the caller knows which field the first one is.
+fn parse_vrm_bind(s: &mut Src) -> Result<(i16, i16), LoadError> {
+    let mut holder: i64 = -1;
+    let mut index: i64 = -1;
+    s.expect(b'{')?;
+    let mut key = [0u8; KEY_MAX];
+    loop {
+        let n = match s.obj_key(&mut key)? {
+            Some(n) => n,
+            None => break,
+        };
+        match &key[..n] {
+            b"node" | b"mesh" => holder = s.number_i64()?,
+            b"index" => index = s.number_i64()?,
+            _ => s.skip_value(MAX_DEPTH)?,
+        }
+    }
+    Ok((i16_index(holder), i16_index(index)))
+}
+
+/// Parse `extensions.VRM.blendShapeMaster` (VRM 0.x).
+fn parse_vrm0_blendshapes(s: &mut Src, st: &mut State) -> Result<(), LoadError> {
+    s.expect(b'{')?;
+    let mut key = [0u8; KEY_MAX];
+    loop {
+        let n = match s.obj_key(&mut key)? {
+            Some(n) => n,
+            None => break,
+        };
+        match &key[..n] {
+            b"blendShapeGroups" => {
+                s.expect(b'[')?;
+                while s.arr_next()? {
+                    parse_vrm0_blendshape_group(s, st)?;
+                }
+            }
+            _ => s.skip_value(MAX_DEPTH)?,
+        }
+    }
+    Ok(())
+}
+
+/// One VRM 0.x blend-shape group: `{ presetName, binds: [{ mesh, index, weight }] }`.
+fn parse_vrm0_blendshape_group(s: &mut Src, st: &mut State) -> Result<(), LoadError> {
+    s.expect(b'{')?;
+    let mut slot: Option<usize> = None;
+    let mut mesh: i64 = -1;
+    let mut index: i64 = -1;
+    let mut key = [0u8; KEY_MAX];
+    loop {
+        let n = match s.obj_key(&mut key)? {
+            Some(n) => n,
+            None => break,
+        };
+        match &key[..n] {
+            b"presetName" => {
+                let mut name = [0u8; 32];
+                let nn = s.string_into(&mut name)?;
+                slot = vrm0_preset_slot(&name[..nn]);
+            }
+            b"binds" => {
+                s.expect(b'[')?;
+                while s.arr_next()? {
+                    if mesh < 0 || index < 0 {
+                        let (m, i) = parse_vrm_bind(s)?;
+                        if m >= 0 && i >= 0 {
+                            mesh = m as i64;
+                            index = i as i64;
+                        }
+                    } else {
+                        s.skip_value(MAX_DEPTH)?;
+                    }
+                }
+            }
+            _ => s.skip_value(MAX_DEPTH)?,
+        }
+    }
+    if let Some(slot) = slot {
+        if st.morph.preset_mesh[slot] < 0
+            && st.morph.preset_node[slot] < 0
+            && mesh >= 0
+            && index >= 0
+        {
+            st.morph.preset_mesh[slot] = mesh as i16;
+            st.morph.preset_k[slot] = index as i16;
+        }
+    }
+    Ok(())
+}
+
+/// VRM 0.x preset names are upper-case (`"BLINK"`), so compare case-insensitively.
+fn vrm0_preset_slot(name: &[u8]) -> Option<usize> {
+    let mut i = 0;
+    while i < MORPH_PRESET_COUNT {
+        if name_eq_ci(name, preset_name(i)) {
+            return Some(i);
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Turn the VRM bindings collected in pass 1 into flat arena target indices.
+///
+/// Runs after pass 2, when every morph target has been appended and its
+/// (mesh, target index) pair recorded in `book`.
+fn resolve_presets(book: &mut MorphBook, arena: &ModelArena) {
+    for slot in 0..MORPH_PRESET_COUNT {
+        let mut mesh: i32 = -1;
+        if book.preset_node[slot] >= 0 {
+            let node = book.preset_node[slot] as usize;
+            if node < arena.node_count {
+                mesh = arena.nodes[node].mesh as i32;
+            }
+        } else if book.preset_mesh[slot] >= 0 {
+            mesh = book.preset_mesh[slot] as i32;
+        }
+        let k = book.preset_k[slot];
+        let mut flat: i16 = -1;
+        if mesh >= 0 && k >= 0 {
+            let mut f = 0;
+            while f < book.nflat && f < arena.morph_target_count {
+                if book.flat_mesh[f] as i32 == mesh && book.flat_k[f] as i16 == k {
+                    flat = f as i16;
+                    break;
+                }
+                f += 1;
+            }
+        }
+        if flat < 0 {
+            // No explicit binding: fall back to a target named after the preset.
+            let want = preset_name(slot);
+            let mut i = 0;
+            while i < book.nnames {
+                let n = book.name_len[i] as usize;
+                if book.name_target[i] >= 0 && name_eq_ci(&book.name[i][..n], want) {
+                    flat = book.name_target[i];
+                    break;
+                }
+                i += 1;
+            }
+        }
+        book.preset_flat[slot] = flat;
+    }
 }
 
 // --- post-pass-1 fixups -----------------------------------------------------
@@ -1599,10 +2135,13 @@ fn validate_joints(st: &State, arena: &mut ModelArena) -> Result<(), LoadError> 
 // Accessor streaming
 // ---------------------------------------------------------------------------
 
+/// Largest accessor element accepted: 16 components * 4 bytes (MAT4 float).
+const ELEM_MAX: usize = 64;
+
 /// A validated accessor ready to be read element by element.
 #[derive(Clone, Copy)]
 struct AccInfo {
-    /// Absolute file offset of element 0.
+    /// Absolute file offset of element 0, or 0 when `has_base` is false.
     off: u64,
     stride: u64,
     elem: usize,
@@ -1610,6 +2149,25 @@ struct AccInfo {
     comp: u16,
     comps: usize,
     normalized: bool,
+    /// False for a sparse-only accessor (no base `bufferView`): base is zero.
+    has_base: bool,
+    /// Resolved sparse substitution table, if the accessor is sparse.
+    sparse: Option<SparseRun>,
+}
+
+/// A validated sparse substitution table, with absolute file offsets.
+#[derive(Clone, Copy)]
+struct SparseRun {
+    /// Number of substituted elements.
+    count: u32,
+    /// Absolute file offset of sparse index 0.
+    idx_off: u64,
+    /// Size of one sparse index (1, 2 or 4).
+    idx_size: usize,
+    /// Sparse index component type (5121/5123/5125).
+    idx_comp: u16,
+    /// Absolute file offset of sparse value 0.
+    val_off: u64,
 }
 
 fn comp_size(comp: u16) -> usize {
@@ -1630,76 +2188,155 @@ fn acc_info(st: &State, idx: usize, glb: &Glb) -> Result<AccInfo, LoadError> {
         return Err(LoadError::Unsupported);
     }
     let a = st.accs[idx];
-    if a.sparse {
-        return Err(LoadError::Unsupported);
-    }
     let csz = comp_size(a.comp);
-    if csz == 0 || a.comps == 0 || a.off == 0 && a.count == 0 {
+    if csz == 0 || a.comps == 0 || (a.off == 0 && a.count == 0 && a.sparse < 0) {
         return Err(LoadError::BadAccessor);
     }
-    if a.view < 0 {
+    if a.sparse == -2 {
+        // The sparse descriptor table was full; this accessor cannot be served.
+        return Err(LoadError::Unsupported);
+    }
+    let elem = csz.saturating_mul(a.comps as usize);
+    if elem == 0 || elem > ELEM_MAX {
+        return Err(LoadError::BadAccessor);
+    }
+    // A sparse accessor may have no base bufferView at all; its base values are
+    // then all zero and only the substituted elements carry data.
+    let has_base = a.view >= 0;
+    if !has_base && a.sparse < 0 {
         // No bufferView and no sparse means no data at all.
         return Err(LoadError::BadAccessor);
-    }
-    let vi = a.view as usize;
-    if vi >= st.views_total {
-        return Err(LoadError::BadJson);
-    }
-    if vi >= st.nviews {
-        return Err(LoadError::Unsupported);
     }
     if glb.bin_len == 0 {
         return Err(LoadError::Unsupported);
     }
-    let v = st.views[vi];
-    let elem = csz.saturating_mul(a.comps as usize);
-    if elem == 0 {
-        return Err(LoadError::BadAccessor);
+
+    // --- base element range ---
+    let mut base_off = 0u64;
+    let mut stride = elem as u64;
+    if has_base {
+        let vi = a.view as usize;
+        if vi >= st.views_total {
+            return Err(LoadError::BadJson);
+        }
+        if vi >= st.nviews {
+            return Err(LoadError::Unsupported);
+        }
+        let v = st.views[vi];
+        stride = if v.stride != 0 {
+            v.stride as u64
+        } else {
+            elem as u64
+        };
+        if stride < elem as u64 {
+            return Err(LoadError::BadAccessor);
+        }
+        let n = a.count as u64;
+        let last = if n == 0 {
+            a.off
+        } else {
+            a.off
+                .saturating_add((n - 1).saturating_mul(stride))
+                .saturating_add(elem as u64)
+        };
+        if last > v.len {
+            return Err(LoadError::BadAccessor);
+        }
+        if v.off.saturating_add(v.len) > glb.bin_len {
+            return Err(LoadError::BadAccessor);
+        }
+        base_off = glb.bin_off.saturating_add(v.off).saturating_add(a.off);
     }
-    let stride = if v.stride != 0 {
-        v.stride as u64
+
+    // --- sparse substitution table ---
+    let sparse = if a.sparse >= 0 {
+        let si = a.sparse as usize;
+        if si >= st.nsparse {
+            return Err(LoadError::BadAccessor);
+        }
+        let sp = st.sparses[si];
+        let isz = comp_size(sp.idx_comp);
+        if isz == 0 || !matches!(sp.idx_comp, 5121 | 5123 | 5125) {
+            return Err(LoadError::BadAccessor);
+        }
+        if sp.idx_view < 0 || sp.val_view < 0 {
+            return Err(LoadError::BadAccessor);
+        }
+        let iv = sp.idx_view as usize;
+        let vv = sp.val_view as usize;
+        if iv >= st.views_total || vv >= st.views_total {
+            return Err(LoadError::BadJson);
+        }
+        if iv >= st.nviews || vv >= st.nviews {
+            return Err(LoadError::Unsupported);
+        }
+        let iview = st.views[iv];
+        let vview = st.views[vv];
+        let cnt = sp.count as u64;
+        if cnt.saturating_mul(isz as u64) > iview.len
+            || cnt.saturating_mul(elem as u64) > vview.len
+        {
+            return Err(LoadError::BadAccessor);
+        }
+        if iview.off.saturating_add(iview.len) > glb.bin_len
+            || vview.off.saturating_add(vview.len) > glb.bin_len
+        {
+            return Err(LoadError::BadAccessor);
+        }
+        Some(SparseRun {
+            count: sp.count,
+            idx_off: glb.bin_off
+                .saturating_add(iview.off)
+                .saturating_add(sp.idx_off),
+            idx_size: isz,
+            idx_comp: sp.idx_comp,
+            val_off: glb.bin_off
+                .saturating_add(vview.off)
+                .saturating_add(sp.val_off),
+        })
     } else {
-        elem as u64
+        None
     };
-    if stride < elem as u64 {
-        return Err(LoadError::BadAccessor);
-    }
-    let n = a.count as u64;
-    let last = if n == 0 {
-        a.off
-    } else {
-        a.off
-            .saturating_add((n - 1).saturating_mul(stride))
-            .saturating_add(elem as u64)
-    };
-    if last > v.len {
-        return Err(LoadError::BadAccessor);
-    }
-    if v.off.saturating_add(v.len) > glb.bin_len {
-        return Err(LoadError::BadAccessor);
-    }
+
     Ok(AccInfo {
-        off: glb.bin_off.saturating_add(v.off).saturating_add(a.off),
+        off: base_off,
         stride,
         elem,
         count: a.count,
         comp: a.comp,
         comps: a.comps as usize,
         normalized: a.normalized,
+        has_base,
+        sparse,
     })
 }
 
 /// Sequential element reader. Tightly packed accessors are read through a
 /// block buffer (one `read_at` per ~1 KiB); strided ones fall back to one
 /// positional read per element.
+///
+/// Sparse substitution is applied per element. glTF requires sparse indices to
+/// be strictly increasing, so the index and value lists are merged in one
+/// forward pass instead of being held in RAM. Out-of-order indices are dropped
+/// (the file is malformed; the request is simply ignored).
 struct ElemStream<'r> {
     r: &'r mut dyn ReadAt,
     off: u64,
     stride: u64,
     elem: usize,
     packed: bool,
+    has_base: bool,
     idx: u32,
     count: u32,
+    /// Sparse substitution table, when the accessor is sparse.
+    sparse: Option<SparseRun>,
+    /// Ordinal of the next sparse entry to consider.
+    sp_k: u32,
+    /// Whether `sp_idx` holds a loaded sparse index.
+    sp_loaded: bool,
+    sp_idx: u32,
+    /// Current element bytes, handed back to the caller.
+    out: [u8; ELEM_MAX],
     buf: [u8; 1024],
     buf_abs: u64,
     pos: usize,
@@ -1713,9 +2350,15 @@ impl<'r> ElemStream<'r> {
             off: ai.off,
             stride: ai.stride,
             elem: ai.elem,
-            packed: ai.stride == ai.elem as u64 && ai.elem <= 1024,
+            packed: ai.has_base && ai.stride == ai.elem as u64 && ai.elem <= 1024,
+            has_base: ai.has_base,
             idx: 0,
             count: ai.count,
+            sparse: ai.sparse,
+            sp_k: 0,
+            sp_loaded: false,
+            sp_idx: 0,
+            out: [0; ELEM_MAX],
             buf: [0; 1024],
             buf_abs: ai.off,
             pos: 0,
@@ -1743,30 +2386,96 @@ impl<'r> ElemStream<'r> {
         true
     }
 
-    fn next(&mut self) -> Result<&[u8], LoadError> {
-        if self.idx >= self.count {
-            return Err(LoadError::BadAccessor);
+    /// Read element `i`'s base bytes into `out` (zeros when there is no base
+    /// `bufferView`).
+    fn read_elem(&mut self, i: u32) -> Result<(), LoadError> {
+        let elem = self.elem;
+        if !self.has_base {
+            let mut k = 0;
+            while k < elem {
+                self.out[k] = 0;
+                k += 1;
+            }
+            return Ok(());
         }
         if self.packed {
-            while self.pos + self.elem > self.have {
+            while self.pos + elem > self.have {
                 if !self.fill() {
                     return Err(LoadError::Io);
                 }
             }
             let a = self.pos;
-            self.pos += self.elem;
-            self.idx += 1;
-            Ok(&self.buf[a..a + self.elem])
+            self.pos += elem;
+            self.out[..elem].copy_from_slice(&self.buf[a..a + elem]);
         } else {
             let at = self
                 .off
-                .saturating_add((self.idx as u64).saturating_mul(self.stride));
-            self.idx += 1;
-            if self.r.read_at(at, &mut self.buf[..self.elem]) != self.elem {
+                .saturating_add((i as u64).saturating_mul(self.stride));
+            if self.r.read_at(at, &mut self.out[..elem]) != elem {
                 return Err(LoadError::Io);
             }
-            Ok(&self.buf[..self.elem])
         }
+        Ok(())
+    }
+
+    /// Overwrite `out` with the sparse value for element `i`, if the accessor
+    /// substitutes one.
+    fn apply_sparse(&mut self, i: u32) -> Result<(), LoadError> {
+        let sp = match self.sparse {
+            Some(sp) => sp,
+            None => return Ok(()),
+        };
+        loop {
+            if !self.sp_loaded {
+                if self.sp_k >= sp.count {
+                    return Ok(());
+                }
+                let at = sp
+                    .idx_off
+                    .saturating_add((self.sp_k as u64).saturating_mul(sp.idx_size as u64));
+                let mut b = [0u8; 4];
+                if self.r.read_at(at, &mut b[..sp.idx_size]) != sp.idx_size {
+                    return Err(LoadError::Io);
+                }
+                self.sp_idx = match sp.idx_comp {
+                    5121 => b[0] as u32,
+                    5123 => u16::from_le_bytes([b[0], b[1]]) as u32,
+                    _ => u32::from_le_bytes([b[0], b[1], b[2], b[3]]),
+                };
+                self.sp_loaded = true;
+            }
+            if self.sp_idx < i {
+                // A substitution belonging to an element already passed; drop it.
+                self.sp_k += 1;
+                self.sp_loaded = false;
+                continue;
+            }
+            if self.sp_idx > i {
+                return Ok(());
+            }
+            let at = sp
+                .val_off
+                .saturating_add((self.sp_k as u64).saturating_mul(self.elem as u64));
+            if self.r.read_at(at, &mut self.out[..self.elem]) != self.elem {
+                return Err(LoadError::Io);
+            }
+            self.sp_k += 1;
+            self.sp_loaded = false;
+            return Ok(());
+        }
+    }
+
+    fn next(&mut self) -> Result<&[u8], LoadError> {
+        if self.idx >= self.count {
+            return Err(LoadError::BadAccessor);
+        }
+        let i = self.idx;
+        self.idx += 1;
+        self.read_elem(i)?;
+        if self.sparse.is_some() {
+            self.apply_sparse(i)?;
+        }
+        Ok(&self.out[..self.elem])
     }
 }
 
@@ -1877,7 +2586,7 @@ fn read_ibm(
 
 fn parse_pass2(
     s: &mut Src,
-    st: &State,
+    st: &mut State,
     arena: &mut ModelArena,
     glb: &Glb,
 ) -> Result<(), LoadError> {
@@ -1898,13 +2607,21 @@ fn parse_pass2(
 
 fn parse_meshes(
     s: &mut Src,
-    st: &State,
+    st: &mut State,
     arena: &mut ModelArena,
     glb: &Glb,
 ) -> Result<(), LoadError> {
     s.expect(b'[')?;
     let mut key = [0u8; KEY_MAX];
+    let mut mesh_index = 0usize;
     while s.arr_next()? {
+        // Targets appended while parsing this mesh's primitives are contiguous.
+        let flat_start = arena.morph_target_count;
+        // `extras.targetNames` may appear before or after `primitives`, so hold
+        // the names locally and attach them once the mesh is fully read.
+        let mut names = [[0u8; MORPH_NAME_LEN]; MAX_MORPH_TARGETS];
+        let mut name_lens = [0u8; MAX_MORPH_TARGETS];
+        let mut name_count = 0usize;
         s.expect(b'{')?;
         loop {
             let n = match s.obj_key(&mut key)? {
@@ -1912,19 +2629,104 @@ fn parse_meshes(
                 None => break,
             };
             match &key[..n] {
-                b"primitives" => parse_primitives(s, st, arena, glb)?,
+                b"primitives" => parse_primitives(s, st, arena, glb, mesh_index)?,
+                b"extras" => {
+                    parse_mesh_extras(s, &mut names, &mut name_lens, &mut name_count)?
+                }
                 _ => s.skip_value(MAX_DEPTH)?,
             }
+        }
+        apply_mesh_names(
+            &mut st.morph,
+            arena,
+            mesh_index,
+            flat_start,
+            &names,
+            &name_lens,
+            name_count,
+        );
+        mesh_index = mesh_index.saturating_add(1);
+    }
+    Ok(())
+}
+
+/// Pull `targetNames` out of a mesh's `extras` object; every other key is
+/// skipped. Names are indexed by morph target index.
+fn parse_mesh_extras(
+    s: &mut Src,
+    names: &mut [[u8; MORPH_NAME_LEN]; MAX_MORPH_TARGETS],
+    lens: &mut [u8; MAX_MORPH_TARGETS],
+    count: &mut usize,
+) -> Result<(), LoadError> {
+    s.expect(b'{')?;
+    let mut key = [0u8; KEY_MAX];
+    loop {
+        let n = match s.obj_key(&mut key)? {
+            Some(n) => n,
+            None => break,
+        };
+        match &key[..n] {
+            b"targetNames" => {
+                s.expect(b'[')?;
+                let mut i = 0usize;
+                while s.arr_next()? {
+                    let mut name = [0u8; MORPH_NAME_LEN];
+                    let len = s.string_into(&mut name)?;
+                    if i < MAX_MORPH_TARGETS && *count < MAX_MORPH_TARGETS {
+                        names[*count] = name;
+                        lens[*count] = len as u8;
+                        *count += 1;
+                    }
+                    i += 1;
+                }
+            }
+            _ => s.skip_value(MAX_DEPTH)?,
         }
     }
     Ok(())
 }
 
+/// Attach a mesh's `targetNames` entries to the flat arena targets that mesh
+/// contributed. With several morph-target-carrying primitives per mesh the
+/// first flat target for each index wins, which is the common single-primitive
+/// case; the name still resolves to a usable target.
+fn apply_mesh_names(
+    book: &mut MorphBook,
+    arena: &ModelArena,
+    mesh_index: usize,
+    flat_start: usize,
+    names: &[[u8; MORPH_NAME_LEN]; MAX_MORPH_TARGETS],
+    lens: &[u8; MAX_MORPH_TARGETS],
+    count: usize,
+) {
+    let mut j = 0usize;
+    while j < count {
+        let mut target: i16 = -1;
+        let mut f = flat_start;
+        while f < book.nflat && f < arena.morph_target_count {
+            if book.flat_mesh[f] as usize == mesh_index && book.flat_k[f] as usize == j {
+                target = f as i16;
+                break;
+            }
+            f += 1;
+        }
+        if target >= 0 && book.nnames < MAX_MORPH_TARGETS {
+            let at = book.nnames;
+            book.name[at] = names[j];
+            book.name_len[at] = lens[j];
+            book.name_target[at] = target;
+            book.nnames = at + 1;
+        }
+        j += 1;
+    }
+}
+
 fn parse_primitives(
     s: &mut Src,
-    st: &State,
+    st: &mut State,
     arena: &mut ModelArena,
     glb: &Glb,
+    mesh_index: usize,
 ) -> Result<(), LoadError> {
     s.expect(b'[')?;
     let mut key = [0u8; KEY_MAX];
@@ -1937,6 +2739,10 @@ fn parse_primitives(
         let mut indices: i64 = -1;
         let mut material: i64 = -1;
         let mut mode: i64 = 4;
+        // POSITION accessors of `targets[k]`, collected while the object is
+        // streamed, then applied after the primitive's vertices exist.
+        let mut target_accs = [-1i64; MAX_MORPH_TARGETS];
+        let mut target_count = 0usize;
         s.expect(b'{')?;
         loop {
             let n = match s.obj_key(&mut key)? {
@@ -1962,6 +2768,7 @@ fn parse_primitives(
                         }
                     }
                 }
+                b"targets" => target_count = parse_targets(s, &mut target_accs)?,
                 b"indices" => indices = s.number_i64()?,
                 b"material" => material = s.number_i64()?,
                 b"mode" => mode = s.number_i64()?,
@@ -1973,9 +2780,129 @@ fn parse_primitives(
         if mode != 4 {
             continue;
         }
-        build_primitive(
+        if let Some((v0, n)) = build_primitive(
             s, st, arena, glb, pos, normal, uv, joints, weights, indices, material,
-        )?;
+        )? {
+            append_morph_targets(
+                s,
+                st,
+                arena,
+                glb,
+                &target_accs,
+                target_count,
+                v0,
+                n,
+                mesh_index,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// Parse `primitives[].targets`: an array of attribute maps, one per morph
+/// target. Only `POSITION` deltas are kept; the other semantics (NORMAL,
+/// TANGENT) are parsed and dropped.
+fn parse_targets(
+    s: &mut Src,
+    out: &mut [i64; MAX_MORPH_TARGETS],
+) -> Result<usize, LoadError> {
+    s.expect(b'[')?;
+    let mut total = 0usize;
+    let mut key = [0u8; KEY_MAX];
+    while s.arr_next()? {
+        let mut position: i64 = -1;
+        s.expect(b'{')?;
+        loop {
+            let n = match s.obj_key(&mut key)? {
+                Some(n) => n,
+                None => break,
+            };
+            match &key[..n] {
+                b"POSITION" => position = s.number_i64()?,
+                _ => s.skip_value(MAX_DEPTH)?,
+            }
+        }
+        if total < MAX_MORPH_TARGETS {
+            out[total] = position;
+        }
+        total += 1;
+    }
+    Ok(if total < MAX_MORPH_TARGETS {
+        total
+    } else {
+        MAX_MORPH_TARGETS
+    })
+}
+
+/// Flatten one primitive's morph targets into the arena.
+///
+/// Each target becomes a contiguous run of [`MorphEntry`] records holding only
+/// the nonzero deltas, with `vertex` as an absolute arena vertex index. Targets
+/// are recorded even when they are empty or unusable so that target indices
+/// stay aligned with `extras.targetNames` and VRM bindings. Hitting
+/// `MAX_MORPH_TARGETS` or `MAX_MORPH_ENTRIES` truncates the tail rather than
+/// failing the load; a malformed target accessor is also skipped softly, since
+/// expressions are decorative.
+#[allow(clippy::too_many_arguments)]
+fn append_morph_targets(
+    s: &mut Src,
+    st: &mut State,
+    arena: &mut ModelArena,
+    glb: &Glb,
+    accs: &[i64; MAX_MORPH_TARGETS],
+    ntargets: usize,
+    v0: usize,
+    nverts: usize,
+    mesh_index: usize,
+) -> Result<(), LoadError> {
+    let mut k = 0usize;
+    while k < ntargets {
+        if arena.morph_target_count >= MAX_MORPH_TARGETS {
+            break;
+        }
+        let first = arena.morph_entry_count as u32;
+        if accs[k] >= 0 {
+            if let Ok(ai) = acc_info(st, accs[k] as usize, glb) {
+                if ai.comp == 5126 && ai.comps >= 3 {
+                    let limit = (ai.count as usize).min(nverts);
+                    let mut es = ElemStream::new(&mut *s.r, &ai);
+                    let mut out = [0.0f32; 16];
+                    let mut i = 0usize;
+                    while i < limit {
+                        if arena.morph_entry_count >= MAX_MORPH_ENTRIES {
+                            break;
+                        }
+                        let b = match es.next() {
+                            Ok(b) => b,
+                            Err(_) => break,
+                        };
+                        decode_f32(b, ai.comp, ai.comps, ai.normalized, &mut out);
+                        let delta = [out[0], out[1], out[2]];
+                        if delta[0] != 0.0 || delta[1] != 0.0 || delta[2] != 0.0 {
+                            arena.morph_entries[arena.morph_entry_count] = MorphEntry {
+                                vertex: (v0 + i) as u16,
+                                delta,
+                            };
+                            arena.morph_entry_count += 1;
+                        }
+                        i += 1;
+                    }
+                }
+            }
+        }
+        let t = arena.morph_target_count;
+        arena.morph_targets[t] = MorphTarget {
+            first,
+            count: arena.morph_entry_count as u32 - first,
+        };
+        let book = &mut st.morph;
+        if t < MAX_MORPH_TARGETS {
+            book.flat_mesh[t] = mesh_index.min(u16::MAX as usize) as u16;
+            book.flat_k[t] = k as u8;
+            book.nflat = t + 1;
+        }
+        arena.morph_target_count = t + 1;
+        k += 1;
     }
     Ok(())
 }
@@ -1983,7 +2910,7 @@ fn parse_primitives(
 #[allow(clippy::too_many_arguments)]
 fn build_primitive(
     s: &mut Src,
-    st: &State,
+    st: &mut State,
     arena: &mut ModelArena,
     glb: &Glb,
     acc_pos: i64,
@@ -1993,9 +2920,9 @@ fn build_primitive(
     acc_weights: i64,
     acc_indices: i64,
     material: i64,
-) -> Result<(), LoadError> {
+) -> Result<Option<(usize, usize)>, LoadError> {
     if acc_pos < 0 {
-        return Ok(());
+        return Ok(None);
     }
     let ai = acc_info(st, acc_pos as usize, glb)?;
     if ai.comps < 3 || ai.comp != 5126 {
@@ -2003,7 +2930,7 @@ fn build_primitive(
     }
     let n = ai.count as usize;
     if n == 0 {
-        return Ok(());
+        return Ok(None);
     }
     if arena.vertex_count.saturating_add(n) > MAX_VERTS {
         return Err(LoadError::ArenaFull);
@@ -2139,7 +3066,7 @@ fn build_primitive(
         if m == 0 {
             // Fewer than three vertices: nothing drawable, leave the arena as
             // it was (the vertex slots written above are simply not counted).
-            return Ok(());
+            return Ok(None);
         }
         if arena.index_count.saturating_add(m) > MAX_TRIS {
             return Err(LoadError::ArenaFull);
@@ -2163,7 +3090,7 @@ fn build_primitive(
     arena.primitive_count += 1;
     arena.index_count += idx_count;
     arena.vertex_count = v0 + n;
-    Ok(())
+    Ok(Some((v0, n)))
 }
 
 // ---------------------------------------------------------------------------

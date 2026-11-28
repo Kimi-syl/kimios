@@ -420,6 +420,32 @@ pub fn draw(screen: &Screen, x: i64, y: i64, w: i64, h: i64, yaw: f32, pitch: f3
     true
 }
 
+/// Drive the standard facial expressions: automatic blink plus a happy reaction
+/// after a tap. Uses the loader's preset lookup, so it works for VRM assets and
+/// for plain GLB exports that name their shape keys.
+pub fn update_expressions(t_seconds: f32) {
+    use crate::k3d::gltf::{morph_preset_index, MORPH_PRESET_BLINK, MORPH_PRESET_HAPPY};
+    if let Some(i) = morph_preset_index(MORPH_PRESET_BLINK) {
+        // Blink once every four seconds, for about 120 ms.
+        let phase = t_seconds % 4.0;
+        set_morph(i, if phase > 3.88 { 1.0 } else { 0.0 });
+    }
+    if let Some(i) = morph_preset_index(MORPH_PRESET_HAPPY) {
+        let start = unsafe { BOUNCE_START };
+        let w = if start == 0 {
+            0.0
+        } else {
+            let age = k::uptime_ms().saturating_sub(start) as f32 / 1000.0;
+            if age < 0.7 {
+                crate::k3d::clamp(1.0 - age / 0.7, 0.0, 1.0)
+            } else {
+                0.0
+            }
+        };
+        set_morph(i, w);
+    }
+}
+
 /// Advance the procedural pose for the given pet state and time, then run the
 /// secondary-motion spring so limbs and head follow through.
 pub fn update_pose(state: usize, t_seconds: f32) {

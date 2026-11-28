@@ -2853,6 +2853,7 @@ fn draw_home(
             let (px, py, wid, hgt) = pet3d_rect(width, height, y_offset);
             let t = k::uptime_ms();
             pet3d::update_pose(ui.pet.state(), (t as f32) * 0.001);
+            pet3d::update_expressions((t as f32) * 0.001);
             // Gentle sway around the front instead of a constant spin, so the face stays visible.
             let yaw = crate::k3d::sin((t as f32) * 0.0004) * 0.34;
             pet3d::draw(screen, px, py, wid, hgt, yaw, 0.02);
