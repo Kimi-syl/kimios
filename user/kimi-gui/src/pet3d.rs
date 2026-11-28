@@ -32,6 +32,31 @@ static mut POSE: Pose = Pose {
 };
 /// Guards the one-shot model load so a missing file is not retried every frame.
 static mut LOAD_ATTEMPTED: bool = false;
+/// Timestamp of the last tap, used for the hop animation.
+static mut BOUNCE_START: u64 = 0;
+
+/// Trigger a short hop so tapping the 3D pet visibly responds.
+pub fn bounce() {
+    unsafe {
+        BOUNCE_START = k::uptime_ms();
+    }
+}
+
+/// Vertical offset (metres) of the current hop, 0 when idle.
+fn bounce_offset() -> f32 {
+    const DURATION: f32 = 0.42;
+    let start = unsafe { BOUNCE_START };
+    if start == 0 {
+        return 0.0;
+    }
+    let age = k::uptime_ms().saturating_sub(start) as f32 / 1000.0;
+    if age >= DURATION {
+        return 0.0;
+    }
+    let t = age / DURATION;
+    // One decaying arc.
+    crate::k3d::sin(t * 3.141_592_7) * (1.0 - t) * 0.16
+}
 
 /// Load the model once: prefer `/disk/pet/model.glb`, else the placeholder cube.
 fn ensure_model() {
@@ -236,6 +261,7 @@ pub fn draw(screen: &Screen, x: i64, y: i64, w: i64, h: i64, yaw: f32, pitch: f3
     let fov = 0.62f32; // ~35 degrees
     let mut cam = Camera::new(fov, RT_W as f32 / RT_H as f32);
     cam.target = centre;
+    cam.target.y -= bounce_offset();
     cam.distance = extent * 2.2;
     cam.yaw = yaw;
     cam.pitch = pitch;

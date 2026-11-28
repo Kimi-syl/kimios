@@ -1353,7 +1353,7 @@ pub extern "C" fn kimi_test_weather(json: u64, len: u64, mode: u64, out: u64) ->
     apps::weather_parse_test(data, mode, out) as u64
 }
 
-/// Host-only test hook: bounds-checked RGBA?????B blit; returns rows written.
+/// Host-only test hook: bounds-checked RGBA?????秋??B blit; returns rows written.
 #[no_mangle]
 #[cfg(not(target_os = "none"))]
 pub extern "C" fn kimi_test_blit(
@@ -1927,18 +1927,35 @@ fn tapped(screen: &Screen, ui: &mut Ui, point: (i64, i64), clock: [u64; 7]) {
                 }
                 return;
             }
-            if ui.settings.pet && ui.pet.valid {
-                let (px, py) = ui.pet.clamped_anchor(
-                    screen,
-                    screen.width() - 46,
-                    screen.height() - 128,
-                    crate::theme::pet_size() as i64,
-                );
-                if ui.pet.hit(px, py, point.0, point.1) {
-                    ui.pet.tap(k::uptime_ms(), point.0 < px);
-                    ui.paint_bg = true;
-                    render(screen, ui, clock);
-                    return;
+            if ui.settings.pet {
+                // 3D and sprite pets occupy different areas, so each has its own
+                // hit test; both must agree with what is actually drawn.
+                if ui.settings.pet3d {
+                    let (rx, ry, rw, rh) = pet3d_rect(screen.width(), screen.height(), 0);
+                    if point.0 >= rx
+                        && point.0 < rx + rw
+                        && point.1 >= ry
+                        && point.1 < ry + rh
+                    {
+                        ui.pet.tap(k::uptime_ms(), point.0 < rx + rw / 2);
+                        pet3d::bounce();
+                        ui.paint_bg = true;
+                        render(screen, ui, clock);
+                        return;
+                    }
+                } else if ui.pet.valid {
+                    let (px, py) = ui.pet.clamped_anchor(
+                        screen,
+                        screen.width() - 46,
+                        screen.height() - 128,
+                        crate::theme::pet_size() as i64,
+                    );
+                    if ui.pet.hit(px, py, point.0, point.1) {
+                        ui.pet.tap(k::uptime_ms(), point.0 < px);
+                        ui.paint_bg = true;
+                        render(screen, ui, clock);
+                        return;
+                    }
                 }
             }
             if let Some(page) = home_page_hit(screen, point) {
@@ -2407,6 +2424,15 @@ fn present_dirty(screen: &Screen) {
     }
 }
 
+/// Rect (logical) that the 3D pet occupies on Home. Shared by the renderer and
+/// the tap test so the visible character and its hit area cannot drift apart.
+fn pet3d_rect(width: i64, height: i64, y_offset: i64) -> (i64, i64, i64, i64) {
+    let pct = crate::theme::pet_size() as i64;
+    let hgt = (110 * pct.min(160) / 100).clamp(60, 190);
+    let wid = hgt * 3 / 4;
+    (width - 40 - wid, height - 110 - hgt + y_offset, wid, hgt)
+}
+
 fn draw_scene(screen: &Screen, ui: &mut Ui, clock: [u64; 7], paint_bg: bool) {
     match ui.scene {
         Scene::Lock => {
@@ -2824,11 +2850,7 @@ fn draw_home(
     if ui.settings.pet && ui.folder_view.is_none() {
         if ui.settings.pet3d {
             // Offscreen 3D render blitted 1:1 into the pet's rect.
-            let pct = crate::theme::pet_size() as i64;
-            let hgt = (110 * pct.min(160) / 100).clamp(60, 190);
-            let wid = hgt * 3 / 4;
-            let px = width - 40 - wid;
-            let py = height - 110 - hgt + y_offset;
+            let (px, py, wid, hgt) = pet3d_rect(width, height, y_offset);
             let t = k::uptime_ms();
             pet3d::update_pose(ui.pet.state(), (t as f32) * 0.001);
             // Gentle sway around the front instead of a constant spin, so the face stays visible.
