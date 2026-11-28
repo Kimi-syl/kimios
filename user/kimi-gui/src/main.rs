@@ -37,6 +37,7 @@ fn appkind_from_u64(v: u64) -> Option<AppKind> {
         9 => AppKind::Terminal, 10 => AppKind::Browser, 11 => AppKind::Apk,
         12 => AppKind::Dvm, 13 => AppKind::Market, 14 => AppKind::Monitor,
         15 => AppKind::Plugins, 16 => AppKind::AiStudio, 17 => AppKind::OpenCode,
+        18 => AppKind::Pet,
         _ => return None,
     })
 }
@@ -96,6 +97,7 @@ enum AppKind {
     Plugins,
     AiStudio,
     OpenCode,
+    Pet,
 }
 
 impl AppKind {
@@ -123,6 +125,7 @@ impl AppKind {
             15 => AppKind::Plugins,
             16 => AppKind::AiStudio,
             17 => AppKind::OpenCode,
+            18 => AppKind::Pet,
             _ => return None,
         })
     }
@@ -165,7 +168,7 @@ impl Folder {
 #[derive(Clone, Copy)]
 struct Layout {
     grid: [Slot; 9],
-    grid2: [Slot; 6],
+    grid2: [Slot; 8],
     dock: [Slot; 4],
     folders: [Folder; 4],
     folder_count: usize,
@@ -192,6 +195,8 @@ impl Layout {
                 Slot::App(AppKind::Market),
                 Slot::App(AppKind::Monitor),
                 Slot::App(AppKind::Plugins),
+                Slot::App(AppKind::Pet),
+                Slot::Empty,
             ],
             dock: [
                 Slot::App(AppKind::Terminal),
@@ -703,6 +708,11 @@ struct Ui {
     pet: pet::Pet,
     last_pet_ms: u64,
     pet_activity: usize,
+    /// Feedback for the Pet app: 0 none, 1 imported, 2 removed, 3 failed.
+    pet_msg: u8,
+    /// True while waiting for the file picker to copy a pack in.
+    pet_pending: bool,
+    pet_poll_ms: u64,
 }
 
 impl Ui {
@@ -741,6 +751,9 @@ impl Ui {
             pet: pet::Pet::load_default(),
             last_pet_ms: 0,
             pet_activity: 0,
+            pet_msg: 0,
+            pet_pending: false,
+            pet_poll_ms: 0,
         }
     }
 
@@ -1910,8 +1923,12 @@ fn tapped(screen: &Screen, ui: &mut Ui, point: (i64, i64), clock: [u64; 7]) {
                 return;
             }
             if ui.settings.pet && ui.pet.valid {
-                let px = screen.width() - 46;
-                let py = screen.height() - 128;
+                let (px, py) = ui.pet.clamped_anchor(
+                    screen,
+                    screen.width() - 46,
+                    screen.height() - 128,
+                    crate::theme::pet_size() as i64,
+                );
                 if ui.pet.hit(px, py, point.0, point.1) {
                     ui.pet.tap(k::uptime_ms(), point.0 < px);
                     ui.paint_bg = true;
@@ -1992,6 +2009,7 @@ fn tapped(screen: &Screen, ui: &mut Ui, point: (i64, i64), clock: [u64; 7]) {
                         toggle_settings(&mut ui.settings, row);
                     }
                 }
+                AppKind::Pet => pet_app_hit(ui, app_point),
                 _ => apps::tap(screen, &mut ui.apps, app, app_point, osk_now, clock),
             }
             if apps::text_focused(&ui.apps, app)
@@ -2799,7 +2817,13 @@ fn draw_home(
     }
 
     if ui.settings.pet && ui.pet.valid && ui.folder_view.is_none() {
-        ui.pet.draw(screen, width - 46, height - 128 + y_offset);
+        let (ax, ay) = ui.pet.clamped_anchor(
+            screen,
+            width - 46,
+            height - 128 + y_offset,
+            crate::theme::pet_size() as i64,
+        );
+        ui.pet.draw(screen, ax, ay);
     }
     draw_home_indicator(screen);
 }
@@ -3090,6 +3114,13 @@ fn draw_glyph(screen: &Screen, app: AppKind, cx: i64, cy: i64, size: i64, color:
             screen.circle(cx + s / 3, cy + s / 12, s / 8, color);
             screen.circle(cx - s / 3, cy + s / 12, s / 8, SURFACE_HI());
         }
+        AppKind::Pet => {
+            // Little whale: rounded body, fin, eye.
+            screen.round_rect(cx - s / 3, cy - s / 5, s * 2 / 3, s / 2, s / 4, color);
+            screen.circle(cx - s / 3, cy + s / 14, s / 7, color);
+            screen.circle(cx + s / 8, cy - s / 22, s / 12, SURFACE_HI());
+            screen.fill(cx + s / 4, cy + s / 6, s / 5, s / 14, color);
+        }
         AppKind::AiStudio => {
             screen.round_rect(cx - s / 3, cy - s / 3, s * 2 / 3, s / 2, s / 8, color);
             screen.fill(cx - s / 8, cy + s / 6, s / 6, s / 8, color);
@@ -3180,6 +3211,7 @@ fn draw_app(
         AppKind::Calculator => draw_calculator(screen, ui, x),
         AppKind::Clock => draw_clock_app(screen, clock, x),
         AppKind::Settings => draw_settings(screen, &ui.settings, x),
+        AppKind::Pet => draw_pet_app(screen, ui, x),
         _ => apps::draw(screen, &mut ui.apps, app, clock, osk),
     }
     if osk {
@@ -3370,6 +3402,185 @@ fn draw_settings(screen: &Screen, settings: &Settings, x_offset: i64) {
     screen.round_rect(x + 20, 740, width - 40, 56, 28, SURFACE());
     screen.text(x + 44, 756, "About KimiOS", 2, TEXT());
     screen.text(x + 44, 780, "ARM64 - Material 3 / Nothing", 1, MUTED());
+}
+
+/// Pet manager: show/hide the pet, preview its state, and install or remove an
+/// imported sprite pack from `/disk/import/pet`.
+/// Text split into two pieces drawn as one centred run (e.g. `100` + `%`).
+fn draw_centered_pair(screen: &Screen, cx: i64, y: i64, a: &str, b: &str, color: u32) {
+    let aw = Screen::text_width(a, 1);
+    let bw = Screen::text_width(b, 1);
+    let x0 = cx - (aw + bw) / 2;
+    screen.text(x0, y, a, 1, color);
+    screen.text(x0 + aw, y, b, 1, color);
+}
+
+fn draw_pet_app(screen: &Screen, ui: &mut Ui, x_offset: i64) {
+    // After the user picks files the host copies them in asynchronously, so poll
+    // until both halves are present and then install without another tap.
+    if ui.pet_pending {
+        let now = k::uptime_ms();
+        if now.saturating_sub(ui.pet_poll_ms) >= 400 {
+            ui.pet_poll_ms = now;
+            match pet::Pet::install_from("/disk/import/pet") {
+                pet::InstallResult::Ok => {
+                    ui.pet = pet::Pet::load_default();
+                    ui.settings.pet = true;
+                    ui.pet_msg = 1;
+                    ui.pet_pending = false;
+                }
+                pet::InstallResult::Invalid => {
+                    ui.pet_msg = 3;
+                    ui.pet_pending = false;
+                }
+                pet::InstallResult::NoFiles => {}
+            }
+        }
+    }
+    let x = x_offset;
+    let width = screen.width();
+    screen.fill(x, 93, width, screen.height() - 93, BLACK());
+
+    // Preview card.
+    screen.round_rect(x + 20, 118, width - 40, 150, 28, SURFACE());
+    screen.text(x + 44, 136, "Desktop pet", 2, TEXT());
+    screen.text(x + 44, 174, "Tap the pet on Home to play", 1, MUTED());
+    if ui.pet.valid {
+        // Cap the preview so a very large pet cannot spill out of the card; the
+        // real size is what Home shows.
+        let cap = (crate::theme::pet_size() as i64).min(200);
+        ui.pet.draw_scaled(screen, x + width - 116, 226, cap);
+    }
+    let lx = x + 44;
+    let state_label = "State:";
+    screen.text(lx, 212, state_label, 1, MUTED());
+    screen.text(lx + Screen::text_width(state_label, 1) + 8, 212, ui.pet.state_name(), 1, TEXT());
+    let source_label = "Source:";
+    screen.text(lx, 238, source_label, 1, MUTED());
+    screen.text(lx + Screen::text_width(source_label, 1) + 8, 238, ui.pet.source_name(), 1, TEXT());
+
+    // Show-on-Home toggle.
+    screen.round_rect(x + 20, 288, width - 40, 84, 28, SURFACE());
+    screen.text(x + 44, 306, "Show on Home", 2, TEXT());
+    screen.text(x + 44, 338, "Draws the pet over the launcher", 1, MUTED());
+    draw_switch(screen, x + width - 108, 312, ui.settings.pet);
+
+    // Size stepper: - [100%] +
+    screen.round_rect(x + 20, 392, width - 40, 84, 28, SURFACE());
+    screen.text(x + 44, 410, "Size", 2, TEXT());
+    screen.text(x + 44, 442, "Pet scale on Home", 1, MUTED());
+    pet_pill(screen, x + width - 236, 408, 56, 48, "-", SURFACE_HI(), TEXT());
+    pet_pill(screen, x + width - 96, 408, 56, 48, "+", SURFACE_HI(), TEXT());
+    let mut num = [0u8; 20];
+    let label = format_i64(crate::theme::pet_size() as i64, &mut num);
+    draw_centered_pair(screen, x + width - 166, 424, label, "%", TEXT());
+
+    // Presets: jump straight to small / medium / large.
+    pet_pill(screen, x + 20, 492, 130, 48, "S", SURFACE_HI(), TEXT());
+    pet_pill(screen, x + 175, 492, 130, 48, "M", SURFACE_HI(), TEXT());
+    pet_pill(screen, x + 330, 492, 130, 48, "L", SURFACE_HI(), TEXT());
+
+    // Actions: pick files straight from the device, or re-install what is already there.
+    pet_pill(screen, x + 20, 560, 270, 52, "Pick pack files", RED(), TEXT());
+    pet_pill(screen, x + 302, 560, 158, 52, "Install", SURFACE_HI(), TEXT());
+    pet_pill(screen, x + 20, 622, 200, 46, "Remove pack", SURFACE_HI(), TEXT());
+    let installed = pet::Pet::pack_present();
+    screen.text(
+        x + 44,
+        686,
+        if installed { "Imported pack installed" } else { "Using the built-in whale" },
+        1,
+        MUTED(),
+    );
+    screen.text(x + 44, 708, "Pick any .json + .png pair, or drop", 1, MUTED());
+    screen.text(x + 44, 730, "them in /disk/import/pet", 1, MUTED());
+
+    match ui.pet_msg {
+        1 => {
+            screen.text(x + 44, 762, "Pack imported", 1, GREEN());
+        }
+        2 => {
+            screen.text(x + 44, 762, "Pack removed", 1, GREEN());
+        }
+        3 => {
+            screen.text(x + 44, 762, "Import failed - check the pack files", 1, RED());
+        }
+        _ => {}
+    }
+    if ui.pet_pending {
+        screen.text(x + 44, 762, "Waiting for the picked files...", 1, MUTED());
+    }
+}
+
+fn pet_pill(screen: &Screen, x: i64, y: i64, w: i64, h: i64, label: &str, fill: u32, fg: u32) {
+    screen.round_rect(x, y, w, h, h / 2, fill);
+    let tw = Screen::text_width(label, 1);
+    screen.text(x + (w - tw) / 2, y + h / 2 - 6, label, 1, fg);
+}
+
+fn pet_app_hit(ui: &mut Ui, point: (i64, i64)) {
+    let (px, py) = point;
+    if py >= 288 && py < 372 && px >= 340 && px < 462 {
+        ui.settings.pet = !ui.settings.pet;
+        return;
+    }
+    // Size stepper.
+    if py >= 408 && py < 456 {
+        if px >= 244 && px < 300 {
+            crate::theme::set_pet_size(crate::theme::pet_size_step(false));
+            return;
+        }
+        if px >= 384 && px < 440 {
+            crate::theme::set_pet_size(crate::theme::pet_size_step(true));
+            return;
+        }
+    }
+    // Presets: S / M / L.
+    if py >= 492 && py < 540 {
+        if px >= 20 && px < 150 {
+            crate::theme::set_pet_size(100);
+            return;
+        }
+        if px >= 175 && px < 305 {
+            crate::theme::set_pet_size(300);
+            return;
+        }
+        if px >= 330 && px < 460 {
+            crate::theme::set_pet_size(crate::theme::MAX_PET_SIZE);
+            return;
+        }
+    }
+    if py < 560 || py >= 612 {
+        if py >= 622 && py < 668 && px >= 20 && px < 220 {
+            if pet::Pet::uninstall() {
+                ui.pet = pet::Pet::load_default();
+                ui.pet_msg = 2;
+            } else {
+                ui.pet_msg = 3;
+            }
+        }
+        return;
+    }
+    if px >= 20 && px < 290 {
+        // Let the user choose the files from anywhere on the device.
+        ui.pet_msg = 0;
+        if k::import_file("/disk/import/pet") {
+            ui.pet_pending = true;
+            ui.pet_poll_ms = 0;
+        } else {
+            ui.pet_msg = 3;
+        }
+    } else if px >= 302 && px < 460 {
+        match pet::Pet::install_from("/disk/import/pet") {
+            pet::InstallResult::Ok => {
+                ui.pet = pet::Pet::load_default();
+                ui.settings.pet = true;
+                ui.pet_msg = 1;
+            }
+            pet::InstallResult::NoFiles => ui.pet_msg = 0,
+            pet::InstallResult::Invalid => ui.pet_msg = 3,
+        }
+    }
 }
 
 fn draw_switch(screen: &Screen, x: i64, y: i64, on: bool) {
@@ -3738,6 +3949,7 @@ impl AppKind {
             AppKind::Plugins => "Plugins",
             AppKind::AiStudio => "AI Studio",
             AppKind::OpenCode => "OpenCode",
+            AppKind::Pet => "Pet",
         }
     }
 }

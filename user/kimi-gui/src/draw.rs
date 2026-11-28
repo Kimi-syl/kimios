@@ -262,6 +262,68 @@ impl Screen {
         }
     }
 
+    /// Fractionally scaled sprite blit: the on-screen size is
+/// `cw * (physical_width/LOGICAL_WIDTH) * num/den`, so callers can size a sprite
+/// by percentage without being limited to integer scale factors. Nearest
+/// neighbour, like `sprite`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn sprite_scaled(
+        &self,
+        dx: i64,
+        dy: i64,
+        num: i64,
+        den: i64,
+        src: &[u8],
+        sw: i64,
+        sh: i64,
+        sx: i64,
+        sy: i64,
+        cw: i64,
+        ch: i64,
+        mirror: bool,
+    ) {
+        let base = self.physical_width / LOGICAL_WIDTH;
+        if base <= 0 || num <= 0 || den <= 0 || cw <= 0 || ch <= 0 || sw <= 0 || sh <= 0 {
+            return;
+        }
+        let dw = (cw * base * num + den / 2) / den;
+        let dh = (ch * base * num + den / 2) / den;
+        if dw <= 0 || dh <= 0 {
+            return;
+        }
+        let px0 = self.map_x(dx);
+        let py0 = self.map_y(dy);
+        self.mark_dirty(px0, py0, px0 + dw, py0 + dh);
+        for oy in 0..dh {
+            let row = sy + oy * ch / dh;
+            if row < 0 || row >= sh {
+                continue;
+            }
+            for ox in 0..dw {
+                let ax = ox * cw / dw;
+                let col = sx + if mirror { cw - 1 - ax } else { ax };
+                if col < 0 || col >= sw {
+                    continue;
+                }
+                let o = ((row * sw + col) * 4) as usize;
+                if o + 4 > src.len() {
+                    continue;
+                }
+                let a = src[o + 3] as u32;
+                if a == 0 {
+                    continue;
+                }
+                let color =
+                    ((src[o] as u32) << 16) | ((src[o + 1] as u32) << 8) | src[o + 2] as u32;
+                if a >= 255 {
+                    self.phys_fill(px0 + ox, py0 + oy, 1, 1, color);
+                } else {
+                    self.phys_blend(px0 + ox, py0 + oy, color, a);
+                }
+            }
+        }
+    }
+
     pub fn fill(&self, x: i64, y: i64, width: i64, height: i64, color: u32) {
         self.phys_fill(
             self.map_x(x),

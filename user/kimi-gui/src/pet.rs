@@ -672,6 +672,43 @@ fn read_disk(path: &str, buf: &mut [u8]) -> Option<usize> {
     Some(total)
 }
 
+/// Join `dir` and `name` into `out`, returning the resulting slice.
+fn join_path<'a>(dir: &str, name: &str, out: &'a mut [u8; 128]) -> Option<&'a str> {
+    let mut n = 0usize;
+    for &b in dir.as_bytes() {
+        if n >= out.len() {
+            return None;
+        }
+        out[n] = b;
+        n += 1;
+    }
+    if n > 0 && out[n - 1] != b'/' {
+        if n >= out.len() {
+            return None;
+        }
+        out[n] = b'/';
+        n += 1;
+    }
+    for &b in name.as_bytes() {
+        if n >= out.len() {
+            return None;
+        }
+        out[n] = b;
+        n += 1;
+    }
+    core::str::from_utf8(&out[..n]).ok()
+}
+
+/// Write `data` to `path`, truncating via create. False on short write.
+fn write_disk(path: &str, data: &[u8]) -> bool {
+    let Some(handle) = k::create(path) else {
+        return false;
+    };
+    let written = k::write_file(handle, 0, data);
+    k::close(handle);
+    written == data.len()
+}
+
 /// Map app activity to a pet state: streaming -> thinking, an open app ->
 /// working, otherwise idle. Pure so it can be unit-tested.
 pub fn activity_state(app_open: bool, streaming: bool) -> usize {
@@ -691,6 +728,9 @@ pub fn activity_state(app_open: bool, streaming: bool) -> usize {
 pub struct Pet {
     pub pack: PetPack,
     pub valid: bool,
+    /// True when the active pack came from `/disk/pet/` rather than the
+    /// built-in whale.
+    pub imported: bool,
     state: usize,
     frame: usize,
     frame_ms: i64,
@@ -702,11 +742,22 @@ pub struct Pet {
     tap_count: u32,
 }
 
+/// Outcome of trying to install a pack from a folder.
+pub enum InstallResult {
+    /// Pack validated and written to `/disk/pet`.
+    Ok,
+    /// No usable `.json` + `.png` pair in the folder yet.
+    NoFiles,
+    /// The pair was there but did not decode/parse.
+    Invalid,
+}
+
 impl Pet {
     pub fn disabled() -> Self {
         Pet {
             pack: PetPack::empty(),
             valid: false,
+            imported: false,
             state: S_IDLE,
             frame: 0,
             frame_ms: 0,
@@ -744,14 +795,108 @@ impl Pet {
             let dp = core::slice::from_raw_parts_mut(DP.as_mut_ptr(), DP.len());
             if let (Some(jn), Some(pn)) = (read_disk("/disk/pet/pack.json", dj), read_disk("/disk/pet/atlas.png", dp)) {
                 if jn > 0 && pn > 0 {
-                    let pet = Pet::from_pack(&dj[..jn], &dp[..pn]);
+                    let mut pet = Pet::from_pack(&dj[..jn], &dp[..pn]);
                     if pet.valid {
+                        pet.imported = true;
                         return pet;
                     }
                 }
             }
         }
         Pet::from_pack(include_bytes!("pet_default.json"), include_bytes!("pet_default.png"))
+    }
+
+    /// Human-readable name of the current animation state.
+    pub fn state_name(&self) -> &'static str {
+        match self.state {
+            S_WORKING => "Working",
+            S_THINKING => "Thinking",
+            _ => "Idle",
+        }
+    }
+
+    /// Source label for the manager UI.
+    pub fn source_name(&self) -> &'static str {
+        if self.imported { "Imported pack" } else { "Built-in whale" }
+    }
+
+    /// Install a pack from `dir`. Any `*.json` + `*.png` pair will do — the user
+    /// does not have to rename files to `pack.json`/`atlas.png`, which matters
+    /// because the Android picker keeps the file's original name.
+    ///
+    /// The candidate is validated before anything is written, so a bad pack never
+    /// replaces a working one.
+    pub fn install_from(dir: &str) -> InstallResult {
+        static mut SRC_JSON: [u8; 65536] = [0; 65536];
+        static mut SRC_PNG: [u8; 262144] = [0; 262144];
+
+        let mut listing = [0u8; 1024];
+        let Some(n) = k::listdir(dir, &mut listing) else {
+            return InstallResult::NoFiles;
+        };
+        let listing = &listing[..n];
+        let mut json_name: Option<&[u8]> = None;
+        let mut png_name: Option<&[u8]> = None;
+        let mut off = 0usize;
+        while off < listing.len() {
+            let rest = &listing[off..];
+            let len = rest.iter().position(|&b| b == 0).unwrap_or(rest.len());
+            let name = &rest[..len];
+            if name.ends_with(b".json") && json_name.is_none() {
+                json_name = Some(name);
+            } else if name.ends_with(b".png") && png_name.is_none() {
+                png_name = Some(name);
+            }
+            off += len + 1;
+        }
+        let (Some(jname), Some(pname)) = (json_name, png_name) else {
+            return InstallResult::NoFiles;
+        };
+        let (Ok(jname), Ok(pname)) = (core::str::from_utf8(jname), core::str::from_utf8(pname)) else {
+            return InstallResult::Invalid;
+        };
+        let mut jb = [0u8; 128];
+        let mut pb = [0u8; 128];
+        let (Some(jpath), Some(ppath)) = (
+            join_path(dir, jname, &mut jb),
+            join_path(dir, pname, &mut pb),
+        ) else {
+            return InstallResult::Invalid;
+        };
+
+        unsafe {
+            let dj = core::slice::from_raw_parts_mut(SRC_JSON.as_mut_ptr(), SRC_JSON.len());
+            let dp = core::slice::from_raw_parts_mut(SRC_PNG.as_mut_ptr(), SRC_PNG.len());
+            let (Some(jn), Some(pn)) = (read_disk(jpath, dj), read_disk(ppath, dp)) else {
+                return InstallResult::NoFiles;
+            };
+            if jn == 0 || pn == 0 {
+                return InstallResult::NoFiles;
+            }
+            if !Pet::from_pack(&dj[..jn], &dp[..pn]).valid {
+                return InstallResult::Invalid;
+            }
+            k::mkdir("/disk/pet");
+            let wrote = write_disk("/disk/pet/pack.json", &dj[..jn])
+                && write_disk("/disk/pet/atlas.png", &dp[..pn]);
+            if wrote {
+                InstallResult::Ok
+            } else {
+                InstallResult::Invalid
+            }
+        }
+    }
+
+    /// Drop the imported pack, falling back to the built-in whale.
+    pub fn uninstall() -> bool {
+        let a = k::unlink("/disk/pet/pack.json");
+        let b = k::unlink("/disk/pet/atlas.png");
+        a || b
+    }
+
+    /// True when an imported pack is installed on disk.
+    pub fn pack_present() -> bool {
+        k::stat("/disk/pet/pack.json").is_some() && k::stat("/disk/pet/atlas.png").is_some()
     }
 
     fn display_anim(&self) -> usize {
@@ -896,6 +1041,13 @@ impl Pet {
 
     /// Draw the current frame at logical `(x,y)` (top-left of the canvas).
     pub fn draw(&self, screen: &Screen, x: i64, y: i64) {
+        self.draw_scaled(screen, x, y, crate::theme::pet_size() as i64);
+    }
+
+    /// Draw at `pct` percent of the pack's authored scale, keeping (x, y) as the
+    /// anchor point (the anchor/baseline offsets scale with the sprite so the
+    /// pet grows around the same spot instead of drifting).
+    pub fn draw_scaled(&self, screen: &Screen, x: i64, y: i64, pct: i64) {
         if !self.valid {
             return;
         }
@@ -904,18 +1056,21 @@ impl Pet {
         if anim.nframes == 0 {
             return;
         }
+        let k = pct.clamp(10, crate::theme::MAX_PET_SIZE as i64 * 2);
         let f = anim.frames[self.frame.min(anim.nframes - 1)];
         let cols = anim.cols.max(1);
         let sx = (f.i % cols) * anim.fw;
         let sy = (f.i / cols) * anim.fh;
         let (aw, ah) = unsafe { (ATLAS_W, ATLAS_H) };
         // centre the canvas on x, sit the baseline on y
-        let dx = x - self.pack.anchor_x;
-        let dy = y - self.pack.baseline;
-        screen.sprite(
+        let dx = x - self.pack.anchor_x * k / 100;
+        let dy = y - self.pack.baseline * k / 100;
+        // Fractional scale so percentage steps actually change the size.
+        screen.sprite_scaled(
             dx,
             dy,
-            self.pack.scale.max(1),
+            self.pack.scale.max(1) * k,
+            100,
             atlas_slice(),
             aw,
             ah,
@@ -927,14 +1082,40 @@ impl Pet {
         );
     }
 
-    /// Logical hit-box for tap routing (content box at the draw position).
+    /// Clamp the anchor so the sprite stays fully on screen at large sizes.
+    ///
+    /// The pet is anchored bottom-right on Home, so scaling it up would push it
+    /// past the edge; both the renderer and the tap test use this so the visible
+    /// sprite and the hit box stay together.
+    pub fn clamped_anchor(&self, screen: &Screen, x: i64, y: i64, pct: i64) -> (i64, i64) {
+        if !self.valid {
+            return (x, y);
+        }
+        let k = pct.clamp(10, 800);
+        let scale_num = self.pack.scale.max(1) * k;
+        let w = self.pack.canvas_w * scale_num / 100;
+        let h = self.pack.canvas_h * scale_num / 100;
+        let off_x = self.pack.anchor_x * k / 100;
+        let off_y = self.pack.baseline * k / 100;
+        let max_dx = (screen.width() - w).max(0);
+        let max_dy = (screen.logical_height() - h).max(0);
+        let dx = (x - off_x).clamp(0, max_dx);
+        let dy = (y - off_y).clamp(0, max_dy);
+        (dx + off_x, dy + off_y)
+    }
+
+    /// Logical hit-box for tap routing (content box at the draw position),
+    /// scaled by the current pet size.
     pub fn hit(&self, x: i64, y: i64, px: i64, py: i64) -> bool {
         if !self.valid {
             return false;
         }
-        let dx = x - self.pack.anchor_x + self.pack.cb_x;
-        let dy = y - self.pack.baseline + self.pack.cb_y;
-        px >= dx && px < dx + self.pack.cb_w && py >= dy && py < dy + self.pack.cb_h
+        let k = crate::theme::pet_size() as i64;
+        let dx = x - self.pack.anchor_x * k / 100 + self.pack.cb_x * k / 100;
+        let dy = y - self.pack.baseline * k / 100 + self.pack.cb_y * k / 100;
+        let w = self.pack.cb_w * k / 100;
+        let h = self.pack.cb_h * k / 100;
+        px >= dx && px < dx + w && py >= dy && py < dy + h
     }
 }
 

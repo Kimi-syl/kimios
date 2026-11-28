@@ -43,6 +43,7 @@ static P: Pal = Pal {
 
 static THEME: AtomicUsize = AtomicUsize::new(0);
 static FONT: AtomicUsize = AtomicUsize::new(0);
+        static PET_SIZE: AtomicUsize = AtomicUsize::new(100);
 static CUSTOM: AtomicUsize = AtomicUsize::new(0);
 static mut CUSTOM_NAME: [u8; 24] = [0; 24];
 static mut CUSTOM_NAME_LEN: usize = 0;
@@ -190,6 +191,34 @@ pub fn font_name(i: usize) -> &'static str {
 pub fn active_font() -> usize { FONT.load(Ordering::Relaxed) }
 pub fn apply_font(i: usize) { FONT.store(i.min(4), Ordering::Relaxed); }
 
+/// Desktop pet size as a percentage of the pack's authored scale (50..=250).
+pub fn pet_size() -> usize {
+    PET_SIZE.load(Ordering::Relaxed).clamp(MIN_PET_SIZE, MAX_PET_SIZE)
+}
+
+/// Set the pet size, clamped, and persist it.
+pub fn set_pet_size(pct: usize) {
+    PET_SIZE.store(pct.clamp(MIN_PET_SIZE, MAX_PET_SIZE), Ordering::Relaxed);
+    save();
+}
+
+pub const MIN_PET_SIZE: usize = 50;
+/// The pet is anchored in a corner and clamped to stay on screen, so a large
+/// ceiling is safe: 800% is roughly a quarter of the screen width on a 1080p
+/// phone.
+pub const MAX_PET_SIZE: usize = 800;
+const PET_SIZE_STEP: usize = 25;
+
+/// Next size up/down, in fixed steps within the allowed range.
+pub fn pet_size_step(up: bool) -> usize {
+    let cur = pet_size();
+    if up {
+        (cur + PET_SIZE_STEP).min(MAX_PET_SIZE)
+    } else {
+        cur.saturating_sub(PET_SIZE_STEP).max(MIN_PET_SIZE)
+    }
+}
+
 /// The font used for proportional UI text (`Screen::text`).
 pub fn ui_font() -> &'static Font {
     match FONT.load(Ordering::Relaxed) {
@@ -218,6 +247,8 @@ pub fn save() {
     }
     n = put(&mut buf, n, b"\nfont=");
     n = put_dec(&mut buf, n, FONT.load(Ordering::Relaxed));
+    n = put(&mut buf, n, b"\npetsize=");
+    n = put_dec(&mut buf, n, pet_size());
     n = put(&mut buf, n, b"\n");
     if let Some(h) = k::create(CFG) {
         k::write_file(h, 0, &buf[..n]);
@@ -285,6 +316,9 @@ pub fn load() {
         }
     }
     if let Some(f) = field(data, b"font=") { apply_font(f); }
+    if let Some(s) = field(data, b"petsize=") {
+        PET_SIZE.store(s.clamp(MIN_PET_SIZE, MAX_PET_SIZE), Ordering::Relaxed);
+    }
 }
 
 fn field(data: &[u8], key: &[u8]) -> Option<usize> {
