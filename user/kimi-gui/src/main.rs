@@ -3391,6 +3391,15 @@ fn draw_settings(screen: &Screen, settings: &Settings, x_offset: i64) {
 
 /// Pet manager: show/hide the pet, preview its state, and install or remove an
 /// imported sprite pack from `/disk/import/pet`.
+/// Text split into two pieces drawn as one centred run (e.g. `100` + `%`).
+fn draw_centered_pair(screen: &Screen, cx: i64, y: i64, a: &str, b: &str, color: u32) {
+    let aw = Screen::text_width(a, 1);
+    let bw = Screen::text_width(b, 1);
+    let x0 = cx - (aw + bw) / 2;
+    screen.text(x0, y, a, 1, color);
+    screen.text(x0 + aw, y, b, 1, color);
+}
+
 fn draw_pet_app(screen: &Screen, ui: &Ui, x_offset: i64) {
     let x = x_offset;
     let width = screen.width();
@@ -3401,7 +3410,7 @@ fn draw_pet_app(screen: &Screen, ui: &Ui, x_offset: i64) {
     screen.text(x + 44, 136, "Desktop pet", 2, TEXT());
     screen.text(x + 44, 174, "Tap the pet on Home to play", 1, MUTED());
     if ui.pet.valid {
-        ui.pet.draw(screen, x + width - 116, 150);
+        ui.pet.draw_scaled(screen, x + width - 116, 226, crate::theme::pet_size() as i64);
     }
     let lx = x + 44;
     let state_label = "State:";
@@ -3417,29 +3426,39 @@ fn draw_pet_app(screen: &Screen, ui: &Ui, x_offset: i64) {
     screen.text(x + 44, 338, "Draws the pet over the launcher", 1, MUTED());
     draw_switch(screen, x + width - 108, 312, ui.settings.pet);
 
+    // Size stepper: - [100%] +
+    screen.round_rect(x + 20, 392, width - 40, 84, 28, SURFACE());
+    screen.text(x + 44, 410, "Size", 2, TEXT());
+    screen.text(x + 44, 442, "Pet scale on Home", 1, MUTED());
+    pet_pill(screen, x + width - 236, 408, 56, 48, "-", SURFACE_HI(), TEXT());
+    pet_pill(screen, x + width - 96, 408, 56, 48, "+", SURFACE_HI(), TEXT());
+    let mut num = [0u8; 20];
+    let label = format_i64(crate::theme::pet_size() as i64, &mut num);
+    draw_centered_pair(screen, x + width - 166, 424, label, "%", TEXT());
+
     // Pack actions.
-    pet_pill(screen, x + 20, 396, 150, 52, "Import", RED(), TEXT());
-    pet_pill(screen, x + 190, 396, 150, 52, "Remove", SURFACE_HI(), TEXT());
+    pet_pill(screen, x + 20, 496, 150, 52, "Import", RED(), TEXT());
+    pet_pill(screen, x + 190, 496, 150, 52, "Remove", SURFACE_HI(), TEXT());
     let installed = pet::Pet::pack_present();
     screen.text(
         x + 44,
-        464,
+        564,
         if installed { "Imported pack installed" } else { "Using the built-in whale" },
         1,
         MUTED(),
     );
-    screen.text(x + 44, 490, "Put pack.json + atlas.png in", 1, MUTED());
-    screen.text(x + 44, 512, "/disk/import/pet, then tap Import", 1, MUTED());
+    screen.text(x + 44, 590, "Put pack.json + atlas.png in", 1, MUTED());
+    screen.text(x + 44, 612, "/disk/import/pet, then tap Import", 1, MUTED());
 
     match ui.pet_msg {
         1 => {
-            screen.text(x + 44, 556, "Pack imported", 1, GREEN());
+            screen.text(x + 44, 656, "Pack imported", 1, GREEN());
         }
         2 => {
-            screen.text(x + 44, 556, "Pack removed", 1, GREEN());
+            screen.text(x + 44, 656, "Pack removed", 1, GREEN());
         }
         3 => {
-            screen.text(x + 44, 556, "Import failed - check the pack files", 1, RED());
+            screen.text(x + 44, 656, "Import failed - check the pack files", 1, RED());
         }
         _ => {}
     }
@@ -3457,7 +3476,18 @@ fn pet_app_hit(ui: &mut Ui, point: (i64, i64)) {
         ui.settings.pet = !ui.settings.pet;
         return;
     }
-    if py < 396 || py >= 448 {
+    // Size stepper.
+    if py >= 408 && py < 456 {
+        if px >= 244 && px < 300 {
+            crate::theme::set_pet_size(crate::theme::pet_size_step(false));
+            return;
+        }
+        if px >= 384 && px < 440 {
+            crate::theme::set_pet_size(crate::theme::pet_size_step(true));
+            return;
+        }
+    }
+    if py < 496 || py >= 548 {
         return;
     }
     if px >= 20 && px < 170 {

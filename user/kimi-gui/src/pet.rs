@@ -995,6 +995,13 @@ impl Pet {
 
     /// Draw the current frame at logical `(x,y)` (top-left of the canvas).
     pub fn draw(&self, screen: &Screen, x: i64, y: i64) {
+        self.draw_scaled(screen, x, y, crate::theme::pet_size() as i64);
+    }
+
+    /// Draw at `pct` percent of the pack's authored scale, keeping (x, y) as the
+    /// anchor point (the anchor/baseline offsets scale with the sprite so the
+    /// pet grows around the same spot instead of drifting).
+    pub fn draw_scaled(&self, screen: &Screen, x: i64, y: i64, pct: i64) {
         if !self.valid {
             return;
         }
@@ -1003,18 +1010,21 @@ impl Pet {
         if anim.nframes == 0 {
             return;
         }
+        let k = pct.clamp(10, 400);
         let f = anim.frames[self.frame.min(anim.nframes - 1)];
         let cols = anim.cols.max(1);
         let sx = (f.i % cols) * anim.fw;
         let sy = (f.i / cols) * anim.fh;
         let (aw, ah) = unsafe { (ATLAS_W, ATLAS_H) };
         // centre the canvas on x, sit the baseline on y
-        let dx = x - self.pack.anchor_x;
-        let dy = y - self.pack.baseline;
-        screen.sprite(
+        let dx = x - self.pack.anchor_x * k / 100;
+        let dy = y - self.pack.baseline * k / 100;
+        // Fractional scale so percentage steps actually change the size.
+        screen.sprite_scaled(
             dx,
             dy,
-            self.pack.scale.max(1),
+            self.pack.scale.max(1) * k,
+            100,
             atlas_slice(),
             aw,
             ah,
@@ -1026,14 +1036,18 @@ impl Pet {
         );
     }
 
-    /// Logical hit-box for tap routing (content box at the draw position).
+    /// Logical hit-box for tap routing (content box at the draw position),
+    /// scaled by the current pet size.
     pub fn hit(&self, x: i64, y: i64, px: i64, py: i64) -> bool {
         if !self.valid {
             return false;
         }
-        let dx = x - self.pack.anchor_x + self.pack.cb_x;
-        let dy = y - self.pack.baseline + self.pack.cb_y;
-        px >= dx && px < dx + self.pack.cb_w && py >= dy && py < dy + self.pack.cb_h
+        let k = crate::theme::pet_size() as i64;
+        let dx = x - self.pack.anchor_x * k / 100 + self.pack.cb_x * k / 100;
+        let dy = y - self.pack.baseline * k / 100 + self.pack.cb_y * k / 100;
+        let w = self.pack.cb_w * k / 100;
+        let h = self.pack.cb_h * k / 100;
+        px >= dx && px < dx + w && py >= dy && py < dy + h
     }
 }
 
