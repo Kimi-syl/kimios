@@ -63,6 +63,13 @@ impl Pose {
 /// Procedural idle/working/thinking pose at time `t` (seconds).
 pub fn procedural_pose(state: usize, t: f32, out: &mut Pose) {
     *out = Pose::default();
+    // Rest-pose correction: the bind pose is a T-pose, which looks wrong for a
+    // desktop pet. Drop the arms to a relaxed A-pose and add a slight elbow bend.
+    out.set(BONE_LEFT_UPPER_ARM, 0.0, 0.0, 0.55);
+    out.set(BONE_RIGHT_UPPER_ARM, 0.0, 0.0, -0.55);
+    out.set(BONE_LEFT_LOWER_ARM, 0.0, 0.0, 0.05);
+    out.set(BONE_RIGHT_LOWER_ARM, 0.0, 0.0, -0.05);
+
     // Breathing: gentle vertical bob plus a small spine pitch.
     let breath = sin(t * 1.6);
     out.root_y = breath * 0.006;
@@ -78,8 +85,8 @@ pub fn procedural_pose(state: usize, t: f32, out: &mut Pose) {
     out.set(BONE_HEAD, hx * 0.5, hy * 0.5, 0.0);
     // Arms: small counter-sway.
     let sway = sin(t * 1.1) * 0.06;
-    out.set(BONE_LEFT_UPPER_ARM, 0.0, 0.0, -0.05 + sway);
-    out.set(BONE_RIGHT_UPPER_ARM, 0.0, 0.0, 0.05 - sway);
+    out.set(BONE_LEFT_UPPER_ARM, 0.0, sway * 0.5, 0.55 - sway * 0.3);
+    out.set(BONE_RIGHT_UPPER_ARM, 0.0, -sway * 0.5, -0.55 + sway * 0.3);
 }
 
 /// Compute world matrices for every node: `world[i] = parent_world * local(i)`,

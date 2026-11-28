@@ -126,8 +126,17 @@ def audit(path, verbose=True):
             tris += ntris
             pos_idx = attrs.get("POSITION")
             nverts = gltf["accessors"][pos_idx]["count"] if pos_idx is not None else 0
+            attr_detail = {}
+            for aname, ai in sorted(attrs.items()):
+                acc = gltf["accessors"][ai]
+                attr_detail[aname] = {
+                    "accessor": ai, "type": acc["type"],
+                    "componentType": acc["componentType"],
+                    "component": COMPONENT_NAME.get(acc["componentType"], str(acc["componentType"])),
+                    "count": acc["count"], "normalized": acc.get("normalized", False),
+                }
             prims.append({"mesh": mi, "prim": pi, "attrs": sorted(attrs), "tris": ntris,
-                          "verts": nverts, "mode": prim.get("mode", 4)})
+                          "verts": nverts, "mode": prim.get("mode", 4), "attr_detail": attr_detail})
     rep["prims"] = prims
     rep["triangles"] = tris
     rep["vertices"] = sum(p["verts"] for p in prims)
@@ -259,7 +268,10 @@ def print_report(rep):
     print("container   : magic=%r version=%d declared=%d actual=%d bytes  %s"
           % (h["magic"].decode("ascii", "replace"), h["version"], h["declared_length"],
              h["actual_length"], "OK" if h["declared_length"] == h["actual_length"] else "MISMATCH"))
-    print("chunks      : %s" % ", ".join("%s(%d)" % (c[0].decode("ascii", "replace").strip(), c[1]) for c in rep.get("chunks", [])))
+    CHUNK_NAMES = {b"JSON": "JSON", b"BIN\x00": "BIN", b"BIN ": "BIN"}
+    print("chunks      : %s" % ", ".join(
+        "%s(%d)" % (CHUNK_NAMES.get(c[0], c[0].decode("ascii", "replace").strip("\x00 ")), c[1])
+        for c in rep.get("chunks", [])))
     print("counts      : meshes=%d primitives=%d vertices=%d triangles=%d accessors=%d skins=%d images=%d nodes=%d"
           % (len(rep["gltf"].get("meshes", [])), len(rep.get("prims", [])), rep.get("vertices", 0),
              rep.get("triangles", 0), rep["accessors"], len(rep["skins"]),
@@ -272,6 +284,11 @@ def print_report(rep):
     for p in rep["prims"]:
         print("  mesh %d prim %d : %4d tris  %4d verts  mode=%d  attrs=%s"
               % (p["mesh"], p["prim"], p["tris"], p["verts"], p["mode"], ",".join(p["attrs"])))
+        for aname in p["attrs"]:
+            d = p["attr_detail"][aname]
+            print("      %-11s accessor %-3d %-6s %-15s count=%d%s"
+                  % (aname, d["accessor"], d["type"], d["component"], d["count"],
+                     "  normalized" if d["normalized"] else ""))
     print("-" * 78)
     print("skins")
     for s in rep["skins"]:

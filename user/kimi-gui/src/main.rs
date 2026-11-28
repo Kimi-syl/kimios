@@ -1353,7 +1353,7 @@ pub extern "C" fn kimi_test_weather(json: u64, len: u64, mode: u64, out: u64) ->
     apps::weather_parse_test(data, mode, out) as u64
 }
 
-/// Host-only test hook: bounds-checked RGBA??鞊?B blit; returns rows written.
+/// Host-only test hook: bounds-checked RGBA?????B blit; returns rows written.
 #[no_mangle]
 #[cfg(not(target_os = "none"))]
 pub extern "C" fn kimi_test_blit(
@@ -2825,13 +2825,15 @@ fn draw_home(
         if ui.settings.pet3d {
             // Offscreen 3D render blitted 1:1 into the pet's rect.
             let pct = crate::theme::pet_size() as i64;
-            let hgt = (120 * pct.min(180) / 100).clamp(60, 216);
+            let hgt = (110 * pct.min(160) / 100).clamp(60, 190);
             let wid = hgt * 3 / 4;
             let px = width - 40 - wid;
             let py = height - 110 - hgt + y_offset;
             let t = k::uptime_ms();
             pet3d::update_pose(ui.pet.state(), (t as f32) * 0.001);
-            pet3d::draw(screen, px, py, wid, hgt, (t as f32) * 0.0007, 0.10);
+            // Gentle sway around the front instead of a constant spin, so the face stays visible.
+            let yaw = crate::k3d::sin((t as f32) * 0.0004) * 0.34;
+            pet3d::draw(screen, px, py, wid, hgt, yaw, 0.02);
         } else if ui.pet.valid {
             let (ax, ay) = ui.pet.clamped_anchor(
                 screen,

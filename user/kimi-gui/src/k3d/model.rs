@@ -164,7 +164,9 @@ impl Texture {
         let w = self.w as i32;
         let h = self.h as i32;
         let mut x = (u * w as f32) as i32;
-        let mut y = (v * h as f32) as i32;
+        // glTF stores UVs with the origin at the top-left, which matches the PNG
+        // row order the decoder produces, so `v` maps straight to a row.
+        let mut y = (v.clamp(0.0, 1.0) * h as f32) as i32;
         x = ((x % w) + w) % w;
         y = ((y % h) + h) % h;
         let o = ((y * w + x) * 4) as usize;

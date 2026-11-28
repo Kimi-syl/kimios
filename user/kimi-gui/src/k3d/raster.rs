@@ -355,7 +355,7 @@ fn fill(
                     let ny = (a.normal.y * wa + b.normal.y * wb + c.normal.y * wc) * iw;
                     let nz = (a.normal.z * wa + b.normal.z * wb + c.normal.z * wc) * iw;
                     let ndl = Vec3::new(nx, ny, nz).normalised().dot(light).max(0.0);
-                    ambient + ndl * 0.85
+                    ambient + ndl * 0.45
                 };
                 (
                     texel[0] as f32 * mat.base_color[0] * shade,

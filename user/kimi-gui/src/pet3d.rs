@@ -5,8 +5,10 @@
 //! here: a 192x256 target is ~49k pixels, versus 2.07M for the full framebuffer.
 
 use crate::draw::Screen;
+use crate::k;
 use crate::k3d::model::{
-    AlphaMode, Material, ModelArena, Primitive, Vertex, MAX_NODES, NO_TEXTURE, TEX_MAX_DIM,
+    AlphaMode, LoadError, Material, ModelArena, Primitive, ReadAt, Vertex, MAX_NODES, NO_TEXTURE,
+    TEX_MAX_DIM,
 };
 use crate::k3d::raster::{self, DrawParams, DrawStats};
 use crate::k3d::skin::{self, Pose, BONE_COUNT};
@@ -28,6 +30,21 @@ static mut POSE: Pose = Pose {
     root_y: 0.0,
     lean: 0.0,
 };
+/// Guards the one-shot model load so a missing file is not retried every frame.
+static mut LOAD_ATTEMPTED: bool = false;
+
+/// Load the model once: prefer `/disk/pet/model.glb`, else the placeholder cube.
+fn ensure_model() {
+    if model().loaded || unsafe { LOAD_ATTEMPTED } {
+        return;
+    }
+    unsafe {
+        LOAD_ATTEMPTED = true;
+    }
+    if load_from_disk("/disk/pet/model.glb").is_err() {
+        build_cube(1.0, Vec3::new(0.0, 1.0, 0.0));
+    }
+}
 
 /// Last frame's counters, for the FPS overlay.
 pub static mut LAST_STATS: DrawStats = DrawStats {
@@ -39,6 +56,42 @@ pub static mut LAST_STATS: DrawStats = DrawStats {
 
 fn model() -> &'static mut ModelArena {
     unsafe { &mut *core::ptr::addr_of_mut!(MODEL) }
+}
+
+/// Positional reader over a KimiOS file handle, so a GLB is streamed rather than
+/// read into RAM (a real VRM buffer is far larger than the user heap).
+struct FileReadAt {
+    handle: u64,
+}
+
+impl ReadAt for FileReadAt {
+    fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> usize {
+        k::read_file(self.handle, offset as usize, buf)
+    }
+}
+
+/// Load a `.glb`/`.vrm` from disk into the model arena.
+///
+/// Returns the loader's error so the UI can report *why* a model was rejected
+/// instead of silently falling back.
+pub fn load_from_disk(path: &str) -> Result<(), LoadError> {
+    let Some((_, size)) = k::stat(path) else {
+        return Err(LoadError::Io);
+    };
+    let Some(handle) = k::open(path) else {
+        return Err(LoadError::Io);
+    };
+    let mut reader = FileReadAt { handle };
+    let arena = model();
+    let result = crate::k3d::gltf::load(&mut reader, size, arena);
+    k::close(handle);
+    result
+}
+
+/// True when a loaded model carries a skin (i.e. is a character, not a prop).
+pub fn has_skin() -> bool {
+    let m = model();
+    m.joint_count > 0 && m.skin_count > 0
 }
 
 /// Build a procedurally textured cube of `size` metres centred at `centre`.
@@ -163,11 +216,7 @@ pub fn model_stats() -> (usize, usize, bool) {
 /// Render the model and blit it into the screen rectangle `(x, y, w, h)` in
 /// logical coordinates. Pixels the rasteriser did not touch stay transparent.
 pub fn draw(screen: &Screen, x: i64, y: i64, w: i64, h: i64, yaw: f32, pitch: f32) -> bool {
-    // Lazily build the placeholder model so the 3D path is testable before a
-    // real GLB is loaded.
-    if !model().loaded {
-        build_cube(1.0, Vec3::new(0.0, 1.0, 0.0));
-    }
+    ensure_model();
     let arena = model();
     if !arena.loaded || w <= 0 || h <= 0 {
         return false;
@@ -194,6 +243,22 @@ pub fn draw(screen: &Screen, x: i64, y: i64, w: i64, h: i64, yaw: f32, pitch: f3
 
     let mvp = cam.proj.mul(cam.view);
 
+    // Skinned models: joint matrices carry the pose, so the model matrix stays
+    // identity and the vertex shader only applies `world * inverse_bind`.
+    let joint_count = arena.joint_count.min(MAX_JOINTS);
+    let skin_slice: Option<&[Mat4]> = if joint_count > 0 {
+        unsafe {
+            let world = &mut *core::ptr::addr_of_mut!(WORLD);
+            let pose = &*core::ptr::addr_of!(POSE);
+            skin::compute_world(arena, pose, world);
+            let joints = &mut *core::ptr::addr_of_mut!(JOINTS);
+            let n = skin::compute_joint_matrices(arena, world, joints);
+            Some(&(&*core::ptr::addr_of!(JOINTS))[..n])
+        }
+    } else {
+        None
+    };
+
     {
         let mut target = match Target::new(color, depth, RT_W, RT_H) {
             Some(t) => t,
@@ -204,9 +269,9 @@ pub fn draw(screen: &Screen, x: i64, y: i64, w: i64, h: i64, yaw: f32, pitch: f3
             target: &mut target,
             arena,
             mvp,
-            skin: None,
-            light: Vec3::new(0.42, 0.78, 0.46).normalised(),
-            ambient: 0.34,
+            skin: skin_slice,
+            light: Vec3::new(0.35, 0.62, 0.70).normalised(),
+            ambient: 0.80,
             flat_color: None,
         });
         unsafe {
