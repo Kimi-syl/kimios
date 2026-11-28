@@ -742,6 +742,16 @@ pub struct Pet {
     tap_count: u32,
 }
 
+/// Outcome of trying to install a pack from a folder.
+pub enum InstallResult {
+    /// Pack validated and written to `/disk/pet`.
+    Ok,
+    /// No usable `.json` + `.png` pair in the folder yet.
+    NoFiles,
+    /// The pair was there but did not decode/parse.
+    Invalid,
+}
+
 impl Pet {
     pub fn disabled() -> Self {
         Pet {
@@ -810,34 +820,70 @@ impl Pet {
         if self.imported { "Imported pack" } else { "Built-in whale" }
     }
 
-    /// Install a pack from `dir` (expects `pack.json` + `atlas.png`) into
-    /// `/disk/pet/`. The candidate is validated before anything is written, so a
-    /// bad pack never replaces a working one.
-    pub fn install_from(dir: &str) -> bool {
+    /// Install a pack from `dir`. Any `*.json` + `*.png` pair will do — the user
+    /// does not have to rename files to `pack.json`/`atlas.png`, which matters
+    /// because the Android picker keeps the file's original name.
+    ///
+    /// The candidate is validated before anything is written, so a bad pack never
+    /// replaces a working one.
+    pub fn install_from(dir: &str) -> InstallResult {
         static mut SRC_JSON: [u8; 65536] = [0; 65536];
         static mut SRC_PNG: [u8; 262144] = [0; 262144];
+
+        let mut listing = [0u8; 1024];
+        let Some(n) = k::listdir(dir, &mut listing) else {
+            return InstallResult::NoFiles;
+        };
+        let listing = &listing[..n];
+        let mut json_name: Option<&[u8]> = None;
+        let mut png_name: Option<&[u8]> = None;
+        let mut off = 0usize;
+        while off < listing.len() {
+            let rest = &listing[off..];
+            let len = rest.iter().position(|&b| b == 0).unwrap_or(rest.len());
+            let name = &rest[..len];
+            if name.ends_with(b".json") && json_name.is_none() {
+                json_name = Some(name);
+            } else if name.ends_with(b".png") && png_name.is_none() {
+                png_name = Some(name);
+            }
+            off += len + 1;
+        }
+        let (Some(jname), Some(pname)) = (json_name, png_name) else {
+            return InstallResult::NoFiles;
+        };
+        let (Ok(jname), Ok(pname)) = (core::str::from_utf8(jname), core::str::from_utf8(pname)) else {
+            return InstallResult::Invalid;
+        };
         let mut jb = [0u8; 128];
         let mut pb = [0u8; 128];
         let (Some(jpath), Some(ppath)) = (
-            join_path(dir, "pack.json", &mut jb),
-            join_path(dir, "atlas.png", &mut pb),
+            join_path(dir, jname, &mut jb),
+            join_path(dir, pname, &mut pb),
         ) else {
-            return false;
+            return InstallResult::Invalid;
         };
+
         unsafe {
             let dj = core::slice::from_raw_parts_mut(SRC_JSON.as_mut_ptr(), SRC_JSON.len());
             let dp = core::slice::from_raw_parts_mut(SRC_PNG.as_mut_ptr(), SRC_PNG.len());
             let (Some(jn), Some(pn)) = (read_disk(jpath, dj), read_disk(ppath, dp)) else {
-                return false;
+                return InstallResult::NoFiles;
             };
             if jn == 0 || pn == 0 {
-                return false;
+                return InstallResult::NoFiles;
             }
             if !Pet::from_pack(&dj[..jn], &dp[..pn]).valid {
-                return false;
+                return InstallResult::Invalid;
             }
             k::mkdir("/disk/pet");
-            write_disk("/disk/pet/pack.json", &dj[..jn]) && write_disk("/disk/pet/atlas.png", &dp[..pn])
+            let wrote = write_disk("/disk/pet/pack.json", &dj[..jn])
+                && write_disk("/disk/pet/atlas.png", &dp[..pn]);
+            if wrote {
+                InstallResult::Ok
+            } else {
+                InstallResult::Invalid
+            }
         }
     }
 

@@ -710,6 +710,9 @@ struct Ui {
     pet_activity: usize,
     /// Feedback for the Pet app: 0 none, 1 imported, 2 removed, 3 failed.
     pet_msg: u8,
+    /// True while waiting for the file picker to copy a pack in.
+    pet_pending: bool,
+    pet_poll_ms: u64,
 }
 
 impl Ui {
@@ -749,6 +752,8 @@ impl Ui {
             last_pet_ms: 0,
             pet_activity: 0,
             pet_msg: 0,
+            pet_pending: false,
+            pet_poll_ms: 0,
         }
     }
 
@@ -3410,7 +3415,28 @@ fn draw_centered_pair(screen: &Screen, cx: i64, y: i64, a: &str, b: &str, color:
     screen.text(x0 + aw, y, b, 1, color);
 }
 
-fn draw_pet_app(screen: &Screen, ui: &Ui, x_offset: i64) {
+fn draw_pet_app(screen: &Screen, ui: &mut Ui, x_offset: i64) {
+    // After the user picks files the host copies them in asynchronously, so poll
+    // until both halves are present and then install without another tap.
+    if ui.pet_pending {
+        let now = k::uptime_ms();
+        if now.saturating_sub(ui.pet_poll_ms) >= 400 {
+            ui.pet_poll_ms = now;
+            match pet::Pet::install_from("/disk/import/pet") {
+                pet::InstallResult::Ok => {
+                    ui.pet = pet::Pet::load_default();
+                    ui.settings.pet = true;
+                    ui.pet_msg = 1;
+                    ui.pet_pending = false;
+                }
+                pet::InstallResult::Invalid => {
+                    ui.pet_msg = 3;
+                    ui.pet_pending = false;
+                }
+                pet::InstallResult::NoFiles => {}
+            }
+        }
+    }
     let x = x_offset;
     let width = screen.width();
     screen.fill(x, 93, width, screen.height() - 93, BLACK());
@@ -3454,31 +3480,35 @@ fn draw_pet_app(screen: &Screen, ui: &Ui, x_offset: i64) {
     pet_pill(screen, x + 175, 492, 130, 48, "M", SURFACE_HI(), TEXT());
     pet_pill(screen, x + 330, 492, 130, 48, "L", SURFACE_HI(), TEXT());
 
-    // Pack actions.
-    pet_pill(screen, x + 20, 560, 150, 52, "Import", RED(), TEXT());
-    pet_pill(screen, x + 190, 560, 150, 52, "Remove", SURFACE_HI(), TEXT());
+    // Actions: pick files straight from the device, or re-install what is already there.
+    pet_pill(screen, x + 20, 560, 270, 52, "Pick pack files", RED(), TEXT());
+    pet_pill(screen, x + 302, 560, 158, 52, "Install", SURFACE_HI(), TEXT());
+    pet_pill(screen, x + 20, 622, 200, 46, "Remove pack", SURFACE_HI(), TEXT());
     let installed = pet::Pet::pack_present();
     screen.text(
         x + 44,
-        628,
+        686,
         if installed { "Imported pack installed" } else { "Using the built-in whale" },
         1,
         MUTED(),
     );
-    screen.text(x + 44, 654, "Put pack.json + atlas.png in", 1, MUTED());
-    screen.text(x + 44, 676, "/disk/import/pet, then tap Import", 1, MUTED());
+    screen.text(x + 44, 708, "Pick any .json + .png pair, or drop", 1, MUTED());
+    screen.text(x + 44, 730, "them in /disk/import/pet", 1, MUTED());
 
     match ui.pet_msg {
         1 => {
-            screen.text(x + 44, 712, "Pack imported", 1, GREEN());
+            screen.text(x + 44, 762, "Pack imported", 1, GREEN());
         }
         2 => {
-            screen.text(x + 44, 712, "Pack removed", 1, GREEN());
+            screen.text(x + 44, 762, "Pack removed", 1, GREEN());
         }
         3 => {
-            screen.text(x + 44, 712, "Import failed - check the pack files", 1, RED());
+            screen.text(x + 44, 762, "Import failed - check the pack files", 1, RED());
         }
         _ => {}
+    }
+    if ui.pet_pending {
+        screen.text(x + 44, 762, "Waiting for the picked files...", 1, MUTED());
     }
 }
 
@@ -3521,22 +3551,34 @@ fn pet_app_hit(ui: &mut Ui, point: (i64, i64)) {
         }
     }
     if py < 560 || py >= 612 {
+        if py >= 622 && py < 668 && px >= 20 && px < 220 {
+            if pet::Pet::uninstall() {
+                ui.pet = pet::Pet::load_default();
+                ui.pet_msg = 2;
+            } else {
+                ui.pet_msg = 3;
+            }
+        }
         return;
     }
-    if px >= 20 && px < 170 {
-        if pet::Pet::install_from("/disk/import/pet") {
-            ui.pet = pet::Pet::load_default();
-            ui.settings.pet = true;
-            ui.pet_msg = 1;
+    if px >= 20 && px < 290 {
+        // Let the user choose the files from anywhere on the device.
+        ui.pet_msg = 0;
+        if k::import_file("/disk/import/pet") {
+            ui.pet_pending = true;
+            ui.pet_poll_ms = 0;
         } else {
             ui.pet_msg = 3;
         }
-    } else if px >= 190 && px < 340 {
-        if pet::Pet::uninstall() {
-            ui.pet = pet::Pet::load_default();
-            ui.pet_msg = 2;
-        } else {
-            ui.pet_msg = 3;
+    } else if px >= 302 && px < 460 {
+        match pet::Pet::install_from("/disk/import/pet") {
+            pet::InstallResult::Ok => {
+                ui.pet = pet::Pet::load_default();
+                ui.settings.pet = true;
+                ui.pet_msg = 1;
+            }
+            pet::InstallResult::NoFiles => ui.pet_msg = 0,
+            pet::InstallResult::Invalid => ui.pet_msg = 3,
         }
     }
 }
