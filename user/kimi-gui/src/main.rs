@@ -718,6 +718,9 @@ struct Ui {
     /// True while waiting for the file picker to copy a pack in.
     pet_pending: bool,
     pet_poll_ms: u64,
+    /// True while waiting for the picker to deliver a 3D model.
+    pet3d_busy: bool,
+    pet3d_poll_ms: u64,
 }
 
 impl Ui {
@@ -759,6 +762,8 @@ impl Ui {
             pet_msg: 0,
             pet_pending: false,
             pet_poll_ms: 0,
+            pet3d_busy: false,
+            pet3d_poll_ms: 0,
         }
     }
 
@@ -1360,7 +1365,7 @@ pub extern "C" fn kimi_test_weather(json: u64, len: u64, mode: u64, out: u64) ->
     apps::weather_parse_test(data, mode, out) as u64
 }
 
-/// Host-only test hook: bounds-checked RGBA?????秋??B blit; returns rows written.
+/// Host-only test hook: bounds-checked RGBA????????B blit; returns rows written.
 #[no_mangle]
 #[cfg(not(target_os = "none"))]
 pub extern "C" fn kimi_test_blit(
@@ -3467,6 +3472,16 @@ fn draw_centered_pair(screen: &Screen, cx: i64, y: i64, a: &str, b: &str, color:
 fn draw_pet_app(screen: &Screen, ui: &mut Ui, x_offset: i64) {
     // After the user picks files the host copies them in asynchronously, so poll
     // until both halves are present and then install without another tap.
+    if ui.pet3d_busy {
+        let now = k::uptime_ms();
+        if now.saturating_sub(ui.pet3d_poll_ms) >= 400 {
+            ui.pet3d_poll_ms = now;
+            if pet3d::install_model_from("/disk/pet/import") {
+                ui.pet3d_busy = false;
+                ui.pet_msg = 1;
+            }
+        }
+    }
     if ui.pet_pending {
         let now = k::uptime_ms();
         if now.saturating_sub(ui.pet_poll_ms) >= 400 {
@@ -3532,7 +3547,17 @@ fn draw_pet_app(screen: &Screen, ui: &mut Ui, x_offset: i64) {
     // Actions: pick files straight from the device, or re-install what is already there.
     pet_pill(screen, x + 20, 560, 270, 52, "Pick pack files", RED(), TEXT());
     pet_pill(screen, x + 302, 560, 158, 52, "Install", SURFACE_HI(), TEXT());
-    pet_pill(screen, x + 20, 622, 200, 46, "Remove pack", SURFACE_HI(), TEXT());
+    pet_pill(screen, x + 20, 622, 190, 46, "Remove pack", SURFACE_HI(), TEXT());
+    pet_pill(
+        screen,
+        x + 220,
+        622,
+        240,
+        46,
+        if ui.pet3d_busy { "Picking..." } else { "Pick 3D model" },
+        RED_DIM(),
+        TEXT(),
+    );
     let installed = pet::Pet::pack_present();
     screen.text(
         x + 44,
@@ -3600,12 +3625,27 @@ fn pet_app_hit(ui: &mut Ui, point: (i64, i64)) {
         }
     }
     if py < 560 || py >= 612 {
-        if py >= 622 && py < 668 && px >= 20 && px < 220 {
-            if pet::Pet::uninstall() {
-                ui.pet = pet::Pet::load_default();
-                ui.pet_msg = 2;
-            } else {
-                ui.pet_msg = 3;
+        if py >= 622 && py < 668 {
+            if px >= 20 && px < 210 {
+                if pet::Pet::uninstall() {
+                    ui.pet = pet::Pet::load_default();
+                    ui.pet_msg = 2;
+                } else {
+                    ui.pet_msg = 3;
+                }
+                return;
+            }
+            if px >= 220 && px < 460 {
+                // Pick a .glb/.vrm from anywhere on the device.
+                ui.pet_msg = 0;
+                k::mkdir("/disk/pet/import");
+                if k::import_file("/disk/pet/import") {
+                    ui.pet3d_busy = true;
+                    ui.pet3d_poll_ms = 0;
+                } else {
+                    ui.pet_msg = 3;
+                }
+                return;
             }
         }
         return;

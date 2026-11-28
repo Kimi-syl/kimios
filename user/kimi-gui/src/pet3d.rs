@@ -566,6 +566,102 @@ pub fn draw(screen: &Screen, x: i64, y: i64, w: i64, h: i64, yaw: f32, pitch: f3
     true
 }
 
+/// Re-load the model from disk, discarding whatever is in the arena.
+pub fn reload() -> bool {
+    unsafe {
+        LOAD_ATTEMPTED = false;
+    }
+    model().reset();
+    ensure_model();
+    model().loaded
+}
+
+/// Copy the first `.glb`/`.vrm` found in `dir` to `/disk/pet/model.glb`.
+///
+/// This is what the "Pick 3D model" button uses: the Android picker drops the
+/// file into `dir`, then this promotes it to the path the renderer loads.
+pub fn install_model_from(dir: &str) -> bool {
+    static mut SRC: [u8; 1024 * 1024] = [0; 1024 * 1024];
+    let mut listing = [0u8; 1024];
+    let Some(n) = k::listdir(dir, &mut listing) else {
+        return false;
+    };
+    let listing = &listing[..n];
+    let mut found: Option<&[u8]> = None;
+    let mut off = 0usize;
+    while off < listing.len() {
+        let rest = &listing[off..];
+        let len = rest.iter().position(|&b| b == 0).unwrap_or(rest.len());
+        let name = &rest[..len];
+        if name.ends_with(b".glb") || name.ends_with(b".vrm") {
+            found = Some(name);
+            break;
+        }
+        off += len + 1;
+    }
+    let Some(name) = found else {
+        return false;
+    };
+    let Ok(name) = core::str::from_utf8(name) else {
+        return false;
+    };
+    // Build "<dir>/<name>".
+    let mut path = [0u8; 160];
+    let mut plen = 0usize;
+    for &b in dir.as_bytes() {
+        if plen < path.len() {
+            path[plen] = b;
+            plen += 1;
+        }
+    }
+    if plen > 0 && path[plen - 1] != b'/' && plen < path.len() {
+        path[plen] = b'/';
+        plen += 1;
+    }
+    for &b in name.as_bytes() {
+        if plen < path.len() {
+            path[plen] = b;
+            plen += 1;
+        }
+    }
+    let Ok(src_path) = core::str::from_utf8(&path[..plen]) else {
+        return false;
+    };
+
+    let Some(handle) = k::open(src_path) else {
+        return false;
+    };
+    let buf = unsafe { &mut *core::ptr::addr_of_mut!(SRC) };
+    let mut total = 0usize;
+    while total < buf.len() {
+        let got = k::read_file(handle, total, &mut buf[total..]);
+        if got == 0 {
+            break;
+        }
+        total += got;
+    }
+    k::close(handle);
+    if total == 0 {
+        return false;
+    }
+
+    k::mkdir("/disk/pet");
+    let Some(out) = k::create("/disk/pet/model.glb") else {
+        return false;
+    };
+    let written = k::write_file(out, 0, &buf[..total]);
+    k::close(out);
+    if written != total {
+        return false;
+    }
+    reload()
+}
+
+/// True when a model was loaded from `/disk/pet/model.glb` (not the placeholder).
+pub fn model_is_loaded() -> bool {
+    model().loaded
+}
+
 /// Drive the standard facial expressions: automatic blink plus a happy reaction
 /// after a tap. Uses the loader's preset lookup, so it works for VRM assets and
 /// for plain GLB exports that name their shape keys.
