@@ -15,10 +15,10 @@
   "baseline": 21
  },
  "contentBox": {
-  "x": 2,
-  "y": 4,
-  "w": 20,
-  "h": 18
+  "x": 3,
+  "y": 2,
+  "w": 21,
+  "h": 20
  },
  "animations": {
   "idle": {
