@@ -941,6 +941,8 @@ struct State {
     skin_ibm: i32,
     /// Morph-target names and VRM preset bindings gathered across both passes.
     morph: MorphBook,
+    /// True when the file declares the VRM 0.x extension (which faces -Z).
+    vrm0: bool,
 }
 
 const EMPTY_VIEW: View = View {
@@ -997,6 +999,7 @@ const EMPTY_STATE: State = State {
     nbone: 0,
     skin_ibm: -1,
     morph: MorphBook::empty(),
+    vrm0: false,
 };
 
 /// The one `State` record, kept in `.bss` instead of on the stack: at
@@ -1076,6 +1079,8 @@ pub fn load(read: &mut dyn ReadAt, size: u64, arena: &mut ModelArena) -> Result<
     if arena.primitive_count == 0 || arena.vertex_count == 0 {
         return Err(LoadError::Unsupported);
     }
+    // VRM 0.x models face -Z; rotate them to face the camera like glTF/VRM 1.0.
+    arena.yaw_offset = if st.vrm0 { core::f32::consts::PI } else { 0.0 };
     arena.recompute_bounds();
     arena.loaded = true;
     Ok(())
@@ -1744,7 +1749,7 @@ fn parse_extensions(s: &mut Src, st: &mut State) -> Result<(), LoadError> {
         };
         match &key[..n] {
             b"VRMC_vrm" => parse_vrmc_vrm(s, st)?,
-            b"VRM" => parse_vrm0(s, st)?,
+            b"VRM" => { st.vrm0 = true; parse_vrm0(s, st)? }
             _ => s.skip_value(MAX_DEPTH)?,
         }
     }

@@ -332,7 +332,7 @@ fn render_frame(arena: &ModelArena, yaw: f32, pitch: f32, bounce: f32) -> DrawSt
     cam.target = centre;
     cam.target.y -= bounce;
     cam.distance = extent * 2.2;
-    cam.yaw = yaw;
+    cam.yaw = yaw + arena.yaw_offset;
     cam.pitch = pitch;
     cam.update(RT_W as f32 / RT_H as f32);
 

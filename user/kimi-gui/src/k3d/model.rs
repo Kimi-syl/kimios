@@ -19,7 +19,7 @@ pub const MAX_MATERIALS: usize = 32;
 /// Node records (scene graph).
 pub const MAX_NODES: usize = 512;
 /// Texture slots.
-pub const MAX_TEXTURES: usize = 12;
+pub const MAX_TEXTURES: usize = 24;
 /// Longest edge of a decoded texture. Textures are box-downsampled on load.
 pub const TEX_MAX_DIM: usize = 128;
 
@@ -225,6 +225,9 @@ pub struct ModelArena {
     pub morph_entry_count: usize,
     /// Per-target weights, driven by the expression system each frame.
     pub morph_weights: [f32; MAX_MORPH_TARGETS],
+    /// Extra Y rotation applied by the renderer. VRM 0.x models face -Z while
+    /// VRM 1.0 / plain glTF face +Z, so the loader sets PI for the former.
+    pub yaw_offset: f32,
     /// Model-space bounds, used to frame the camera.
     pub min: Vec3,
     pub max: Vec3,
@@ -284,6 +287,7 @@ impl ModelArena {
             morph_entries: [MorphEntry { vertex: 0, delta: [0.0; 3] }; MAX_MORPH_ENTRIES],
             morph_entry_count: 0,
             morph_weights: [0.0; MAX_MORPH_TARGETS],
+            yaw_offset: 0.0,
             min: Vec3::new(0.0, 0.0, 0.0),
             max: Vec3::new(0.0, 1.0, 0.0),
             loaded: false,
@@ -298,6 +302,7 @@ impl ModelArena {
         self.node_count = 0;
         self.skin_count = 0;
         self.joint_count = 0;
+        self.yaw_offset = 0.0;
         self.morph_target_count = 0;
         self.morph_entry_count = 0;
         for w in self.morph_weights.iter_mut() {
