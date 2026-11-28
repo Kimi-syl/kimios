@@ -49,6 +49,8 @@ pub struct DrawParams<'a> {
     pub light: Vec3,
     /// Ambient term (floor for lit materials, base for unlit ones).
     pub ambient: f32,
+    /// Camera forward direction, used for the rim term.
+    pub view_dir: Vec3,
     /// Overrides material colour, for flat debug shading.
     pub flat_color: Option<u32>,
     /// Per-vertex morph deltas for this frame (expressions), indexed by vertex.
@@ -63,6 +65,115 @@ pub struct DrawStats {
     pub clipped: u32,
 }
 
+/// Inverted-hull outline pass: draws only back faces, expanded along their
+/// normals, in a flat colour. The model then draws over it, leaving a crisp
+/// silhouette ring ??the classic cel-shading look, at one extra pass.
+///
+/// Call this *before* [`draw`] on the same target.
+#[allow(clippy::too_many_arguments)]
+pub fn draw_outline(
+    target: &mut Target<'_>,
+    arena: &ModelArena,
+    mvp: Mat4,
+    skin: Option<&[Mat4]>,
+    morph: Option<&[Vec3]>,
+    expand: f32,
+    color: u32,
+) {
+    if expand <= 0.0 {
+        return;
+    }
+    let light = Vec3::new(0.0, 1.0, 0.0);
+    let view_dir = Vec3::new(0.0, 0.0, -1.0);
+    let mat = Material {
+        base_color: [1.0, 1.0, 1.0, 1.0],
+        texture: NO_TEXTURE,
+        alpha_mode: AlphaMode::Opaque,
+        alpha_cutoff: 0.5,
+        double_sided: true,
+        unlit: true,
+    };
+    let mut stats = DrawStats::default();
+
+    for p in 0..arena.primitive_count {
+        let prim = arena.primitives[p];
+        let first = prim.first_index as usize;
+        let count = prim.index_count as usize;
+        let mut i = 0usize;
+        while i + 2 < count {
+            let ia = arena.indices[first + i] as usize;
+            let ib = arena.indices[first + i + 1] as usize;
+            let ic = arena.indices[first + i + 2] as usize;
+            i += 3;
+            let (Some(va), Some(vb), Some(vc)) = (
+                arena.vertices.get(ia),
+                arena.vertices.get(ib),
+                arena.vertices.get(ic),
+            ) else {
+                continue;
+            };
+            let (pa, na) = skinned(morphed(va.pos, ia, morph), va.normal, va.joints, va.weights, skin);
+            let (pb, nb) = skinned(morphed(vb.pos, ib, morph), vb.normal, vb.joints, vb.weights, skin);
+            let (pc, nc) = skinned(morphed(vc.pos, ic, morph), vc.normal, vc.joints, vc.weights, skin);
+            // Push each vertex out along its own normal.
+            let pa = pa.add(na.normalised().scale(expand));
+            let pb = pb.add(nb.normalised().scale(expand));
+            let pc = pc.add(nc.normalised().scale(expand));
+
+            let tri = [clip(mvp, pa, na, va.uv), clip(mvp, pb, nb, vb.uv), clip(mvp, pc, nc, vc.uv)];
+            let mut poly = [ClipVert {
+                pos: Vec4::new(0.0, 0.0, 0.0, 0.0),
+                uv: [0.0; 2],
+                normal: Vec3::ZERO,
+            }; 4];
+            let n = clip_near(&tri, &mut poly);
+            if n < 3 {
+                continue;
+            }
+            let mut sv = [ScreenVert::default(); 4];
+            let mut visible = true;
+            for k in 0..n {
+                match project(&poly[k], target.w, target.h) {
+                    Some(s) => sv[k] = s,
+                    None => {
+                        visible = false;
+                        break;
+                    }
+                }
+            }
+            if !visible {
+                continue;
+            }
+            for k in 1..n - 1 {
+                let a = sv[0];
+                let b = sv[k];
+                let c = sv[k + 1];
+                let area = (b.x - a.x) * (c.y - a.y) - (c.x - a.x) * (b.y - a.y);
+                if area == 0.0 || area.is_nan() {
+                    continue;
+                }
+                // Keep back faces only (`draw` keeps the opposite winding).
+                if area < 0.0 {
+                    continue;
+                }
+                fill(
+                    target,
+                    &a,
+                    &b,
+                    &c,
+                    area,
+                    light,
+                    1.0,
+                    view_dir,
+                    &mat,
+                    None,
+                    Some(color),
+                    &mut stats,
+                );
+            }
+        }
+    }
+}
 /// Rasterise every primitive in the model.
 pub fn draw(params: DrawParams<'_>) -> DrawStats {
     let DrawParams {
@@ -72,6 +183,7 @@ pub fn draw(params: DrawParams<'_>) -> DrawStats {
         skin,
         light,
         ambient,
+        view_dir,
         flat_color,
         morph,
     } = params;
@@ -158,7 +270,7 @@ pub fn draw(params: DrawParams<'_>) -> DrawStats {
                 if !mat.double_sided && area > 0.0 {
                     continue;
                 }
-                if fill(target, &a, &b, &c, area, light, ambient, &mat, tex, flat_color, &mut stats) {
+                if fill(target, &a, &b, &c, area, light, ambient, view_dir, &mat, tex, flat_color, &mut stats) {
                     stats.drawn += 1;
                 }
             }
@@ -290,6 +402,7 @@ fn fill(
     area: f32,
     light: Vec3,
     ambient: f32,
+    view_dir: Vec3,
     mat: &Material,
     tex: Option<&Texture>,
     flat_color: Option<u32>,
@@ -370,8 +483,13 @@ fn fill(
                     let nx = (a.normal.x * wa + b.normal.x * wb + c.normal.x * wc) * iw;
                     let ny = (a.normal.y * wa + b.normal.y * wb + c.normal.y * wc) * iw;
                     let nz = (a.normal.z * wa + b.normal.z * wb + c.normal.z * wc) * iw;
-                    let ndl = Vec3::new(nx, ny, nz).normalised().dot(light).max(0.0);
-                    ambient + ndl * 0.45
+                    let n = Vec3::new(nx, ny, nz).normalised();
+                    let ndl = n.dot(light).max(0.0);
+                    // Rim/fresnel term: lifts the silhouette, which reads as a
+                    // stylised outline without a second render pass.
+                    let ndv = super::abs(n.dot(view_dir));
+                    let rim = (1.0 - ndv).max(0.0);
+                    ambient + ndl * 0.55 + rim * rim * 0.38
                 };
                 (
                     texel[0] as f32 * mat.base_color[0] * shade,

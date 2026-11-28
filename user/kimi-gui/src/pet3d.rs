@@ -15,8 +15,12 @@ use crate::k3d::skin::{self, Pose, BONE_COUNT};
 use crate::k3d::{Camera, Mat4, Quat, Target, Vec3, MAX_JOINTS, MAX_TRIS, MAX_VERTS};
 
 /// Offscreen render target size. Fixed: the blit scales it to the pet's rect.
-pub const RT_W: usize = 192;
-pub const RT_H: usize = 256;
+/// Outline expansion in model units (the character is ~1.7 m tall).
+const OUTLINE_SCALE: f32 = 0.009;
+/// Outline colour: near-black with a hint of the palette's blue.
+const OUTLINE_COLOR: u32 = 0xb8c2d8;
+pub const RT_W: usize = 384;
+pub const RT_H: usize = 512;
 
 static mut COLOR: [u32; RT_W * RT_H] = [0; RT_W * RT_H];
 static mut DEPTH: [u16; RT_W * RT_H] = [0; RT_W * RT_H];
@@ -326,6 +330,13 @@ fn render_frame(arena: &ModelArena, yaw: f32, pitch: f32, bounce: f32) -> DrawSt
     cam.update(RT_W as f32 / RT_H as f32);
 
     let mvp = cam.proj.mul(cam.view);
+    // Camera forward, for rim lighting.
+    let camera_dir = Vec3::new(
+        -crate::k3d::sin(cam.yaw) * crate::k3d::cos(cam.pitch),
+        -crate::k3d::sin(cam.pitch),
+        -crate::k3d::cos(cam.yaw) * crate::k3d::cos(cam.pitch),
+    )
+    .normalised();
 
     // Skinned models: joint matrices carry the pose, so the model matrix stays
     // identity and the vertex shader only applies `world * inverse_bind`.
@@ -348,15 +359,28 @@ fn render_frame(arena: &ModelArena, yaw: f32, pitch: f32, bounce: f32) -> DrawSt
         None => return DrawStats::default(),
     };
     target.clear(0);
+    let morph = update_morphs();
+    // Cel outline first: back faces pushed out along their normals, then the
+    // model draws over them and leaves a crisp silhouette ring.
+    raster::draw_outline(
+        &mut target,
+        arena,
+        mvp,
+        skin_slice,
+        morph,
+        OUTLINE_SCALE,
+        OUTLINE_COLOR,
+    );
     let stats = raster::draw(DrawParams {
         target: &mut target,
         arena,
         mvp,
         skin: skin_slice,
         light: Vec3::new(0.35, 0.62, 0.70).normalised(),
+        view_dir: camera_dir,
         ambient: 0.80,
         flat_color: None,
-        morph: update_morphs(),
+        morph,
     });
     unsafe {
         LAST_STATS = stats;
@@ -446,7 +470,9 @@ pub fn draw(screen: &Screen, x: i64, y: i64, w: i64, h: i64, yaw: f32, pitch: f3
 
     render_frame(arena, yaw, pitch, bounce_offset());
 
-    // Blit, treating "depth untouched" as transparent.
+    // Blit with a box filter: the render target is larger than the display rect,
+    // so averaging the covered source pixels gives anti-aliased edges instead of
+    // the stair-stepping a nearest-neighbour copy would produce.
     let dst = screen.back_ptr();
     let stride = screen.stride_pixels();
     let (pw, ph) = screen.physical_size();
@@ -460,35 +486,80 @@ pub fn draw(screen: &Screen, x: i64, y: i64, w: i64, h: i64, yaw: f32, pitch: f3
         return false;
     }
 
-    let sx_scale = RT_W as f32 / dw as f32;
-    let sy_scale = RT_H as f32 / dh as f32;
+    let color = unsafe { &*core::ptr::addr_of!(COLOR) };
+    let depth = unsafe { &*core::ptr::addr_of!(DEPTH) };
+
+    // Soft contact shadow directly under the character, so it sits on the
+    // wallpaper instead of floating.
+    let shadow_cx = dw as f32 * 0.5;
+    let shadow_cy = dh as f32 * 0.9;
+    let shadow_rx = dw as f32 * 0.33;
+    let shadow_ry = dh as f32 * 0.085;
 
     for oy in 0..dh {
-        let ty = (oy as f32 * sy_scale) as usize;
-        if ty >= RT_H {
-            continue;
-        }
         let dy = py0 + oy;
         if dy < 0 || dy >= ph {
             continue;
         }
+        let sy0 = (oy as u64 * RT_H as u64 / dh as u64) as usize;
+        let sy1 = (((oy as u64 + 1) * RT_H as u64 / dh as u64) as usize).max(sy0 + 1);
         for ox in 0..dw {
-            let tx = (ox as f32 * sx_scale) as usize;
-            if tx >= RT_W {
-                continue;
-            }
             let dx = px0 + ox;
             if dx < 0 || dx >= pw {
                 continue;
             }
-            let si = ty * RT_W + tx;
-            if unsafe { (*core::ptr::addr_of!(DEPTH))[si] } == crate::k3d::DEPTH_FAR {
-                continue;
+            let sx0 = (ox as u64 * RT_W as u64 / dw as u64) as usize;
+            let sx1 = (((ox as u64 + 1) * RT_W as u64 / dw as u64) as usize).max(sx0 + 1);
+
+            // Average only the samples the rasteriser actually wrote.
+            let mut r = 0u32;
+            let mut g = 0u32;
+            let mut b = 0u32;
+            let mut n = 0u32;
+            for sy in sy0..sy1.min(RT_H) {
+                let row = sy * RT_W;
+                for sx in sx0..sx1.min(RT_W) {
+                    let si = row + sx;
+                    if depth[si] == crate::k3d::DEPTH_FAR {
+                        continue;
+                    }
+                    let c = color[si];
+                    r += (c >> 16) & 0xff;
+                    g += (c >> 8) & 0xff;
+                    b += c & 0xff;
+                    n += 1;
+                }
             }
-            let rgb = unsafe { (*core::ptr::addr_of!(COLOR))[si] } & 0x00ff_ffff;
-            unsafe {
-                let p = dst.offset((dy * stride + dx) as isize);
-                *p = rgb;
+
+            let mut out_rgb: Option<u32> = None;
+            if n > 0 {
+                out_rgb = Some(((r / n) << 16) | ((g / n) << 8) | (b / n));
+            } else {
+                // No geometry here: fall back to the shadow if this pixel is
+                // inside its ellipse.
+                let nx = (ox as f32 - shadow_cx) / shadow_rx.max(1.0);
+                let ny = (oy as f32 - shadow_cy) / shadow_ry.max(1.0);
+                let rr = nx * nx + ny * ny;
+                if rr < 1.0 {
+                    let a = (1.0 - rr) * 0.42;
+                    let dst_index = (dy as i64 * stride + dx as i64) as isize;
+                    let base = unsafe { *dst.offset(dst_index) };
+                    let dr = ((base >> 16) & 0xff) as f32;
+                    let dg = ((base >> 8) & 0xff) as f32;
+                    let db = (base & 0xff) as f32;
+                    out_rgb = Some(
+                        (((dr * (1.0 - a)) as u32) << 16)
+                            | (((dg * (1.0 - a)) as u32) << 8)
+                            | ((db * (1.0 - a)) as u32),
+                    );
+                }
+            }
+
+            if let Some(rgb) = out_rgb {
+                unsafe {
+                    let p = dst.offset((dy * stride + dx) as isize);
+                    *p = rgb & 0x00ff_ffff;
+                }
             }
         }
     }
