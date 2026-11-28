@@ -16,6 +16,8 @@ mod ai;
 mod chat;
 mod opencode;
 mod pet;
+mod k3d;
+mod pet3d;
 
 use core::panic::PanicInfo;
 use core::sync::atomic::{AtomicU64, Ordering};
@@ -623,6 +625,8 @@ struct Settings {
     brightness: i64,
     animations: bool,
     pet: bool,
+    /// Render the pet as real-time 3D instead of the sprite pack.
+    pet3d: bool,
 }
 
 impl Settings {
@@ -636,6 +640,7 @@ impl Settings {
             brightness: 70,
             animations: false,
             pet: true,
+            pet3d: true,
         }
     }
 }
@@ -1348,7 +1353,7 @@ pub extern "C" fn kimi_test_weather(json: u64, len: u64, mode: u64, out: u64) ->
     apps::weather_parse_test(data, mode, out) as u64
 }
 
-/// Host-only test hook: bounds-checked RGBA→XRGB blit; returns rows written.
+/// Host-only test hook: bounds-checked RGBA??鞊?B blit; returns rows written.
 #[no_mangle]
 #[cfg(not(target_os = "none"))]
 pub extern "C" fn kimi_test_blit(
@@ -2816,14 +2821,26 @@ fn draw_home(
         }
     }
 
-    if ui.settings.pet && ui.pet.valid && ui.folder_view.is_none() {
-        let (ax, ay) = ui.pet.clamped_anchor(
-            screen,
-            width - 46,
-            height - 128 + y_offset,
-            crate::theme::pet_size() as i64,
-        );
-        ui.pet.draw(screen, ax, ay);
+    if ui.settings.pet && ui.folder_view.is_none() {
+        if ui.settings.pet3d {
+            // Offscreen 3D render blitted 1:1 into the pet's rect.
+            let pct = crate::theme::pet_size() as i64;
+            let hgt = (120 * pct.min(180) / 100).clamp(60, 216);
+            let wid = hgt * 3 / 4;
+            let px = width - 40 - wid;
+            let py = height - 110 - hgt + y_offset;
+            let t = k::uptime_ms();
+            pet3d::update_pose(ui.pet.state(), (t as f32) * 0.001);
+            pet3d::draw(screen, px, py, wid, hgt, (t as f32) * 0.0007, 0.10);
+        } else if ui.pet.valid {
+            let (ax, ay) = ui.pet.clamped_anchor(
+                screen,
+                width - 46,
+                height - 128 + y_offset,
+                crate::theme::pet_size() as i64,
+            );
+            ui.pet.draw(screen, ax, ay);
+        }
     }
     draw_home_indicator(screen);
 }

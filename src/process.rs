@@ -18,8 +18,10 @@ use crate::{diskfs, elf, mmu, pe, println, ramfs};
 pub const MAX_PROCESSES: usize = 16;
 pub const MAX_FDS: usize = 8;
 /// User heap window: `brk` grows page by page from here.
-pub const USER_HEAP_START: u64 = 0x6080_0000;
-pub const USER_HEAP_LIMIT: u64 = 0x60C0_0000;
+/// Must clear every user image (the GUI's `.bss` ends near 0x6149_0000) and stay
+/// below the PE thunk page at 0x6300_0000.
+pub const USER_HEAP_START: u64 = 0x6210_0000;
+pub const USER_HEAP_LIMIT: u64 = 0x62C0_0000;
 /// Anonymous `mmap` region for Linux processes (grows upward).
 pub const LINUX_MMAP_START: u64 = 0x5000_0000;
 const LINUX_MMAP_LIMIT: u64 = 0x6000_0000;

@@ -13,8 +13,10 @@ use crate::{allocator, mmu, println};
 
 const PAGE_SIZE: u64 = 4096;
 
-/// User stack lives in its own 2 MiB block above the image.
-const USER_STACK_VA: u64 = 0x6100_0000;
+/// User stack block. Must sit above every user image: the GUI's `.bss` alone is
+/// ~19 MB, so a low stack window ends up mapped *over* the image's own BSS and
+/// the two silently corrupt each other.
+const USER_STACK_VA: u64 = 0x6200_0000;
 const USER_STACK_PAGES: u64 = 16;
 
 pub struct LoadedImage {
@@ -62,6 +64,12 @@ fn load_aligned(
 
         if memory_size == 0 {
             continue;
+        }
+
+        // The stack is mapped after the image, so an image that reaches into the
+        // stack window would have its own pages replaced. Fail loudly instead.
+        if virtual_address + memory_size as u64 > USER_STACK_VA {
+            return Err("image overlaps the user stack window");
         }
 
         let file_end = file_offset
